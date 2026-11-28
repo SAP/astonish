@@ -1,0 +1,14 @@
+{
+  "description": "Controlled native rejection of a returned two-call batch; not a user-run replay. Native formatter equality is checked in pkg/api. Repeat frame then restore to exercise terminal report identity.",
+  "run_id": "11111111-1111-4111-8111-111111111111",
+  "expected_reports": 1,
+  "event": {
+    "id": "checkpoint-failure-report-fixture",
+    "invocationId": "bot-report:11111111-1111-4111-8111-111111111111",
+    "author": "bot_runtime",
+    "content": {
+      "role": "model",
+      "parts": [{"text": "## Run report — failed\n\n### Model response could not be processed\n\nThe model returned multiple tool requests in one response, which could not be processed because this run supports one tool request at a time.\n\nNone of the tool requests from that response were executed. Earlier work may already have completed; its recorded evidence is retained below.\n\nNo approval is needed for this failure. This run has stopped and has not been automatically retried. Review any earlier work before sending a new request.\n\n### Technical details\n\n    bot capability unsupported: checkpoint capture rejected multiple tool calls (count=2); serial tool calls required\n\nRun: 11111111-1111-4111-8111-111111111111\n"}]
+    }
+  }
+}

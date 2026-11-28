@@ -59,6 +59,11 @@ type Config struct {
 	// Default: "ghcr.io/sap/astonish-sandbox-openshell:latest"
 	SandboxImage string
 
+	// BotHomeMountsEnabled opts into a gateway supporting PVC volume_mounts
+	// with sub_path. Operators must provision the retained writable claim.
+	BotHomeMountsEnabled bool
+	BotHomeClaimName     string
+
 	// AppConfig stores the full OpenShell config from app_config.yaml.
 	AppConfig config.SandboxOpenShellConfig
 }
@@ -104,15 +109,17 @@ func init() {
 		}
 		osCfg := fc.OpenShell
 		cfg := Config{
-			Sessions:       fc.Sessions,
-			GatewayAddr:    osCfg.GatewayAddr,
-			GatewayTLS:     osCfg.OpenShellGatewayTLS(),
-			ClientCertPath: osCfg.ClientCertPath,
-			ClientKeyPath:  osCfg.ClientKeyPath,
-			CACertPath:     osCfg.CACertPath,
-			AuthToken:      osCfg.AuthToken,
-			SandboxImage:   osCfg.SandboxImage,
-			AppConfig:      osCfg,
+			Sessions:             fc.Sessions,
+			GatewayAddr:          osCfg.GatewayAddr,
+			GatewayTLS:           osCfg.OpenShellGatewayTLS(),
+			ClientCertPath:       osCfg.ClientCertPath,
+			ClientKeyPath:        osCfg.ClientKeyPath,
+			CACertPath:           osCfg.CACertPath,
+			AuthToken:            osCfg.AuthToken,
+			SandboxImage:         osCfg.SandboxImage,
+			BotHomeMountsEnabled: osCfg.BotHomeMountsEnabled,
+			BotHomeClaimName:     osCfg.BotHomeClaimName,
+			AppConfig:            osCfg,
 		}
 		// Apply defaults before creating the gRPC client.
 		cfg.applyDefaults()

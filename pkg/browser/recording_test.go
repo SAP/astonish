@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,13 @@ func TestStartRecording_SandboxPathViaHook(t *testing.T) {
 	m := NewManager(DefaultConfig())
 	m.SandboxEnabled = true
 	m.containerName = "sess-ctr"
+	m.SetSessionID("session")
+	m.StatArtifactFunc = func(_ context.Context, id, path string) (int64, error) {
+		if id != "session" || path != "/tmp/astonish-recordings/demo.mp4" {
+			t.Fatalf("incorrect artifact scope %s %s", id, path)
+		}
+		return 42, nil
+	}
 
 	var gotDisplay, gotPath string
 	var gotW, gotH int

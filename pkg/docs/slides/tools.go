@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"github.com/SAP/astonish/pkg/question"
 	"html"
 	"math"
 	"path"
@@ -1772,10 +1773,11 @@ type AskUserOption struct {
 
 // AskUserArgs defines the ask_user tool input.
 type AskUserArgs struct {
-	Kind       string             `json:"kind" jsonschema:"'yesno' for a Yes/No question, or 'select' for a single-choice pick-one."`
-	Prompt     string             `json:"prompt" jsonschema:"The question to show the user (one clear sentence)."`
-	Options    []AskUserOption    `json:"options,omitempty" jsonschema:"For kind='select': the choices. Omit for 'yesno'. When slidesTemplate is set you may omit options entirely to auto-generate one option per template variant."`
-	Thumbnails []AskUserThumbnail `json:"thumbnails,omitempty" jsonschema:"Optional per-option thumbnails (match by optionId) for a visual picker. Usually unnecessary for slides — prefer slidesTemplate below, which attaches live variant previews automatically."`
+	Kind              string             `json:"kind" jsonschema:"'yesno' for Yes/No, 'select' for one choice, or 'text' for free text (1-4096 Unicode code points)."`
+	AllowCustomAnswer *bool              `json:"allow_custom_answer,omitempty" jsonschema:"Only for select: allow custom text in addition to listed choices. Omit to require a listed option."`
+	Prompt            string             `json:"prompt" jsonschema:"The question to show the user (one clear sentence)."`
+	Options           []AskUserOption    `json:"options,omitempty" jsonschema:"For kind='select': the choices. Omit for 'yesno'. When slidesTemplate is set you may omit options entirely to auto-generate one option per template variant."`
+	Thumbnails        []AskUserThumbnail `json:"thumbnails,omitempty" jsonschema:"Optional per-option thumbnails (match by optionId) for a visual picker. Usually unnecessary for slides — prefer slidesTemplate below, which attaches live variant previews automatically."`
 	// Slides convenience: for a slide-variant picker, set slidesTemplate (and
 	// optionally slidesKind) instead of copying markup into thumbnails. ask_user
 	// then calls get_template_variant_previews itself and attaches a live
@@ -1803,12 +1805,13 @@ type AskUserArgs struct {
 // [chat_question] card. It is also a normal tool result the model reads: the
 // Message tells the model to wait for the user's next message (their answer).
 type AskUserResult struct {
-	Status     string                 `json:"status"`
-	QuestionID string                 `json:"questionId"`
-	Kind       string                 `json:"kind"`
-	Prompt     string                 `json:"prompt"`
-	Options    []AskUserOptionPayload `json:"options,omitempty"`
-	Message    string                 `json:"message"`
+	AllowCustomAnswer *bool                  `json:"allow_custom_answer,omitempty"`
+	Status            string                 `json:"status"`
+	QuestionID        string                 `json:"questionId"`
+	Kind              string                 `json:"kind"`
+	Prompt            string                 `json:"prompt"`
+	Options           []AskUserOptionPayload `json:"options,omitempty"`
+	Message           string                 `json:"message"`
 }
 
 // AskUserOptionPayload is one option plus its resolved thumbnail in the result.
@@ -1821,8 +1824,11 @@ type AskUserOptionPayload struct {
 
 func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 	kind := strings.TrimSpace(args.Kind)
-	if kind != "yesno" && kind != "select" {
-		return AskUserResult{}, fmt.Errorf("kind must be 'yesno' or 'select'")
+	if question.Kind(kind) != question.YesNo && question.Kind(kind) != question.Select && question.Kind(kind) != question.Text {
+		return AskUserResult{}, fmt.Errorf("kind must be 'yesno', 'select', or 'text'")
+	}
+	if args.AllowCustomAnswer != nil && question.Kind(kind) != question.Select {
+		return AskUserResult{}, fmt.Errorf("allow_custom_answer is only valid for select")
 	}
 	prompt := strings.TrimSpace(args.Prompt)
 	if prompt == "" {
@@ -2037,13 +2043,21 @@ func askUser(ctx context.Context, args AskUserArgs) (AskUserResult, error) {
 	// reconnects; derived from kind+prompt.
 	sum := sha256.Sum256([]byte(kind + "|" + prompt))
 	qid := "q-" + fmt.Sprintf("%x", sum)[:12]
+	validation := question.Question{Kind: question.Kind(kind), Prompt: prompt, AllowCustomAnswer: args.AllowCustomAnswer}
+	for _, o := range options {
+		validation.Options = append(validation.Options, question.Option{ID: o.ID, Label: o.Label})
+	}
+	if err := validation.Validate(); err != nil {
+		return AskUserResult{}, err
+	}
 	return AskUserResult{
-		Status:     "ok",
-		QuestionID: qid,
-		Kind:       kind,
-		Prompt:     prompt,
-		Options:    options,
-		Message:    "Question shown to the user. Wait for their reply — the user's next message is their answer; do not proceed until they respond.",
+		AllowCustomAnswer: args.AllowCustomAnswer,
+		Status:            "ok",
+		QuestionID:        qid,
+		Kind:              kind,
+		Prompt:            prompt,
+		Options:           options,
+		Message:           "Question shown to the user. Wait for their reply — the user's next message is their answer; do not proceed until they respond.",
 	}, nil
 }
 

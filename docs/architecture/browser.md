@@ -89,6 +89,14 @@ Browser persists across tool calls within a session
 Explicit close or session end: browser cleanup
 ```
 
+### Local browser reuse
+
+In non-sandbox mode, after the explicit remote-CDP route, the manager checks the configured persistent profile's `DevToolsActivePort`. A valid loopback WebSocket connection and `Browser.getVersion` handshake allow reuse of that profile's running Chromium, preserving existing tabs and session state. Discovery never scans arbitrary debugging ports or attaches to unrelated browser profiles. Missing, malformed, or stale endpoint files fall through to normal launch; a post-launch-error check also handles another manager starting the profile concurrently.
+
+A borrowed browser is not process-owned: reconnect/reset and cleanup close its CDP socket rather than sending `Browser.close` or killing the owner's process. Incognito contexts created by the borrowing manager are disposed on detach. Sandbox and explicit remote-CDP routing remain separate. Headed-to-headless fallback constructs a fresh, identically configured Rod launcher because launcher objects are single-use even after a failed launch; failures preserve the original cause rather than masking it with `already launched`.
+
+Live regression command: `ASTONISH_LOCAL_BROWSER_ACCEPTANCE=1 go test ./pkg/browser -run '^TestLocal' -count=1 -v`. This starts isolated real Chromium, reuses it from a second manager, checks tab-state preservation and navigation, and verifies detach leaves the owner's browser alive.
+
 ### CAPTCHA Detection
 
 JavaScript-based detection checks for:
@@ -146,6 +154,21 @@ Invariants:
 | `browser_fullscreen` | CDP `Browser.setWindowBounds` fullscreen (F11 fallback). Minimizes Chromium chrome; x11grab still captures the display |
 
 Recommended order: open app → fullscreen → start recording / segment → highlight → move/click → hold. See `docs/architecture/drill.md` (tutorial recording order).
+
+### Concurrent response-capture generations
+
+`CDPResponseCapture` in `pkg/browser/manager.go` observes actual page network
+responses; it never repeats requests from the daemon. Every Start owns a unique,
+monotonically advancing generation and cancellable initialization. A later Start
+or Stop invalidates prior initialization and listeners before they can install or
+publish. Stale setup returns `ErrResponseCaptureSuperseded`; it cannot replace the
+current listener or repopulate a stopped capture. Stop also invalidates an in-flight
+Start even if no listener has finished installing. Callbacks check their captured
+generation, not reusable response-buffer counters. Only the current generation
+publishes browser-cookie/TLS/session-routed responses. Empty/error captures do not
+invent successful responses. This is distinct from ffmpeg display recording.
+Bounded deterministic CDP Start/Start and Start/Stop fixtures establish this ownership
+boundary, not physical sandbox/browser deployment or website reliability.
 
 ### Screenshot Handling
 

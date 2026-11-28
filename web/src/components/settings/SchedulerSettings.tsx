@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Save, AlertCircle, Check, Play, Trash2, Clock, Loader2, CheckCircle, XCircle, Pause, ChevronRight, ChevronDown, X, AlertTriangle, Users, Mail, MessageSquare, Hash, Upload, Download } from 'lucide-react'
 import { saveFullConfigSection, hintStyle, sectionBorderStyle, saveButtonStyle } from './settingsApi'
 import { teamFetch } from '../../api/teamContext'
+import { botPath } from '../bots/botRoute'
 
 // --- Types ---
 
@@ -29,7 +30,10 @@ interface SchedulerJob {
   }
   owner_id?: string
   consecutive_failures?: number
+  bot_managed?: boolean
   payload?: {
+    bot_id?: string
+    bot_trigger_id?: string
     instructions?: string
     flow?: string
     params?: Record<string, unknown>
@@ -474,6 +478,12 @@ export default function SchedulerSettings({ config, onSaved, teamSlug, isPlatfor
     return (
       <div className="space-y-2">
         {sectionJobs.map(job => {
+          if (job.bot_managed || job.payload?.bot_id) return <article key={job.id} aria-label="Bot-managed schedule" className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
+            <h3 className="font-medium">{job.name}</h3>
+            <p className="text-sm text-muted-foreground">Bot-managed schedule · {job.enabled ? 'enabled' : 'disabled'} · {job.schedule?.cron} {job.schedule?.timezone}</p>
+            <p className="text-sm">Manage this schedule in its Bot workspace. General Settings cannot edit, run, delete, promote or fork it.</p>
+            {job.payload?.bot_id && (job.scope === 'personal' || job.scope === 'team') ? <a className="text-primary underline" href={`#${botPath(job.payload.bot_id, job.scope)}`}>Open Bot</a> : <p>Bot navigation unavailable for this scope.</p>}
+          </article>
           const isExpanded = expandedJob === job.id
           const isRunning = runningJob === job.id
           const isPublishing = publishingJob === job.id

@@ -219,12 +219,11 @@ func TestIntegration_X9_AnnouncePlanSuppressed(t *testing.T) {
 			t.Error("announce_plan tool_call should be suppressed from event stream")
 		}
 	}
-	for _, ev := range eventsOfType(events, "tool_result") {
-		name, _ := ev.Data["name"].(string)
-		if name == "announce_plan" {
-			t.Error("announce_plan tool_result should be suppressed from event stream")
-		}
-	}
+	// This fixture has no plan binding: the gate rejects the call. Keep that
+	// rejection visible; suppressing it fabricated an apparently accepted plan.
+	result := assertHasEvent(t, events, "tool_result")
+	assertEventData(t, result, "name", "announce_plan")
+	assertNoEvent(t, events, "subtask_progress")
 
 	// But the text response should still appear
 	assertHasEvent(t, events, "text")

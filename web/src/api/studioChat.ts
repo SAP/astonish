@@ -63,6 +63,7 @@ export interface SessionModelStatus {
 }
 
 export interface ConnectChatParams {
+  approvedPlanExecution?: boolean
   sessionId?: string
   message?: string
   attachments?: AttachmentPayload[]
@@ -256,7 +257,77 @@ export async function fetchSubtaskEvents(sessionId: string, selector: SubtaskSel
   return data.events
 }
 
-export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {
+export interface SSEFrame {
+  event: string
+  id: string
+  data: string
+}
+
+// All three chat transports share framing and reader ownership. Callers retain
+// JSON validation and durable cursor policy; an incomplete EOF frame is discarded.
+export async function readSSEStream(body: ReadableStream<Uint8Array>, signal: AbortSignal, onFrame: (frame: SSEFrame) => void): Promise<void> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let event = 'message', id = ''
+  let data: string[] = []
+  const cancel = () => { void reader.cancel().catch(() => {}) }
+  signal.addEventListener('abort', cancel, { once: true })
+  const line = (text: string) => {
+    if (text === '') {
+      const frame = { event, id, data: data.join('\n') }
+      const hasData = data.length > 0
+      event = 'message'; id = ''; data = []
+      if (hasData && !signal.aborted) onFrame(frame)
+      return
+    }
+    if (text.startsWith(':')) return
+    const colon = text.indexOf(':')
+    const key = colon < 0 ? text : text.slice(0, colon)
+    const value = colon < 0 ? '' : text.slice(colon + 1).replace(/^ /, '')
+    if (key === 'event') event = value || 'message'
+    else if (key === 'id' && !value.includes('\0')) id = value
+    else if (key === 'data') data.push(value)
+  }
+  const consume = (eof: boolean) => {
+    let start = 0
+    for (let i = 0; i < buffer.length; i++) {
+      if (buffer[i] !== '\n' && buffer[i] !== '\r') continue
+      if (buffer[i] === '\r' && i === buffer.length - 1 && !eof) break
+      line(buffer.slice(start, i))
+      if (buffer[i] === '\r' && buffer[i + 1] === '\n') i++
+      start = i + 1
+      if (signal.aborted) break
+    }
+    buffer = buffer.slice(start)
+  }
+  try {
+    while (!signal.aborted) {
+      const { value, done } = await reader.read()
+      if (signal.aborted) break
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      consume(done)
+      if (done) break
+    }
+  } finally {
+    signal.removeEventListener('abort', cancel)
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+}
+
+function dispatchChatFrame(frame: SSEFrame, onEvent: SSEEventCallback): void {
+  let data: Record<string, unknown>
+  try {
+    data = JSON.parse(frame.data)
+  } catch {
+    console.error('Failed to parse SSE data')
+    return
+  }
+  onEvent(frame.event, data)
+}
+
+export function connectChat({ sessionId, message, approvedPlanExecution, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {
   const controller = new AbortController()
 
   const run = async () => {
@@ -265,6 +336,7 @@ export function connectChat({ sessionId, message, attachments, systemContext, pl
         sessionId: sessionId || '',
         message: message || '',
         autoApprove: !!autoApprove,
+        ...(approvedPlanExecution ? { approvedPlanExecution: true } : {}),
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
         ...(memoryScope ? { memoryScope } : {}),
@@ -294,42 +366,8 @@ export function connectChat({ sessionId, message, attachments, systemContext, pl
         throw new Error(text || `HTTP ${response.status}`)
       }
 
-      const reader = response.body!.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const blocks = buffer.split('\n\n')
-        buffer = blocks.pop()!
-
-        for (const block of blocks) {
-          if (!block.trim()) continue
-          const lines = block.split('\n')
-          let eventType = 'message'
-          let dataStr = ''
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim()
-            } else if (line.startsWith('data: ')) {
-              dataStr = line.slice(6)
-            }
-          }
-
-          if (dataStr) {
-            try {
-              const data = JSON.parse(dataStr)
-              onEvent(eventType, data)
-            } catch (e) {
-              console.error('Failed to parse SSE data:', e, dataStr)
-            }
-          }
-        }
-      }
+      if (!response.body) throw new Error('Chat stream unavailable')
+      await readSSEStream(response.body, controller.signal, frame => dispatchChatFrame(frame, onEvent))
 
       if (onDone) onDone()
     } catch (err) {
@@ -390,42 +428,8 @@ export function connectChatStream({ sessionId, onEvent, onError, onDone }: {
         throw new Error(text || `HTTP ${response.status}`)
       }
 
-      const reader = response.body!.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const blocks = buffer.split('\n\n')
-        buffer = blocks.pop()!
-
-        for (const block of blocks) {
-          if (!block.trim()) continue
-          const lines = block.split('\n')
-          let eventType = 'message'
-          let dataStr = ''
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim()
-            } else if (line.startsWith('data: ')) {
-              dataStr = line.slice(6)
-            }
-          }
-
-          if (dataStr) {
-            try {
-              const data = JSON.parse(dataStr)
-              onEvent(eventType, data)
-            } catch (e) {
-              console.error('Failed to parse SSE data:', e, dataStr)
-            }
-          }
-        }
-      }
+      if (!response.body) throw new Error('Chat stream unavailable')
+      await readSSEStream(response.body, controller.signal, frame => dispatchChatFrame(frame, onEvent))
 
       if (onDone) onDone()
     } catch (err) {

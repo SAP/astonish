@@ -6,6 +6,10 @@ Flows are YAML-defined agent workflows that execute as deterministic node graphs
 
 Flows are executed by the `AstonishAgent` and can also be invoked from ChatAgent via the `run_flow` tool.
 
+## Bot flow adapter
+
+`launcher.BotRunFlowTool` uses the existing `AstonishAgent` and `InteractiveFlowRunner` against injected owner personal/team stores, without filesystem fallback. It receives the already-bound child catalogue and budgeted model; flow auto-approval cannot bypass Bot action policy or resolve credentials before authorization. Input nodes return `waiting_for_input` and resume from supplied parameters within the current in-memory attempt; completed/error sessions are cleaned up. This is not a durable crash-resumable flow checkpoint. Nested `run_flow` is excluded from the child catalogue and `drill`/`drill_suite` YAML is rejected. See [production adapters](bot-production-adapters.md); these restrictions do not change ordinary Chat flow execution.
+
 ## Key Design Decisions
 
 ### Why YAML for Flow Definitions

@@ -6,8 +6,50 @@ package backend
 import (
 	"context"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+// CodeThemePreferencesBackend is an optional local-only UI preference capability.
+// It does not extend Backend or add a remote transport contract.
+type CodeThemePreferencesBackend interface {
+	LoadCodeThemePreference(context.Context) (string, error)
+	SaveCodeThemePreference(context.Context, string) error
+}
+
+// CodePermissionScope identifies only revocable local Code grants.
+type CodePermissionScope string
+
+const (
+	CodePermissionPlanFullAccess    CodePermissionScope = "plan_full_access"
+	CodePermissionSessionAllFolders CodePermissionScope = "session_all_folders"
+)
+
+type CodePermissionSource string
+
+const (
+	CodePermissionSourceCurrent CodePermissionSource = "current_approvals"
+	CodePermissionSourcePlan    CodePermissionSource = "plan_full_access"
+	CodePermissionSourceSession CodePermissionSource = "session_all_folders"
+	CodePermissionSourceCLI     CodePermissionSource = "cli_override"
+)
+
+type CodePermissionsSnapshot struct {
+	SessionID         string
+	PlanID            string
+	Generation        uint64
+	CLIOverride       bool
+	PlanFullAccess    bool
+	SessionAllFolders bool
+	AllToolsSession   bool
+	Source            CodePermissionSource
+}
+
+// CodePermissionsBackend is optional and never implemented by remote chat.
+type CodePermissionsBackend interface {
+	CodePermissions(context.Context) (CodePermissionsSnapshot, error)
+	RevokeCodePermission(context.Context, CodePermissionScope) error
+}
 
 // ModelContextWindow is a resolved picker capacity and its fallback provenance.
 type ModelContextWindow struct {
@@ -23,14 +65,21 @@ type ModelContextBackend interface {
 
 // Info is static session metadata shown in the TUI header / footer.
 type Info struct {
-	SessionID string
-	Provider  string
-	Model     string
-	Mode      string // "platform" or "code"
-	ServerURL string
-	Org       string
-	Team      string
-	User      string
+	ProjectRoot       string
+	WorkspaceID       string
+	WorkspacePath     string
+	WorkspaceMode     WorkspaceMode
+	WorkspaceActive   bool
+	WorkspaceRetained bool
+	WorkspacePrompt   bool
+	SessionID         string
+	Provider          string
+	Model             string
+	Mode              string // "platform" or "code"
+	ServerURL         string
+	Org               string
+	Team              string
+	User              string
 	// WorkingDir is the host directory tools operate against. Only set in
 	// code mode (the local, unsandboxed coding tool); empty in platform mode.
 	WorkingDir string
@@ -63,10 +112,16 @@ type Info struct {
 
 // SessionSummary is one row in the sessions picker.
 type SessionSummary struct {
-	ID           string
-	Title        string
-	UpdatedAt    string
-	MessageCount int
+	ProjectRoot       string
+	WorkspaceID       string
+	WorkspacePath     string
+	WorkspaceMode     WorkspaceMode
+	WorkspaceActive   bool
+	WorkspaceRetained bool
+	ID                string
+	Title             string
+	UpdatedAt         string
+	MessageCount      int
 }
 
 // HistoryEntry is one message loaded when resuming a session.
@@ -114,6 +169,7 @@ type ArtifactContent struct {
 
 // TurnOptions configures per-turn behavior for the platform request.
 type TurnOptions struct {
+	PlanRevisionDecision *agent.TrustedPlanRevisionDecision
 	// SystemContext is a per-turn hidden instruction sent to Studio chat. It is
 	// not persisted as a visible user message.
 	SystemContext string
@@ -136,6 +192,13 @@ type TurnOptions struct {
 	// approved plan. The runtime allows normal tools and update_plan, but rejects
 	// announce_plan so execution cannot replace the approved plan.
 	ApprovedPlanExecution bool
+	// CodePlanExecutionMode is trusted initial-approval intent, never inferred
+	// from user text. Empty on remote chat and ordinary continuation turns.
+	CodePlanExecutionMode agent.CodePlanExecutionMode
+	// Local trusted approval only; never serialized to remote transports.
+	CodePlanPermissionMode   agent.CodePlanPermissionMode `json:"-"`
+	CodePlanApprovalID       string                       `json:"-"`
+	CodePlanApprovalRevision int64                        `json:"-"`
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }

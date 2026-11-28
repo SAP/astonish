@@ -9,6 +9,8 @@ import (
 
 	"github.com/SAP/astonish/pkg/backup"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 )
 
@@ -16,6 +18,9 @@ func handlePlatformRestoreCommand(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printPlatformRestoreUsage()
 		return nil
+	}
+	if len(args) > 0 && args[0] == "cleanup" {
+		return handlePlatformRestoreCleanup(args[1:])
 	}
 	opts, err := parsePlatformRestoreArgs(args)
 	if err != nil {
@@ -43,7 +48,31 @@ func handlePlatformRestoreCommand(args []string) error {
 	}
 	defer es.Close()
 
+	var cleanup func()
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+	var files entstore.BotRestoreBackend
+	fileBackend := func(context.Context) (entstore.BotRestoreBackend, error) {
+		if files != nil {
+			return files, nil
+		}
+		b, closeBackend, err := sandbox.BackendFromAppConfig(appCfg)
+		cleanup = closeBackend
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		files, ok = b.(entstore.BotRestoreBackend)
+		if !ok {
+			return nil, fmt.Errorf("configured backend cannot restore fresh Bot Homes: %w", store.ErrBotUnsupported)
+		}
+		return files, nil
+	}
 	restoreOpts := entstore.PlatformRestoreOptions{
+		FileBackend:         fileBackend,
 		DryRun:              opts.dryRun,
 		ResetTarget:         opts.resetTarget,
 		EnableScheduledJobs: opts.enableScheduledJobs,
@@ -246,8 +275,11 @@ func printRestorePlanSummary(plan backup.RestorePlan) {
 
 func printPlatformRestoreUsage() {
 	fmt.Println("usage: astonish platform restore <archive> [--dry-run|--confirm] [options]")
+	fmt.Println("       astonish platform restore cleanup <same-archive> --confirm")
 	fmt.Println("")
 	fmt.Println("Recover a clean platform installation from a logical backup archive.")
+	fmt.Println("Cleanup: stop all target writers; removes only journal-owned uncommitted restore destinations.")
+	fmt.Println("Keep the same configured target, archive, and backend. Cleanup never resets a populated platform.")
 	fmt.Println("")
 	fmt.Println("options:")
 	fmt.Println("  --dry-run                 Validate and preview restore without writing")

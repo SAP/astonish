@@ -73,6 +73,46 @@ Checks:
 {{- end -}}
 {{- end -}}
 
+{{- /* 9. OpenShell Bot homes are an independent opt-in, not gateway deployment. */ -}}
+{{- $homes := .Values.sandbox.openshell.botHomes -}}
+{{- if $homes.enabled -}}
+{{- if not (and .Values.sandbox.enabled (eq .Values.sandbox.backend "openshell")) -}}
+{{- fail "sandbox.openshell.botHomes.enabled requires sandbox.enabled=true and sandbox.backend=openshell" -}}
+{{- end -}}
+{{- $ns := include "astonish.namespace.sandbox" . -}}
+{{- if or (gt (len $ns) 63) (not (regexMatch $dns1123 $ns)) -}}
+{{- fail "OpenShell bot homes require a valid DNS-1123 sandbox namespace (maximum 63 characters)" -}}
+{{- end -}}
+{{- if and $homes.namespace (ne $homes.namespace $ns) -}}
+{{- fail "sandbox.openshell.botHomes.namespace must match namespaces.sandbox: PVCs cannot mount across namespaces" -}}
+{{- end -}}
+{{- $claim := default $homes.pvcName $homes.existingClaim -}}
+{{- $dnsSubdomain := "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" -}}
+{{- if or (not $claim) (gt (len $claim) 253) (not (regexMatch $dnsSubdomain $claim)) -}}
+{{- fail "sandbox.openshell.botHomes requires a valid DNS-1123 PVC name (pvcName or existingClaim)" -}}
+{{- end -}}
+{{- if has $claim (list "workspace" .Values.sandbox.storage.layers.pvcName .Values.sandbox.storage.uppers.pvcName .Values.sandbox.storage.homes.pvcName .Values.sandbox.storage.homes.existingClaim) -}}
+{{- fail "OpenShell bot home claim must be independent of workspace, layers, uppers and Kubernetes homes claims" -}}
+{{- end -}}
+{{- range .Values.sandbox.openshell.certBundles -}}
+{{- if or (eq (default "" .claimName) $claim) (eq .name "astonish-bot-home") -}}
+{{- fail "OpenShell bot homes must not collide with cert bundle claims or volume names" -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has $homes.accessMode (list "ReadWriteMany" "ReadWriteOnce")) -}}
+{{- fail "sandbox.openshell.botHomes.accessMode must be ReadWriteMany or ReadWriteOnce (single-node placement only)" -}}
+{{- end -}}
+{{- if not $homes.existingClaim -}}
+{{- $sc := default .Values.sandbox.storage.storageClassName $homes.storageClassName -}}
+{{- if or (not $sc) (gt (len $sc) 253) (not (regexMatch $dnsSubdomain $sc)) -}}
+{{- fail "sandbox.openshell.botHomes.storageClassName must resolve to a valid StorageClass name" -}}
+{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" (toString $homes.size)) -}}
+{{- fail "sandbox.openshell.botHomes.size must be a positive whole storage quantity (e.g. 50Gi)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- /* 7. Requests CPU ≤ Limits CPU (when both set). */ -}}
 {{- if .Values.sandbox.enabled -}}
 {{- if and .Values.sandbox.requests .Values.sandbox.limits -}}

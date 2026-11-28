@@ -42,7 +42,9 @@ jobs:
           # Keep in sync with .golangci-version and local installs (see CONTRIBUTING.md).
           # Schema for gosec excludes (e.g. G124) differs across minor versions.
           version: v2.12.2
-          args: --timeout=5m
+          # Full cold-run analysis exceeded 5m on the hosted Linux runner.
+          # Keep all analyzers enabled and give the complete scan a bounded window.
+          args: --timeout=10m
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest

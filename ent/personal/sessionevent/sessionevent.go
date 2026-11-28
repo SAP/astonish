@@ -16,6 +16,8 @@ const (
 	FieldID = "id"
 	// FieldSessionID holds the string denoting the session_id field in the database.
 	FieldSessionID = "session_id"
+	// FieldEventID holds the string denoting the event_id field in the database.
+	FieldEventID = "event_id"
 	// FieldEventData holds the string denoting the event_data field in the database.
 	FieldEventData = "event_data"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -37,6 +39,7 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldSessionID,
+	FieldEventID,
 	FieldEventData,
 	FieldCreatedAt,
 }
@@ -54,6 +57,8 @@ func ValidColumn(column string) bool {
 var (
 	// SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	SessionIDValidator func(string) error
+	// EventIDValidator is a validator for the "event_id" field. It is called by the builders before save.
+	EventIDValidator func(string) error
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 )
@@ -69,6 +74,11 @@ func ByID(opts ...sql.OrderTermOption) OrderOption {
 // BySessionID orders the results by the session_id field.
 func BySessionID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSessionID, opts...).ToFunc()
+}
+
+// ByEventID orders the results by the event_id field.
+func ByEventID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldEventID, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

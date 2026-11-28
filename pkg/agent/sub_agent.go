@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
@@ -55,6 +56,9 @@ func asEventArchiver(svc adksession.Service) eventArchiver {
 
 // SubAgentConfig holds configuration for the sub-agent system.
 type SubAgentConfig struct {
+	// CodeMode enables code-intelligence defaults for public preferred delegates only.
+	// It is supplied by the launcher, not inferred from project context or prompts.
+	CodeMode          bool          `yaml:"-" json:"-"`
 	MaxDepth          int           `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`                   // Max delegation nesting (default: 2)
 	MaxConcurrent     int           `yaml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`         // Max parallel sub-agents (default: 5)
 	TaskTimeout       time.Duration `yaml:"task_timeout,omitempty" json:"task_timeout,omitempty"`             // Per-task absolute timeout (default: 10m)
@@ -74,14 +78,16 @@ type DelegationStatus string
 const (
 	DelegationStart    DelegationEventType = "delegation_start"
 	DelegationComplete DelegationEventType = "delegation_complete"
-	TaskQueued         DelegationStatus    = "queued"
-	TaskRunning        DelegationStatus    = "running"
-	TaskWaiting        DelegationStatus    = "waiting_on_model"
-	TaskEvaluating     DelegationStatus    = "evaluating"
-	TaskRetrying       DelegationStatus    = "retrying"
-	TaskComplete       DelegationStatus    = "complete"
-	TaskFailed         DelegationStatus    = "failed"
-	TaskCancelled      DelegationStatus    = "cancelled"
+	// TaskJoined is internal manager bookkeeping emitted only after fan-out joins.
+	TaskJoined     DelegationEventType = "task_joined"
+	TaskQueued     DelegationStatus    = "queued"
+	TaskRunning    DelegationStatus    = "running"
+	TaskWaiting    DelegationStatus    = "waiting_on_model"
+	TaskEvaluating DelegationStatus    = "evaluating"
+	TaskRetrying   DelegationStatus    = "retrying"
+	TaskComplete   DelegationStatus    = "complete"
+	TaskFailed     DelegationStatus    = "failed"
+	TaskCancelled  DelegationStatus    = "cancelled"
 )
 
 // DelegationSequence is shared by all attempts in a batch.
@@ -154,9 +160,17 @@ type PlanFileChange struct {
 // These sections provide context, scope guards, and end-to-end verification
 // guidance that survive context compaction alongside the phase list.
 type PlanDocumentInfo struct {
-	Context      string `json:"context,omitempty"`
-	WhatNotToDo  string `json:"what_not_to_do,omitempty"`
-	Verification string `json:"verification,omitempty"`
+	CodeExecutionMode CodePlanExecutionMode `json:"code_execution_mode,omitempty"`
+	CodeReviewPending string                `json:"code_review_pending,omitempty"`
+	PlanID            string                `json:"plan_id,omitempty"`
+	Revision          int64                 `json:"revision,omitempty"`
+	Sequence          int64                 `json:"sequence,omitempty"`
+	PendingRevision   *PlanRevisionProposal `json:"pending_revision,omitempty"`
+	RevisionNote      string                `json:"revision_note,omitempty"`
+	GraphAcceptance   string                `json:"graph_acceptance,omitempty"`
+	Context           string                `json:"context,omitempty"`
+	WhatNotToDo       string                `json:"what_not_to_do,omitempty"`
+	Verification      string                `json:"verification,omitempty"`
 	// Results is written by announce_completion after e2e verification.
 	// Empty means the plan is not fully accepted.
 	Results string `json:"results,omitempty"`
@@ -226,6 +240,10 @@ type SubAgentTask struct {
 	Provider                        string                 // Override provider (empty = use parent's provider)
 	PlanStep                        string                 // Plan step this task belongs to (for progress tracking)
 
+	// Handoff opts public delegates into immutable task context; fleet/custom prompts opt out.
+	Handoff       *DelegationHandoffInput `json:"-"`
+	frozenHandoff string
+
 	// CustomPrompt, when true, uses Instructions directly as the LLM system prompt
 	// instead of wrapping it with buildChildPrompt(). This is used by fleet agents
 	// that build their own complete prompt (via fleet.BuildAgentPrompt).
@@ -275,6 +293,8 @@ type TaskAttempt struct {
 	Error          string `json:"error,omitempty"`
 }
 type TaskResult struct {
+	// joined is manager-owned provenance, never serialized or populated from child output.
+	joined                          *taskJoinIdentity
 	BatchID, TaskID, ChildSessionID string
 	AttemptHistory                  []TaskAttempt
 	Name                            string          // Matches SubAgentTask.Name
@@ -286,6 +306,33 @@ type TaskResult struct {
 	Error                           string          // Error message if Status != "success"
 	Attempts                        int             // Number of task attempts made
 	InactivityReason                string          // Non-empty when the inactivity watchdog cancelled the task
+}
+
+// taskJoinIdentity binds a completed fan-out result to the original admitted task
+// and the exact attempts observed by the manager. It is not child session state.
+type taskJoinIdentity struct {
+	batchID, taskID, parentID, initialChildID, finalChildID string
+	attempts                                                []TaskAttempt
+}
+
+// MatchesJoinedTask validates server join provenance against the original task.
+// A result reconstructed from JSON, or with altered identity/attempt metadata,
+// cannot attest a join. Child prose and claimed effects are deliberately ignored.
+func (r TaskResult) MatchesJoinedTask(t SubAgentTask) bool {
+	j := r.joined
+	if j == nil || r.Status != "success" || r.Error != "" ||
+		j.batchID != t.BatchID || j.taskID != t.TaskID || j.parentID != t.ParentID || j.initialChildID != t.ChildSessionID ||
+		r.BatchID != j.batchID || r.TaskID != j.taskID || r.ChildSessionID != j.finalChildID ||
+		r.Attempts != len(j.attempts) || len(r.AttemptHistory) != len(j.attempts) || len(j.attempts) == 0 {
+		return false
+	}
+	for i, attempt := range j.attempts {
+		if r.AttemptHistory[i] != attempt || attempt.Attempt != i+1 || attempt.ChildSessionID == "" {
+			return false
+		}
+	}
+	first, last := j.attempts[0], j.attempts[len(j.attempts)-1]
+	return first.ChildSessionID == j.initialChildID && last.ChildSessionID == j.finalChildID && last.Status == "success" && last.Error == ""
 }
 
 // ToolGroup defines a named group of tools that sub-agents can request.
@@ -432,11 +479,13 @@ func IsExcludedChildTool(name string) bool {
 	return excludedChildTools[name]
 }
 
-// effectiveTaskLLM returns the LLM for child sub-agents. A request-scoped
-// override is the resolved parent model for this invocation and must win over
-// factory-time defaults. When no request override is present, TaskLLM supplies
-// the Auto-routing task tier; otherwise children inherit the manager default.
+// effectiveTaskLLM returns the LLM for child sub-agents. Interactive Bot children
+// require the trusted, identity-bound shared-budget auxiliary capability. Otherwise
+// a request-scoped override wins over factory defaults and the Auto-routing tier.
 func (m *SubAgentManager) effectiveTaskLLM(ctx context.Context) model.LLM {
+	if _, interactive := execution.BotTurnAuthorizerFromContext(ctx); interactive {
+		return auxiliaryLLM(ctx, nil)
+	}
 	if requestLLM := LLMFromContext(ctx); requestLLM != nil {
 		return requestLLM
 	}
@@ -673,6 +722,29 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 	}
 
 	wg.Wait()
+	// All children (including retries) have returned before join provenance exists.
+	// Keep a private copy so callers cannot rewrite the observed attempt chain.
+	for i := range tasks {
+		r, t := &results[i], tasks[i]
+		r.joined = &taskJoinIdentity{
+			batchID: t.BatchID, taskID: t.TaskID, parentID: t.ParentID,
+			initialChildID: t.ChildSessionID, finalChildID: r.ChildSessionID,
+			attempts: append([]TaskAttempt(nil), r.AttemptHistory...),
+		}
+	}
+	// Attempt terminal events precede retry evaluation. Only this manager-owned
+	// join, after every child and retry has returned, releases plan delegates.
+	if m.SubTaskProgress != nil {
+		for i, t := range tasks {
+			r := results[i]
+			m.SubTaskProgress(SubTaskProgressEvent{
+				Type: string(TaskJoined), SessionID: t.ParentID, BatchID: t.BatchID,
+				TaskID: t.TaskID, ChildSessionID: r.ChildSessionID,
+				TaskName: t.Name, PlanStep: t.PlanStep, Attempt: r.Attempts,
+				Status: r.Status, Error: r.Error, Sequence: t.Sequence.Next(),
+			})
+		}
+	}
 	return results
 }
 
@@ -1021,14 +1093,14 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		}
 	}
 
-	go func() {
+	go func(watchCtx context.Context) {
 		ticker := time.NewTicker(m.Config.HeartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-watchdogDone:
 				return
-			case <-taskCtx.Done():
+			case <-watchCtx.Done():
 				return
 			case now := <-ticker.C:
 				idle := now.Sub(time.Unix(0, lastActivity.Load()))
@@ -1060,7 +1132,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 				}
 			}
 		}
-	}()
+	}(taskCtx)
 
 	// Depth check
 	if task.ParentDepth >= m.Config.MaxDepth {
@@ -1073,10 +1145,42 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		return result
 	}
 
+	// Interactive children inherit the original caller's live Chat authority,
+	// not an autonomous policy. Check it before discovery or session creation;
+	// the frozen child scope below remains the executable catalog ceiling.
+	if auth, interactive := execution.BotTurnAuthorizerFromContext(taskCtx); interactive {
+		if _, ok := execution.BotRunIdentityFromContext(taskCtx); !ok || execution.RunPolicyFromContext(taskCtx) != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: "invalid interactive execution binding"}
+		}
+		if err := auth.Authorize(taskCtx, execution.CapabilityChat); err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+	}
+
+	if mandate := BotPolicyRuntimeFromContext(taskCtx).Mandate; mandate != nil {
+		if err := mandate.Check(taskCtx); err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+	}
 	// Freeze allowed wrapped instances before constructing any discovery helper.
 	scope, resolveWarnings, scopeErr := m.childToolScope(taskCtx, task)
 	if scopeErr != nil {
 		return TaskResult{Name: task.Name, Status: "error", Error: scopeErr.Error(), Duration: time.Since(start)}
+	}
+	_, interactiveChild := execution.BotTurnAuthorizerFromContext(taskCtx)
+	if botExecutionContext(taskCtx) && !interactiveChild {
+		identities := []string{"search_tools", "describe_tools", "skill_lookup"}
+		for _, e := range scope.entries {
+			identities = append(identities, BotToolIdentity(e.group, e.tool.Name()))
+		}
+		for _, e := range scope.metadata {
+			identities = append(identities, BotToolIdentity(e.GroupName, e.ToolName))
+		}
+		policy, err := execution.RunPolicyFromContext(taskCtx).Narrow(identities)
+		if err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+		taskCtx = execution.WithRunPolicy(taskCtx, policy)
 	}
 	var childTools []tool.Tool
 	var childToolsets []tool.Toolset
@@ -1117,12 +1221,27 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		return result
 	}
 
+	// Freeze once per child attempt, before persistence or any model invocation.
+	if task.hasDelegationHandoff() {
+		var err error
+		task.frozenHandoff, err = m.freezeDelegationHandoff(task, parentSessionID, attempt, childTools)
+		if err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+	}
+
 	// Build child system prompt: use custom prompt if set, otherwise build default
 	var childPrompt string
 	if task.CustomPrompt && task.Instructions != "" {
 		childPrompt = task.Instructions
 	} else {
 		childPrompt = m.buildChildPromptWithScope(taskCtx, task, scope)
+	}
+
+	if task.hasDelegationHandoff() && m.Redactor != nil {
+		// Also protect the surrounding name/environment/preference guidance.
+		prefix, suffix, _ := strings.Cut(childPrompt, task.frozenHandoff)
+		childPrompt = m.Redactor.Redact(prefix) + task.frozenHandoff + m.Redactor.Redact(suffix)
 	}
 
 	// Create child session linked to parent.
@@ -1151,10 +1270,13 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 	}
 	// Inject caller-provided session state
 	for k, v := range task.SessionState {
+		if task.hasDelegationHandoff() && reservedDelegationStateKey(k) {
+			return TaskResult{Name: task.Name, Status: "error", Error: fmt.Sprintf("reserved delegation session state key %q", k)}
+		}
 		createState[k] = v
 	}
 
-	_, err := sessionSvc.Create(taskCtx, &adksession.CreateRequest{
+	created, err := sessionSvc.Create(taskCtx, &adksession.CreateRequest{
 		AppName:   m.AppName,
 		UserID:    userID,
 		SessionID: childSessionID,
@@ -1168,6 +1290,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			Duration: time.Since(start),
 		}
 		return result
+	}
+
+	if task.hasDelegationHandoff() {
+		if err := appendDelegationHandoff(taskCtx, sessionSvc, created.Session, task.frozenHandoff); err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
 	}
 
 	// Persist the task name as the session title so fleet reconstruction
@@ -1199,6 +1327,11 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		// Per-task clone: isolate summary cache / counters from other sub-agents
 		// and from the parent (whose OnCompaction hook must not fire here).
 		taskCompactor := m.Compactor.Clone()
+		if task.hasDelegationHandoff() {
+			// The immutable instruction remains in every provider request. Never
+			// inject the parent's mutable plan mirror into a child's summary.
+			taskCompactor.PlanFilePath = ""
+		}
 		if archiver := asEventArchiver(sessionSvc); archiver != nil {
 			appName := m.AppName
 			uid := userID
@@ -1293,10 +1426,13 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		taskName := task.Name
 
 		// Folder-access gate (checked first, same as main thread).
-		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+		beforeToolCallbacks = append(beforeToolCallbacks, func(authCtx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 			policy := getPolicy(parentSessionID)
 			if policy == nil {
 				return nil, nil // no policy = no enforcement
+			}
+			if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+				return nil, nil
 			}
 			outside := policy.OutOfScopePaths(args)
 			if len(outside) == 0 {
@@ -1306,6 +1442,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			}
 			// Paths are out of scope — request authorization from the user.
 			resp := authGate(SubAgentAuthRequest{
+				Context:         authCtx,
 				TaskName:        taskName,
 				Kind:            "folder",
 				ToolName:        t.Name(),
@@ -1313,24 +1450,21 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 				OutOfScopePaths: outside,
 				ParentSessionID: parentSessionID,
 			})
+			if resp.PlanBypass {
+				if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+					return nil, nil
+				}
+				return map[string]any{"status": "authorization_denied", "error": "Plan permission was revoked; retry for approval."}, nil
+			}
 			if resp.Granted {
-				// Apply the grant to the policy based on the user's choice.
-				choice := NormalizeAuthChoice(resp.Choice)
-				switch choice {
-				case "broad2": // "Always Allow" → grant paths for session
-					for _, path := range outside {
-						policy.GrantPathForSession(path)
-					}
-				default: // "Allow" → grant paths once
-					for _, path := range outside {
-						policy.GrantPathOnce(path)
-					}
+				d, err := policy.ApplyAuthorizationRequest(&PendingAuthorization{Kind: "folder", Tool: t.Name(), Paths: outside, Options: FolderApprovalOptions()}, resp.Choice)
+				if err != nil {
+					return nil, err
 				}
-				// Subsume the tool gate for this call (same as main thread).
-				if RequiresToolAuthorization(t.Name(), false) {
-					policy.GrantToolOnce(t.Name())
+				if d.Granted {
+					policy.ConsumePathGrants(args)
+					return nil, nil
 				}
-				return nil, nil
 			}
 			return map[string]any{
 				"status": "authorization_denied",
@@ -1339,7 +1473,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		})
 
 		// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
-		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+		beforeToolCallbacks = append(beforeToolCallbacks, func(authCtx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 			name := t.Name()
 			if !RequiresToolAuthorization(name, false) {
 				return nil, nil // safe tool, no authorization needed
@@ -1348,27 +1482,36 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			if policy == nil {
 				return nil, nil // no policy = no enforcement
 			}
+			if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+				return nil, nil
+			}
 			if policy.ToolAuthorized(name) {
 				return nil, nil // already authorized (e.g., "Always Allow")
 			}
 			// Tool not authorized — request authorization from the user.
 			resp := authGate(SubAgentAuthRequest{
+				Context:         authCtx,
 				TaskName:        taskName,
 				Kind:            "tool",
 				ToolName:        name,
 				Args:            args,
 				ParentSessionID: parentSessionID,
 			})
-			if resp.Granted {
-				// Apply the grant to the policy based on the user's choice.
-				choice := NormalizeAuthChoice(resp.Choice)
-				switch choice {
-				case "broad2": // "Always Allow" → grant all tools for session
-					policy.GrantAllToolsSession()
-				default: // "Allow" → grant this tool once
-					policy.GrantToolOnce(name)
+			if resp.PlanBypass {
+				if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+					return nil, nil
 				}
-				return nil, nil
+				return map[string]any{"status": "authorization_denied", "error": "Plan permission was revoked; retry for approval."}, nil
+			}
+			if resp.Granted {
+				d, err := policy.ApplyAuthorizationRequest(&PendingAuthorization{Kind: "tool", Tool: name, Options: ToolApprovalOptions()}, resp.Choice)
+				if err != nil {
+					return nil, err
+				}
+				if d.Granted {
+					policy.ToolAuthorized(name)
+					return nil, nil
+				}
 			}
 			return map[string]any{
 				"status": "authorization_denied",
@@ -1457,6 +1600,25 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			return callback(ctx, logical, input)
 		}
 	}
+	beforeToolCallbacks = botNativeCallbacks(beforeToolCallbacks, func(ctx tool.Context, called tool.Tool, args map[string]any) (tool.Tool, string, map[string]any, error) {
+		if called.Name() == executeToolName {
+			decoded, err := decodeExecuteToolArgs(args)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			resolved, group, err := scope.resolve(ctx, decoded.Name)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			return resolved, BotToolIdentity(group, resolved.Name()), decoded.Arguments, nil
+		}
+		for _, e := range scope.entries {
+			if e.tool == called {
+				return called, BotToolIdentity(e.group, called.Name()), args, nil
+			}
+		}
+		return called, botExecutableIdentity(called), args, nil
+	})
 	afterCallbacks := afterToolCallbacks
 	afterToolCallbacks = []llmagent.AfterToolCallback{func(ctx tool.Context, called tool.Tool, input, output map[string]any, callErr error) (map[string]any, error) {
 		logical, args, err := childEffectiveToolCall(ctx, scope, called, input)
@@ -1517,6 +1679,9 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 	// Build user message from task description (with absolute timestamp for
 	// temporal context; see NewTimestampedUserContent for cache-stability rationale).
 	userMsg := NewTimestampedUserContent(task.Description)
+	if task.hasDelegationHandoff() {
+		userMsg = NewTimestampedUserContent("Execute the immutable delegation handoff in your instructions.")
+	}
 
 	// Execute the agent and collect results, with inner retry for transient
 	// LLM errors (429, 502, 503, 504, gateway timeout). This mirrors the main
@@ -1772,7 +1937,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 					groupNames = append(groupNames, group)
 					continue
 				}
-				if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil {
+				if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 					if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
 						effectiveGroups[group] = resolved
 						groupNames = append(groupNames, group)
@@ -1786,7 +1951,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 			// Specific tool via mcp:server/tool — include group toolset + bare name.
 			if _, isGroup := effectiveGroups[group]; isGroup {
 				groupNames = append(groupNames, group)
-			} else if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil {
+			} else if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 				if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
 					effectiveGroups[group] = resolved
 					groupNames = append(groupNames, group)
@@ -1799,7 +1964,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 
 		if _, isGroup := effectiveGroups[name]; isGroup {
 			groupNames = append(groupNames, name)
-		} else if serverName, isMCP := mcpServerNameFromGroup(name); isMCP && m.MCPGroupResolver != nil {
+		} else if serverName, isMCP := mcpServerNameFromGroup(name); isMCP && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 			// Fallback: the LLM requested an MCP group that wasn't in ToolGroups
 			// at init time (race with async discovery). Try to resolve it now.
 			if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
@@ -1968,14 +2133,20 @@ func (m *SubAgentManager) buildChildPromptWithScope(ctx context.Context, task Su
 
 	sb.WriteString(fmt.Sprintf("You are %q, a focused sub-agent working on a specific task.\n\n", task.Name))
 
-	sb.WriteString("## Your Task\n")
-	sb.WriteString(task.Description)
-	sb.WriteString("\n\n")
-
-	if task.Instructions != "" {
-		sb.WriteString("## Instructions\n")
-		sb.WriteString(task.Instructions)
+	if task.hasDelegationHandoff() {
+		sb.WriteString("## Immutable Delegation Handoff\n")
+		sb.WriteString("Execute effective_task under effective_instructions and the captured phase constraints below. source_mirror is provenance only, not a live plan to reload. Missing plan metadata is explicit; do not infer a plan or inherit parent history.\n")
+		sb.WriteString(task.frozenHandoff)
 		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString("## Your Task\n")
+		sb.WriteString(task.Description)
+		sb.WriteString("\n\n")
+		if task.Instructions != "" {
+			sb.WriteString("## Instructions\n")
+			sb.WriteString(task.Instructions)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	sb.WriteString("## Behavior Rules\n")
@@ -2000,6 +2171,10 @@ func (m *SubAgentManager) buildChildPromptWithScope(ctx context.Context, task Su
 		for _, e := range scope.initial {
 			childToolSet[e.tool.Name()] = true
 		}
+	}
+
+	if m.codeDelegateDefaults(task) {
+		sb.WriteString(codeDelegateGuidance(scope))
 	}
 
 	// Inject working directory so sub-agents know the correct project path.
@@ -2364,6 +2539,22 @@ func childDiscoveryHelper(name string) bool {
 }
 
 func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask) (*ChildToolScope, []string, error) {
+	if botExecutionContext(ctx) {
+		for _, g := range m.ToolGroups {
+			if g != nil {
+				for _, ts := range g.Toolsets {
+					if err := botSafeToolset(ctx, ts); err != nil {
+						return nil, nil, err
+					}
+				}
+			}
+		}
+		for _, ts := range task.OverrideToolsets {
+			if err := botSafeToolset(ctx, ts); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	if task.ToolSelectionMode != ChildToolSelectionStrict && task.ToolSelectionMode != ChildToolSelectionPreferred {
 		return nil, nil, fmt.Errorf("invalid tool selection %q", task.ToolSelectionMode)
 	}
@@ -2431,7 +2622,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 	}
 	// The index is metadata only; executables come from invocation groups or
 	// the permitted MCP resolver, never cached index Tool instances.
-	if preferred && m.MCPGroupResolver != nil {
+	if preferred && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 		for _, entry := range metadata {
 			if groups[entry.GroupName] == nil && strings.HasPrefix(entry.GroupName, "mcp:") {
 				deferred[entry.GroupName] = &ToolGroup{Name: entry.GroupName}
@@ -2444,7 +2635,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 		if parts := strings.SplitN(token, "/", 2); len(parts) == 2 && (denied[parts[1]] || childDiscoveryHelper(parts[1]) || excludedChildTools[parts[1]] || isToolDisabled(&minimalReadonlyContext{Context: ctx}, parts[1], token)) {
 			continue
 		}
-		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil && task.OverrideTools == nil && task.OverrideToolsets == nil && !IsMCPGroupInaccessible(ctx, group) {
+		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil && !botExecutionContext(ctx) && task.OverrideTools == nil && task.OverrideToolsets == nil && !IsMCPGroupInaccessible(ctx, group) {
 			groups[group] = m.MCPGroupResolver(ctx, strings.TrimPrefix(group, "mcp:"))
 		}
 	}
@@ -2494,6 +2685,12 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 					needsToolsets = true
 				}
 			}
+		}
+		// Code-mode baseline promotion resolves codegraph below through the
+		// scope, so an unavailable graph server can fall back without failing
+		// the task, even when explicitly preferred or auto-selected.
+		if m.codeDelegateDefaults(task) && name == codeDelegateGraphGroup {
+			needsToolsets = false
 		}
 		if !needsToolsets {
 			if preferred && len(g.Toolsets) > 0 {
@@ -2562,7 +2759,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 	if preferred {
 		scope.metadata = metadata
 	}
-	if preferred && task.OverrideTools == nil && task.OverrideToolsets == nil {
+	if preferred && task.OverrideTools == nil && task.OverrideToolsets == nil && !botExecutionContext(ctx) {
 		scope.resolver = m.MCPGroupResolver
 	}
 	seen := map[string]bool{}
@@ -2593,6 +2790,21 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 		}
 	}
 	var warnings []string
+	if m.codeDelegateDefaults(task) {
+		// The resolver may know about newly configured codegraph tools before
+		// the index has refreshed. Probe only this exact server, never all MCP.
+		if groups[codeDelegateGraphGroup] == nil && scope.resolver != nil && !IsMCPGroupInaccessible(ctx, codeDelegateGraphGroup) {
+			scope.deferred[codeDelegateGraphGroup] = &ToolGroup{Name: codeDelegateGraphGroup}
+		}
+		warnings = append(warnings, scope.addCodeDelegateTools(ctx)...)
+		for _, entry := range scope.initial {
+			for _, token := range task.ToolFilter {
+				if token == entry.tool.Name() || token == entry.group || token == entry.group+"/"+entry.tool.Name() {
+					matched[token] = true
+				}
+			}
+		}
+	}
 	for _, token := range task.ToolFilter {
 		if !matched[token] {
 			warnings = append(warnings, fmt.Sprintf("tool or group %q is unavailable in the child scope", token))

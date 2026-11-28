@@ -8,8 +8,28 @@ import (
 
 	"github.com/SAP/astonish/pkg/config"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+type boundedSearchTestContext struct {
+	tool.Context
+	owner context.Context
+}
+
+func (c boundedSearchTestContext) Value(k any) any { return c.owner.Value(k) }
+func TestRunPerplexityWebSearchBoundedFactoryDenied(t *testing.T) {
+	called := false
+	factory := func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
+		called = true
+		return nil, nil
+	}
+	ctx := boundedSearchTestContext{owner: WithRoutineReadPolicy(context.Background(), RoutineReadPolicy{})}
+	_, err := RunPerplexityWebSearch(ctx, PerplexityWebSearchArgs{Query: "public"}, &config.AppConfig{}, factory)
+	if err == nil || called {
+		t.Fatal("bounded context reached general LLM factory")
+	}
+}
 
 type mockPerplexityLLM struct {
 	request *model.LLMRequest

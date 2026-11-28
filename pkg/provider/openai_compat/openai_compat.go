@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/provider/httpool"
 	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
 	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
@@ -38,11 +39,11 @@ func NewProvider(ctx context.Context, apiKey, baseURL, modelName string, debug b
 		config.BaseURL = baseURL
 	}
 
+	httpClient := httpool.StreamingClient()
 	if debug {
-		config.HTTPClient = &http.Client{
-			Transport: &debugHTTPTransport{base: http.DefaultTransport},
-		}
+		httpClient.Transport = &debugHTTPTransport{base: httpClient.Transport}
 	}
+	config.HTTPClient = httpClient
 
 	client := openai.NewClientWithConfig(config)
 	wrapped := openai_provider.NewProviderWithMaxTokens(client, modelName, true, 64000)

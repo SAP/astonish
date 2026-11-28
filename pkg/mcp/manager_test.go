@@ -2,13 +2,120 @@ package mcp
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/mcptoolset"
 )
+
+type lifecycleReadonlyContext struct {
+	agent.ReadonlyContext
+	ctx context.Context
+}
+
+func (c lifecycleReadonlyContext) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
+func (c lifecycleReadonlyContext) Done() <-chan struct{}       { return c.ctx.Done() }
+func (c lifecycleReadonlyContext) Err() error                  { return c.ctx.Err() }
+func (c lifecycleReadonlyContext) Value(key any) any           { return c.ctx.Value(key) }
+
+type lifecycleTransport struct{ closed int }
+
+func (t *lifecycleTransport) Connect(context.Context) (sdk.Connection, error) {
+	return nil, errors.New("unused")
+}
+func (t *lifecycleTransport) Close() error { t.closed++; return nil }
+
+type lifecycleToolset struct {
+	tool.Toolset
+	closed int
+}
+
+func (t *lifecycleToolset) Close() error { t.closed++; return nil }
+
+func TestMCPPartialSingleCleanup(t *testing.T) {
+	transport, partial := &lifecycleTransport{}, &lifecycleToolset{}
+	want := errors.New("partial constructor failure")
+	got, err := newSingleToolset(transport, func(mcptoolset.Config) (tool.Toolset, error) { return partial, want })
+	if got != nil || !errors.Is(err, want) || transport.closed != 1 || partial.closed != 1 {
+		t.Fatalf("partial resources not cleaned: result=%v err=%v transport=%d toolset=%d", got, err, transport.closed, partial.closed)
+	}
+}
+
+// A real stdio subprocess speaking just enough MCP to establish the lazy
+// ADK session. Cleanup must close the session, not merely its transport value.
+func TestMCPSingleStdioServerHelper(t *testing.T) {
+	if os.Getenv("ASTONISH_MCP_LIFECYCLE_HELPER") != "1" {
+		return
+	}
+	decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
+	for {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if decoder.Decode(&request) != nil {
+			os.Exit(0)
+		}
+		if len(request.ID) == 0 {
+			continue
+		}
+		result := any(map[string]any{})
+		if request.Method == "initialize" {
+			result = map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]any{"name": "lifecycle", "version": "1"}}
+		} else if request.Method == "tools/list" {
+			result = map[string]any{"tools": []any{}}
+		}
+		if encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result}) != nil {
+			os.Exit(2)
+		}
+	}
+}
+
+func TestMCPSingleTransportCleanup(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManagerFromConfig(&config.MCPConfig{MCPServers: map[string]config.MCPServerConfig{
+		"helper": {Command: executable, Args: []string{"-test.run=^TestMCPSingleStdioServerHelper$"}, Env: map[string]string{"ASTONISH_MCP_LIFECYCLE_HELPER": "1"}},
+	}})
+	defer manager.Cleanup()
+	named, err := manager.InitializeSingleToolset(context.Background(), "helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.transports) != 1 {
+		t.Fatal("single transport not retained")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := named.Toolset.Tools(lifecycleReadonlyContext{ctx: ctx}); err != nil {
+		t.Fatal(err)
+	}
+	transport := manager.transports[0].(*sdk.CommandTransport)
+	if transport.Command.Process == nil {
+		t.Fatal("stdio server was not started")
+	}
+	manager.Cleanup()
+	if transport.Command.ProcessState == nil || !transport.Command.ProcessState.Exited() {
+		t.Fatal("stdio server not reaped by cleanup")
+	}
+	if len(manager.toolsets) != 0 || len(manager.transports) != 0 {
+		t.Fatal("cleanup retained resources")
+	}
+	manager.Cleanup()
+}
 
 func TestGetStderr_NilBuffer(t *testing.T) {
 	t.Parallel()

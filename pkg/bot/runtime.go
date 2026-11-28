@@ -1,0 +1,523 @@
+// Package bot defines durable Bot orchestration contracts. Execution adapters use
+// the existing ChatAgent; this package must not import API or launcher packages.
+package bot
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"google.golang.org/adk/model"
+
+	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
+)
+
+type LifecycleEvent string
+
+const (
+	LifecyclePause   LifecycleEvent = "pause"
+	LifecycleStop    LifecycleEvent = "stop"
+	LifecycleResume  LifecycleEvent = "resume"
+	LifecycleDelete  LifecycleEvent = "delete"
+	LifecycleRestore LifecycleEvent = "restore"
+)
+
+// NextBotStatus validates state shape only. The repository must authenticate the
+// event, check expected revision, revoke/fence work and commit related intent.
+func NextBotStatus(from store.BotStatus, event LifecycleEvent, now, restoreUntil time.Time) (store.BotStatus, error) {
+	valid := from == store.BotActive || from == store.BotPaused || from == store.BotStopped || from == store.BotDeleted
+	if !valid {
+		return "", fmt.Errorf("%w: unknown lifecycle state", store.ErrBotInvalid)
+	}
+	switch event {
+	case LifecycleDelete:
+		if from != store.BotDeleted {
+			return store.BotDeleted, nil
+		}
+	case LifecyclePause:
+		if from == store.BotActive {
+			return store.BotPaused, nil
+		}
+	case LifecycleStop:
+		if from == store.BotActive || from == store.BotPaused {
+			return store.BotStopped, nil
+		}
+	case LifecycleResume:
+		if from == store.BotPaused || from == store.BotStopped {
+			return store.BotActive, nil
+		}
+	case LifecycleRestore:
+		if from == store.BotDeleted {
+			if restoreUntil.IsZero() || !now.Before(restoreUntil) {
+				return "", store.ErrBotExpired
+			}
+			return store.BotPaused, nil
+		}
+	}
+	return "", fmt.Errorf("%w: cannot %s a %s bot", store.ErrBotConflict, event, from)
+}
+
+type RunTransitionGuard struct {
+	BotActive      bool
+	Authorized     bool
+	CheckpointSafe bool
+}
+
+func ValidateRunTransition(from, to store.RunStatus, g RunTransitionGuard) error {
+	allowed := false
+	switch from {
+	case store.RunQueued:
+		allowed = to == store.RunSkipped || to == store.RunCancelled || to == store.RunRunning && g.BotActive && g.Authorized
+	case store.RunRunning:
+		allowed = to.Terminal() || to == store.RunWaitingApproval || to == store.RunInterrupted
+	case store.RunWaitingApproval, store.RunInterrupted:
+		allowed = to == store.RunPartial || to == store.RunCancelled || to == store.RunQueued && g.BotActive && g.Authorized && g.CheckpointSafe
+	}
+	if !allowed {
+		return fmt.Errorf("%w: run transition %s -> %s", store.ErrBotConflict, from, to)
+	}
+	return nil
+}
+
+func ValidateApprovalTransition(from, to store.ApprovalStatus, now, expires time.Time) error {
+	allowed := false
+	switch from {
+	case store.ApprovalPending:
+		allowed = to == store.ApprovalRevoked || to == store.ApprovalExpired && !now.Before(expires) || (to == store.ApprovalApproved || to == store.ApprovalDenied) && now.Before(expires)
+	case store.ApprovalApproved:
+		allowed = to == store.ApprovalRevoked || to == store.ApprovalExpired && !now.Before(expires) || to == store.ApprovalConsumed && now.Before(expires)
+	}
+	if !allowed {
+		return fmt.Errorf("%w: approval transition %s -> %s", store.ErrBotConflict, from, to)
+	}
+	return nil
+}
+
+// ValidateVersion is structural validation, not approval of its permissions.
+// Cron parsing, backend capabilities and linked resources are checked by adapters.
+func ValidateVersion(v store.BotVersion) error {
+	if v.SchemaVersion != store.BotSchemaVersion {
+		return store.ErrBotUnsupported
+	}
+	if v.BotID == uuid.Nil || v.Version < 1 || strings.TrimSpace(v.Charter) == "" {
+		return fmt.Errorf("%w: missing bot/version/charter", store.ErrBotInvalid)
+	}
+	if v.Persona.Timezone == "" {
+		return fmt.Errorf("%w: missing timezone", store.ErrBotInvalid)
+	}
+	if _, err := time.LoadLocation(v.Persona.Timezone); err != nil {
+		return fmt.Errorf("%w: timezone", store.ErrBotInvalid)
+	}
+	switch v.Autonomy.Level {
+	case execution.AutonomyAsk, execution.AutonomySupervised, execution.AutonomyReversible, execution.AutonomyScoped:
+	default:
+		return fmt.Errorf("%w: autonomy", store.ErrBotInvalid)
+	}
+	if err := v.Budget.RuntimePolicy.Validate(); err != nil {
+		return fmt.Errorf("%w: runtime policy: %v", store.ErrBotInvalid, err)
+	}
+	if v.Budget.MaxRuntimeSeconds < 0 || v.Budget.MaxRuntimeSeconds > int64((1<<63-1)/time.Second) || v.Autonomy.MaxSpendPerRunMinor < 0 || v.Autonomy.MaxSpendPerMonthMinor < 0 {
+		return fmt.Errorf("%w: budget", store.ErrBotInvalid)
+	}
+	for _, limit := range []*int64{v.Budget.MaxTokens, v.Budget.MaxToolCalls, v.Budget.MaxRunsPerDay, v.Budget.MaxModelCostMicros} {
+		if limit != nil && *limit < 0 {
+			return fmt.Errorf("%w: negative budget", store.ErrBotInvalid)
+		}
+	}
+	for _, tr := range v.Triggers {
+		if err := store.ValidateSkillSelection(tr.SkillID, tr.Invocation); err != nil {
+			return err
+		}
+	}
+	switch v.Delivery.Notify {
+	case store.NotifyNever, store.NotifyOnChange, store.NotifyOnDecision, store.NotifyAlways:
+	default:
+		return fmt.Errorf("%w: notification policy", store.ErrBotInvalid)
+	}
+	return nil
+}
+
+// EmployeeChatRequest contains only conversational input. Empty WorkerID starts
+// a private Chat; handles follow up only inside the bound server request.
+type EmployeeChatRequest struct {
+	WorkerID string `json:"worker_id,omitempty"`
+	Message  string `json:"message"`
+}
+type EmployeeChatStatus string
+
+const (
+	EmployeeChatCompleted  EmployeeChatStatus = "completed"
+	EmployeeChatPartial    EmployeeChatStatus = "partial"
+	EmployeeChatNeedsInput EmployeeChatStatus = "needs_input"
+	EmployeeChatFailed     EmployeeChatStatus = "failed"
+	EmployeeChatCancelled  EmployeeChatStatus = "cancelled"
+)
+
+type EmployeeChatResult struct {
+	WorkerID    string              `json:"worker_id"`
+	Status      EmployeeChatStatus  `json:"status"`
+	PrivateText string              `json:"private_text"`
+	Evidence    []store.BotEvidence `json:"evidence,omitempty"`
+	Artifacts   []store.BotArtifact `json:"artifacts,omitempty"`
+	Limitations []string            `json:"limitations,omitempty"`
+}
+
+// Send is serial and shares original effective budgets, deadline, model and
+// authority. No model-supplied owner/run/session/authority or fresh caps/grants.
+type EmployeeChatService interface {
+	Send(context.Context, EmployeeChatRequest) (*EmployeeChatResult, error)
+}
+type employeeChatServiceKey struct{}
+
+func WithEmployeeChatService(ctx context.Context, service EmployeeChatService) context.Context {
+	return context.WithValue(ctx, employeeChatServiceKey{}, service)
+}
+func EmployeeChatServiceFromContext(ctx context.Context) EmployeeChatService {
+	if ctx == nil {
+		return nil
+	}
+	service, _ := ctx.Value(employeeChatServiceKey{}).(EmployeeChatService)
+	return service
+}
+func WithEmployeeChatServiceFromContext(dst, src context.Context) context.Context {
+	if service := EmployeeChatServiceFromContext(src); service != nil {
+		return WithEmployeeChatService(dst, service)
+	}
+	return dst
+}
+
+// BotWorkServices is an optional, already scoped capability. Implementations
+// resolve identity/lease from the run, never from model arguments, and serialize
+// mutations with the work revision. Reads and feedback do not authorize actions.
+type BotWorkServices interface {
+	Read(context.Context, BotWorkReadRequest) (*BotWorkReadResult, error)
+	Update(context.Context, BotWorkChangeRequest) (*store.BotWorkProjection, error)
+	Evidence(context.Context, BotEvidenceReadRequest) (*BotEvidenceReadResult, error)
+	Check(context.Context, BotWorkCheckRequest) (*store.BotWorkCheckReceipt, error)
+	SelectSkill(context.Context, BotWorkSkillSelection) (*store.BotSkillInvocation, error)
+	StageLearning(context.Context, BotWorkLearningProposal) error
+}
+
+type botWorkServicesKey struct{}
+
+// WithBotWorkServices carries only the request-local capability; it grants no authority.
+func WithBotWorkServices(ctx context.Context, service BotWorkServices) context.Context {
+	return context.WithValue(ctx, botWorkServicesKey{}, service)
+}
+func BotWorkServicesFromContext(ctx context.Context) BotWorkServices {
+	service, _ := ctx.Value(botWorkServicesKey{}).(BotWorkServices)
+	return service
+}
+func WithBotWorkServicesFromContext(dst, src context.Context) context.Context {
+	if service := BotWorkServicesFromContext(src); service != nil {
+		return WithBotWorkServices(dst, service)
+	}
+	return dst
+}
+
+// Discovery is bounded separately from work/evidence and never grants authority.
+const BotWorkSkillIndexLimit = 20
+const BotWorkSkillIndexMaxBytes = 12000
+
+type BotWorkSkillHead struct {
+	ID           uuid.UUID            `json:"id"`
+	Title        string               `json:"title"`
+	Status       store.BotSkillStatus `json:"status"`
+	HeadRevision int64                `json:"head_revision"`
+}
+
+// BotPriorRunContext is bounded outcome metadata, never a prior assignment,
+// mandate, report body or authority to replay an effect.
+type BotPriorRunContext struct {
+	BotID       store.BotID                `json:"bot_id"`
+	RunID       store.RunID                `json:"run_id"`
+	TriggerID   uuid.UUID                  `json:"trigger_id"`
+	CreatedAt   time.Time                  `json:"created_at"`
+	OutcomeAt   time.Time                  `json:"outcome_at"`
+	Status      store.RunStatus            `json:"status"`
+	FailureKind store.BotReportFailureKind `json:"failure_kind,omitempty"`
+}
+
+// ValidFor rechecks the exact scheduled occurrence binding at each consumer.
+func (p *BotPriorRunContext) ValidFor(current store.BotRun) bool {
+	if p == nil || current.Trigger != store.TriggerCron || current.TriggerID == uuid.Nil ||
+		p.BotID == uuid.Nil || p.BotID != current.BotID || p.RunID == uuid.Nil || p.RunID == current.ID ||
+		p.TriggerID != current.TriggerID || p.CreatedAt.IsZero() || p.OutcomeAt.IsZero() ||
+		!p.CreatedAt.Before(current.CreatedAt) || !p.OutcomeAt.Before(current.CreatedAt) || p.OutcomeAt.Before(p.CreatedAt) ||
+		(!p.Status.Terminal() && p.Status != store.RunInterrupted) {
+		return false
+	}
+	switch p.FailureKind {
+	case "", store.BotReportFailureBudget, store.BotReportFailureExecutionFormat,
+		store.BotReportFailureOperational, store.BotReportFailureInterrupted, store.BotReportFailureSetup:
+		return true
+	default:
+		return false
+	}
+}
+
+type BotWorkReadResult struct {
+	PriorRun              *BotPriorRunContext              `json:"prior_run,omitempty"`
+	PriorSkillID          *uuid.UUID                       `json:"prior_skill_id,omitempty"`
+	SkillIndex            []BotWorkSkillHead               `json:"skill_index,omitempty"`
+	SkillNext             string                           `json:"skill_next,omitempty"`
+	SkillIndexUnavailable bool                             `json:"skill_index_unavailable,omitempty"`
+	Work                  *store.BotWorkProjection         `json:"work"`
+	Notes                 string                           `json:"notes,omitempty"`
+	Evidence              []store.BotWorkEvidenceReference `json:"evidence,omitempty"`
+	NextCursor            string                           `json:"next_cursor,omitempty"`
+	Previous              *store.BotWorkProjection         `json:"previous,omitempty"`
+}
+
+type BotWorkReadRequest struct {
+	Cursor string
+	Limit  int
+	// PromptSnapshot requests latest current-run evidence already owned by the
+	// runner. Explicit tool reads retain their durable pagination semantics.
+	PromptSnapshot bool
+}
+type BotWorkChangeKind string
+
+const (
+	BotWorkUpsertItem     BotWorkChangeKind = "upsert_item"
+	BotWorkCancelItem     BotWorkChangeKind = "cancel_item"
+	BotWorkReplaceNotes   BotWorkChangeKind = "replace_notes"
+	BotWorkSetDisposition BotWorkChangeKind = "set_disposition"
+	BotWorkSetDelivery    BotWorkChangeKind = "set_delivery"
+	BotWorkSetRemaining   BotWorkChangeKind = "set_remaining"
+)
+
+type BotWorkChangeRequest struct {
+	DeliveryIntent    store.BotDeliveryIntent
+	DeliverableFormat store.BotDeliverableFormat
+	ExpectedRevision  int64
+	CallID            string // supplied by the bound ToolContext, not a public tool argument
+	Kind              BotWorkChangeKind
+	Item              *store.BotWorkItem
+	Notes             string
+	Disposition       store.AgentWorkDisposition
+	Remaining         []store.BotWorkObligation
+}
+type BotEvidenceReadRequest struct {
+	CallID        string
+	Offset, Limit int
+}
+type BotEvidenceReadResult struct {
+	Reference  store.BotWorkEvidenceReference `json:"reference"`
+	Content    string                         `json:"content"`
+	Offset     int                            `json:"offset"`
+	TotalBytes int                            `json:"total_bytes"`
+	Truncated  bool                           `json:"truncated"`
+}
+type BotWorkCheckRequest struct {
+	CallID, Question, DraftText string
+	EvidenceRefs                []string
+}
+type BotWorkSkillSelection struct {
+	SkillID          uuid.UUID
+	ExpectedRevision int64
+	CallID           string
+}
+type BotOwnerFeedbackScope string
+
+const (
+	BotOwnerFeedbackScopeSkill BotOwnerFeedbackScope = "skill"
+	BotOwnerFeedbackScopeRun   BotOwnerFeedbackScope = "run"
+)
+
+type BotWorkLearningProposal struct {
+	SkillID                                          uuid.UUID
+	OwnerFeedbackScope                               BotOwnerFeedbackScope
+	CallID                                           string
+	ExpectedRevision                                 int64
+	Title, Responsibility                            string
+	Method, EvaluationRules                          []string
+	OutputFormat                                     string
+	EvidenceRefs, OwnerQuotes, ReplaceExpectationIDs []string
+}
+
+// ProgressDispatch is the request-local durable dispatch capability shared by the
+// factory's model and every executable tool view. Begin precedes execution;
+// Settle requires trusted receipt evidence for writes, never response prose.
+type ProgressDispatch interface {
+	Begin(context.Context, store.BotProgressDispatchKind, string, store.BotUsage) (*store.BotProgressDispatchReceipt, error)
+	Settle(context.Context, uuid.UUID, store.BotProgressDispatchOutcome, store.BotUsage, string) error
+	Boundary(context.Context) error
+}
+
+type progressDispatchKey struct{}
+
+func WithProgressDispatch(ctx context.Context, dispatch ProgressDispatch) context.Context {
+	return context.WithValue(ctx, progressDispatchKey{}, dispatch)
+}
+func ProgressDispatchFromContext(ctx context.Context) ProgressDispatch {
+	dispatch, _ := ctx.Value(progressDispatchKey{}).(ProgressDispatch)
+	return dispatch
+}
+
+type RunRequest struct {
+	PlanMode bool // durable owner-selected mode; never inherited from Home history
+	// ProgressYieldRequested is a trusted worker drain signal, never model input.
+	ProgressYieldRequested func() bool
+	// CurrentLease follows supervisor renewals without extending authority.
+	CurrentLease func() store.BotLease
+	// Progress is a private repository-bound snapshot, not an approval checkpoint.
+	Progress      *store.BotProgressState
+	ProgressStore store.BotProgressStore
+	Task          *store.BotTaskRevision
+	// Skill is a detached, repository-pinned method; never an authority grant.
+	Skill         *store.BotSkillInvocation
+	Work          *store.BotWorkState
+	Mandate       *MandateExecution
+	Bot           store.Bot
+	Version       store.BotVersion
+	Run           store.BotRun
+	Principal     execution.Principal
+	Authorization execution.BotTurnAuthorizer
+	Policy        *execution.RunPolicy
+	Budget        execution.RunBudget
+	Goals         []store.BotGoal
+	Instructions  string
+	Attachments   []store.ChatFile
+	Now           time.Time
+	Interactive   bool
+}
+
+// RuntimeEvent retains the existing Chat wire payload; Sequence is monotonic per
+// logical turn. Persist-before-publish and replay cursors are adapter obligations.
+type RuntimeEvent struct {
+	SessionID uuid.UUID       `json:"session_id"`
+	RunID     store.RunID     `json:"run_id"`
+	TurnID    uuid.UUID       `json:"turn_id"`
+	Sequence  int64           `json:"sequence"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+type EventSink func(context.Context, RuntimeEvent) error
+
+type RunResult struct {
+	// ProgressCheckpoint is disjoint from the legacy approval Checkpoint below.
+	ProgressCheckpoint *store.BotProgressState
+	// ModelSelection is the successful owner-scoped factory selection, not usage or pricing.
+	ModelSelection *store.SessionPin
+	// SkillLearning is uncommitted until the scoped repository accepts it.
+	SkillLearning *store.BotSkillLearning
+	Status        store.RunStatus
+	Report        store.BotReport
+	Usage         store.BotUsage
+	Checkpoint    json.RawMessage
+	Todos         []store.BotTodo
+	Failure       *RunError
+}
+
+// ValidateCheckpoints rejects mixed formats; neither format establishes authority.
+func (r RunResult) ValidateCheckpoints() error {
+	if r.ProgressCheckpoint == nil {
+		return nil
+	}
+	if len(r.Checkpoint) != 0 {
+		return store.ErrBotInvalid
+	}
+	return r.ProgressCheckpoint.Validate()
+}
+
+// Runtime methods return on checkpoint or completion, not viewer disconnection.
+// Cancel must fence before the next action; it cannot undo a committed effect.
+type Runtime interface {
+	Start(context.Context, RunRequest, EventSink) (RunResult, error)
+	Resume(context.Context, RunRequest, EventSink) (RunResult, error)
+	Cancel(context.Context, store.BotLease) error
+}
+
+type RunErrorClass string
+
+const (
+	ErrorTransient   RunErrorClass = "transient"
+	ErrorPermanent   RunErrorClass = "permanent"
+	ErrorPermission  RunErrorClass = "permission"
+	ErrorRateLimited RunErrorClass = "rate_limited"
+	ErrorBlocked     RunErrorClass = "blocked"
+	ErrorBudget      RunErrorClass = "budget"
+	ErrorInterrupted RunErrorClass = "interrupted"
+)
+
+type RunError struct {
+	Class              RunErrorClass
+	Message            string
+	TerminalForAttempt bool
+	UncertainEffect    bool
+	Cause              error
+}
+
+func (e *RunError) Error() string { return e.Message }
+func (e *RunError) Unwrap() error { return e.Cause }
+
+// TaskWorkspace is optional; it is neither a second runtime nor authority.
+type TaskWorkspace interface {
+	Read(context.Context, store.BotID, string, int64) ([]byte, error)
+	Write(context.Context, store.BotTaskMutation, sandbox.BotHomeWorkspaceFile) error
+	Publish(context.Context, store.BotTaskPrepareRequest) (*store.BotTask, error)
+	Load(context.Context, store.BotID, store.BotTaskRef) (*store.BotTaskRevision, error)
+}
+
+// WorkspaceScriptBackend is optional; existing TaskWorkspace implementations
+// remain valid and unsupported backends fail closed without a host fallback.
+type WorkspaceScriptBackend interface {
+	Execute(context.Context, store.BotTaskMutation, store.BotTaskRef, string, execution.RunBudget) (*sandbox.BotHomeWorkspaceScriptResult, error)
+}
+
+type HomeRequest struct {
+	BotID    store.BotID
+	Scope    store.BotScope
+	Template string
+}
+type HomeRunBinding struct {
+	Home              store.BotHomeBinding
+	PhysicalSessionID uuid.UUID
+	Lease             store.BotLease
+}
+
+// HomeManager owns storage, not a long-lived physical sandbox. ReadArtifact must
+// authorize scope, confine paths and work after the originating run is destroyed.
+type HomeManager interface {
+	Ensure(context.Context, HomeRequest) (store.BotHomeBinding, error)
+	BindRun(context.Context, HomeRunBinding) error
+	ReadArtifact(context.Context, store.BotHomeBinding, store.BotArtifact) (io.ReadCloser, error)
+	Delete(context.Context, store.BotHomeBinding) error
+}
+type ResolvedModel struct {
+	Provider string
+	Model    string
+	LLM      model.LLM
+}
+type ModelResolver interface {
+	Resolve(context.Context, uuid.UUID) (ResolvedModel, error)
+}
+type Clock interface{ Now() time.Time }
+type NotificationRequest struct {
+	ID         uuid.UUID
+	BotID      store.BotID
+	RunID      store.RunID
+	Decision   store.NotificationDecision
+	Reason     string
+	Target     store.BotChannelBinding
+	Body       string
+	NotBefore  *time.Time
+	DeferCount int
+}
+type NotificationReceipt struct {
+	ProviderID  string
+	DeliveredAt *time.Time
+	Uncertain   bool
+}
+
+// Send must not broadcast or blindly repeat an uncertain external delivery.
+type Notifier interface {
+	Send(context.Context, NotificationRequest) (NotificationReceipt, error)
+}

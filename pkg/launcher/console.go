@@ -1195,11 +1195,11 @@ func RunConsole(ctx context.Context, cfg *ConsoleConfig) error {
 					fmt.Println(ui.RenderStatusBadge("Command rejected", false))
 				}
 				userMsg = agent.NewTimestampedUserContent(selection)
-				continue
 
-				// Reset state
+				// Reset state before starting the next turn.
 				waitingForApproval = false
 				approvalOptions = nil
+				continue
 			} else {
 				// Regular input
 				// Default title if empty
@@ -1217,7 +1217,6 @@ func RunConsole(ctx context.Context, cfg *ConsoleConfig) error {
 					displayTitle := strings.TrimSuffix(title, ":")
 					fmt.Println(ui.RenderStatusBadge(fmt.Sprintf("%s: %s", displayTitle, selection), true))
 					userMsg = agent.NewTimestampedUserContent(selection)
-					continue
 				} else {
 					// Free text input
 					input, err := ui.ReadInput(title, description)
@@ -1228,12 +1227,12 @@ func RunConsole(ctx context.Context, cfg *ConsoleConfig) error {
 					displayTitle := strings.TrimSuffix(title, ":")
 					fmt.Println(ui.RenderStatusBadge(fmt.Sprintf("%s: %s", displayTitle, input), true))
 					userMsg = agent.NewTimestampedUserContent(input)
-					continue
 				}
 
-				// Reset state
+				// Reset state before starting the next turn.
 				waitingForInput = false
 				inputOptions = nil
+				continue
 			}
 		} else {
 			// Normal flush at end of turn

@@ -396,6 +396,7 @@ if [ "$1" = inspect ]; then printf 'exited\n'; fi`)
 func TestStartSessionUnpausesContainer(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "log")
 	binary := writeDockerTestScript(t, log, `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$3" = '{{json .Mounts}}' ]; then printf '[]\n'; exit 0; fi
 if [ "$1" = inspect ]; then printf 'paused\n'; fi`)
 	t.Setenv("DOCKER_TEST_LOG", log)
 	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}

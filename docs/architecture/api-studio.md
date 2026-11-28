@@ -8,6 +8,91 @@ Astonish provides a comprehensive REST API (51 files in `pkg/api/`) that powers 
 
 Platform artifact content, downloads and PDF source reads require an existing authorized session, including for superadmins. They never read daemon-host paths or daemon-local transcripts. The source for a growing Markdown document is the authorized destination file in the sandbox backend; there is no secondary job store or reconstruction from persisted chunks. Trusted local-code mode retains host-file access. Downloads set `nosniff` and a sandboxed `default-src 'none'` CSP; HTML and JavaScript remain attachments. Reconnect/restore never grants cross-user lookup, and no existing artifact endpoint or authorization rule is weakened. A partial destination is visible and usable through this same boundary; the existing `astonish-report` fence publishes it as a report only after the continuation marker has been removed.
 
+## Bot working files and immutable deliveries
+
+Bot file routes use the request-scoped personal/team repository and `BotFiles`
+capability; add `?scope=personal|team` (default `personal`). These reads use retained
+storage, not daemon-host paths, transcript reconstruction, or model calls. They
+must not provision a Home, resume compute, reconcile publication, or retry work.
+Ordinary Chat/local Code artifact behavior remains separate. Bot-linked session
+artifact reads have no stale transcript-content fallback.
+
+All paths below start with `/api/studio/bots/{botID}`:
+
+| Method | Suffix | Result |
+|---|---|---|
+| GET | `/files?path=...&cursor=...&limit=100` | Metadata-only directory page; empty `path` selects the public Home root |
+| GET | `/files/stat?path=...` | Working-file metadata |
+| GET | `/files/preview?path=...` | Bounded text-source preview |
+| GET, HEAD | `/files/download?path=...` | Native attachment stream or headers |
+| POST | `/files/download-ticket?path=...` | Short-lived browser navigation ticket |
+
+The same `/stat`, `/preview`, `/download`, and `/download-ticket` operations are
+available under `/runs/{runID}/reports/{reportSequence}/artifacts/{artifactID}`.
+These identify exact committed published bytes, not the current file at its display
+path. `ReadBotPublication` requires a positive report sequence and matches Bot,
+run and Home session. The handler additionally validates the artifact ID, Home ID,
+content kind, digest, size and current tenant/owner binding. Missing, suppressed,
+uncommitted or mismatched deliveries never fall back to a newer mutable report.
+
+A directory response is `{entries: BotFileEntry[], next?: string}`; HTTP page size
+is 1–200, default 100. Entries contain `path`, `kind`, `size_bytes`, `modified_at`,
+`freshness`, optional `sha256`, and `preview` (`text` or `download`). Working-file
+freshness describes the current file; published-file freshness is its immutable
+SHA-256. Directory metadata is not a recursive content dump or the private Task
+workspace. Dot-prefixed path components, traversal, links and special files are
+not public browsing targets. Credentials, authority objects and private content
+keys must remain inaccessible.
+
+Preview returns `{entry, content, truncated}` for known text-source extensions,
+reading at most 256 KiB. Oversized text returns a bounded preview with
+`truncated:true`, not a blanket 413; an incomplete final UTF-8 rune is trimmed.
+Invalid UTF-8/NUL or unknown/binary content returns 415 with download required.
+HTML/SVG previews are JSON source text, never executable document responses.
+Clients must render source safely, not inject it as HTML. Preview redaction uses
+fresh request-scoped credentials (team previews exclude the viewer's personal
+store); unavailable credential hydration fails closed. Listing/stat never eagerly
+fetch file bodies. Redaction is a preview transformation, not a file rewrite.
+
+Authorized team members can browse the team Bot's working Home, including
+unpublished drafts; there is no report-publication/review gate on working-file
+routes. Private content/authority keys remain inaccessible. Whether unpublished
+Home visibility is acceptable team policy remains an explicit owner-signoff
+follow-up in the [release checklist](bot-release-checklist.md).
+
+Downloads return raw exact retained bytes, **without preview credential
+redaction**, and stream rather than buffer the former 16 MiB artifact allowance. They
+set `Content-Length`, safe attachment `Content-Disposition`,
+`Content-Type: application/octet-stream`, `Accept-Ranges: bytes`, `nosniff`,
+`Cache-Control: private, no-store`, and sandboxed `default-src 'none'` CSP. A single
+byte range yields 206; invalid or unsatisfiable ranges yield 416 with
+`Content-Range: bytes */<size>`. HEAD does not open content. Cancellation closes
+the owned stream, and terminal read/close validation precedes release of the final
+byte; a late failure aborts the response rather than completing corrupt bytes.
+Permanent deletion returns 410; missing/access/conflict/unsupported-capability
+errors remain explicit failures, not successful empty files.
+
+Browser clients obtain a ticket through their authenticated team-scoped POST,
+then navigate to its returned `url` for native download. The response also contains
+`expires_at` and sets `astonish_bot_download`: an HttpOnly, SameSite=Strict cookie,
+Secure on TLS, scoped to the download path and valid for **at most** 90 seconds,
+shortened to the issuing authentication evidence's expiry when earlier. The server
+binds it to user, organization, team and the exact path/query (including the Bot
+and selected object). Cross-site ticket requests are rejected. The URL contains
+no bearer secret; no JavaScript blob transfer is required. The ticket is itself
+an exact-object GET/HEAD credential: it can survive normal logout until expiry,
+but the middleware freshly checks active user/organization and organization/team
+membership, then the scoped repository authorizes the requested object. It does
+not mint general session authentication or authorize other routes. A ticket is
+not a durable sharing link and does not survive server restart. Immediate logout
+revocation is not guaranteed; that policy remains OPEN for owner signoff.
+
+Canonical delivery metadata is documented in
+[Home publication](bot-home-assessment-publication.md#canonical-file-publication)
+and [live events](bot-live-events.md#canonical-file-delivery-events). This contract
+description is not certification of built-browser/native-PTY, physical backend or
+backup/restore acceptance; those tiers require their own recorded evidence.
+
 ## Delegation identity
 
 Structured delegation progress adds optional `batch_id`, `task_id`, `child_session_id`, `attempt`, `call_id`, and `sequence`. Batch identity uses the parent tool-call ID when available. Task identity survives retries; each attempt has its own child session, persisted in child state and returned in `attempt_history`. Live tool projection uses a tracker per child/attempt and correlates deferred tools by call ID. History reconstructs identity from persisted delegation results rather than treating task names as globally unique.
@@ -130,7 +215,8 @@ The Studio UI is built with React 19, Vite 7, and Tailwind CSS 4. Key components
 - **Rate limiting**: Applied to API endpoints to prevent abuse.
 - **CSP headers**: Content Security Policy headers prevent XSS while allowing the production font stylesheet from Google Fonts and the client-side GitHub release check.
 - **Device authorization**: Protects Studio access.
-- **Credential redaction**: All API responses pass through the Redactor.
+- **Credential redaction**: Text/JSON surfaces use their scoped redaction paths;
+  raw Bot file downloads deliberately preserve exact bytes and are not redacted.
 
 ### Tools Cache
 
@@ -171,7 +257,8 @@ This avoids installing Node under QEMU on GitHub Actions multi-arch `linux/arm64
 
 - **Agent Engine**: The chat handler runs the ChatAgent via ADK runner and streams events.
 - **Sessions**: Session endpoints read/write to the FileStore.
-- **Credentials**: All API text responses are redacted. Credential endpoints manage the encrypted store.
+- **Credentials**: API text surfaces use scoped redaction; raw Bot file downloads
+  preserve exact retained bytes. Credential endpoints manage the encrypted store.
 - **Sandbox**: Sandbox endpoints trigger initialization, template management, and container proxy.
 - **Fleet**: Fleet endpoints manage sessions, stream agent activity, and handle human messages.
 - **MCP**: MCP endpoints manage server lifecycle and provide an inspector for debugging.

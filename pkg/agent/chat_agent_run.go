@@ -12,11 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -138,6 +140,9 @@ func (c *ChatAgent) retrievePreProvider(ctx context.Context, lifecycle *lifecycl
 // It is called by the ADK runner for each user message.
 func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		if c.EndModelPreparation != nil {
+			defer c.EndModelPreparation()
+		}
 		lifecycle := lifecycleRecorder(ctx, ctx.InvocationID())
 		defer lifecycle.close()
 		finishRequestPreparation := lifecycle.begin("request_session_preparation")
@@ -149,6 +154,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		thinkFilter := &thinkTagFilter{}
 		origYield := yield
 		yield = func(event *session.Event, err error) bool {
+			if c.EndModelPreparation != nil {
+				c.EndModelPreparation()
+			}
 			filterEventThinkContent(thinkFilter, event)
 			redactEventText(c.Redactor, event)
 			return origYield(event, err)
@@ -182,7 +190,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.EnforceAuthorization {
 			policy := c.GetOrCreateAuthPolicy(ctx.Session().ID())
 			if policy != nil && policy.Pending() != nil {
-				decision := policy.ApplyAuthorizationDecision(userText)
+				decision, authErr := policy.ApplyAuthorizationDecisionWithError(userText)
+				if authErr != nil {
+					yield(nil, authErr)
+					return
+				}
 				if decision != nil {
 					if decision.Granted {
 						userText = fmt.Sprintf(
@@ -420,7 +432,15 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.MCPAccessFilter = nil // personal mode — no filtering
 		}
 
-		instruction, promptStateEvent := stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+		var instruction string
+		var promptStateEvent *session.Event
+		if promptBuilder.applyBotPrompt(turnOverrides) {
+			// Bot metadata is invocation-local system context, never a replayed
+			// user event or a stale session-stable prompt from an earlier version.
+			instruction = promptBuilder.Build()
+		} else {
+			instruction, promptStateEvent = stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+		}
 		if promptStateEvent != nil && !yield(promptStateEvent, nil) {
 			finishPromptPersistence(context.Canceled)
 			return
@@ -693,6 +713,16 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			return nil, nil
 		})
 
+		// Revision policy is action-aware even through the progressive wrapper.
+		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, args = c.effectiveToolCall(ctx, t, args)
+			if code := RevisionToolBlocked(turnOverrides, t.Name(), args); code != "" {
+				return map[string]any{"status": code}, nil
+			}
+
+			return nil, nil
+		})
+
 		// Plan-mode hard gate: when the turn is in plan mode, refuse any tool
 		// that is not read-only (and refuse delegate_tasks, which could bypass
 		// the gate via a sub-agent). Returning a result — rather than an error
@@ -785,6 +815,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			var executionResearchMu sync.Mutex
 			executionResearch := map[string]int{}
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				// Approval flags are captured for the invocation, but Results can
+				// become durable between calls. Historical local plans no longer
+				// impose execution restrictions; remote/legacy gates are unchanged.
+				if runtime, _ := PlanRuntimeFromContext(ctx); runtime != nil && runtime.options.CodeExecution && runtime.Snapshot().IsFullyAccepted() {
+					return nil, nil
+				}
 				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if approvedPlanExecutionToolBlocked(name) {
@@ -860,7 +896,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string, args map[string]any) map[string]any {
 				// Only the callback that atomically claims the pending slot may emit
 				// an approval. Parallel tool calls remain suspended behind that owner.
-				if !authPolicy.TrySetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths}) {
+				if !authPolicy.TrySetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths, Options: options}) {
 					return map[string]any{
 						"status": "pending_authorization",
 						"info":   "Waiting for user authorization on a previous tool call.",
@@ -898,6 +934,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// and Ask mode — read-only tools can still target sensitive paths.
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 				t, args = c.effectiveToolCall(ctx, t, args)
+				if authPolicy.CodePlanFullAccessAllowed(ctx, sessionID) {
+					return nil, nil
+				}
 				if authPolicy.Pending() != nil {
 					return map[string]any{
 						"status": "pending_authorization",
@@ -934,6 +973,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 							"info":   "Waiting for user authorization on a previous tool call.",
 						}, nil
 					}
+					if authPolicy.CodePlanFullAccessAllowed(ctx, sessionID) {
+						return nil, nil
+					}
 					if authPolicy.ToolAuthorized(name) {
 						return nil, nil // an active grant covers this execution
 					}
@@ -957,7 +999,18 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			plan := c.activePlan
 			c.activePlanMu.Unlock()
 
-			if plan == nil || t.Name() == "announce_plan" || t.Name() == "delegate_tasks" {
+			if runtime, bound := PlanRuntimeFromContext(ctx); bound {
+				if runtime == nil || IsPlanManagementTool(t.Name()) || t.Name() == "delegate_tasks" {
+					return nil, nil
+				}
+				// The runtime atomically persists progress and leaves unapproved
+				// research calls alone; they must not become execution attempts.
+				if _, err := runtime.AdvanceOnToolStart(); err != nil {
+					return map[string]any{"status": PlanRuntimeErrorCode(err), "message": err.Error()}, nil
+				}
+				return nil, nil
+			}
+			if plan == nil || IsPlanManagementTool(t.Name()) || t.Name() == "delegate_tasks" {
 				return nil, nil
 			}
 
@@ -977,6 +1030,34 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Build BeforeModelCallbacks
 		var beforeModelCallbacks []llmagent.BeforeModelCallback
+		if progress := bot.ProgressControllerFromContext(ctx); progress != nil && turnOverrides != nil && turnOverrides.Bot != nil {
+			beforeModelCallbacks = append(beforeModelCallbacks, func(call agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+				if c.EndModelPreparation != nil {
+					c.EndModelPreparation()
+				}
+				decision, err := progress.Check(call)
+				if err != nil {
+					return nil, err
+				}
+				if decision != nil && req != nil {
+					if decision.Decision == store.BotProgressAskUser {
+						return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "ask_user", Args: map[string]any{"kind": "text", "prompt": decision.Question}}}}}}, nil
+					}
+					if decision.Decision == store.BotProgressSynthesize {
+						req.Tools = nil
+						if req.Config != nil {
+							clone := *req.Config
+							clone.Tools = nil
+							clone.ToolConfig = nil
+							req.Config = &clone
+						}
+					}
+					text := "Employee progress decision: " + string(decision.Decision) + "\n" + decision.Summary + "\n" + strings.Join(decision.NextSteps, "\n")
+					req.Contents = append(req.Contents, genai.NewContentFromText(text, "user"))
+				}
+				return nil, nil
+			})
+		}
 		if !promptBuilder.CodeMode {
 			beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 				if req != nil {
@@ -1046,15 +1127,39 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// keys and fail with "state key does not exist".
 		// Same pattern as node_llm.go for flow agents.
 		instr := instruction
+		beforeToolCallbacks = botNativeCallbacks(beforeToolCallbacks, func(ctx tool.Context, called tool.Tool, args map[string]any) (tool.Tool, string, map[string]any, error) {
+			if called.Name() == executeToolName {
+				decoded, err := decodeExecuteToolArgs(args)
+				if err != nil {
+					return nil, "", nil, err
+				}
+				resolved, group, err := (deferredToolResolver{index: c.ToolIndex}).resolve(ctx, decoded.Name)
+				if err != nil {
+					return nil, "", nil, err
+				}
+				return resolved, BotToolIdentity(group, resolved.Name()), decoded.Arguments, nil
+			}
+			return called, botExecutableIdentity(called), args, nil
+		})
+		codeLoop := newCodePlanLoop(ctx)
+		beforeToolCallbacks = append([]llmagent.BeforeToolCallback{codeLoop.beforeTool}, beforeToolCallbacks...)
+		beforeModelCallbacks = append(beforeModelCallbacks, codeLoop.beforeModel)
 		mainThreadTools := append([]tool.Tool(nil), c.Tools...)
 		llmAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat",
 			Model: effectiveLLM,
 			InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
+				preparation := context.Context(ctx)
+				if c.BeginModelPreparation != nil {
+					preparation = c.BeginModelPreparation(ctx)
+				}
+				if turnOverrides != nil && turnOverrides.Bot != nil && !promptBuilder.CodeMode {
+					return promptBuilder.BuildBotPrompt(preparation, turnOverrides), nil
+				}
 				return instr, nil
 			},
 			Tools:                mainThreadTools,
-			Toolsets:             c.Toolsets,
+			Toolsets:             botGuardToolsets(c.Toolsets),
 			BeforeToolCallbacks:  beforeToolCallbacks,
 			BeforeModelCallbacks: beforeModelCallbacks,
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
@@ -1082,7 +1187,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// error responses if ADK still hard-aborts on an unknown tool name.
 		var lastFunctionCalls []*genai.FunctionCall
 
-		for attempt := range maxRetries {
+		for attempt := 0; attempt < maxRetries; attempt++ {
 
 			retried := false
 			for event, err := range llmAgent.Run(ctx) {
@@ -1208,7 +1313,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 
 				// Yield event to the caller (console/web)
+				codeLoop.observe(event)
 				if !yield(event, nil) {
+					return
+				}
+				if checkpoint := codeLoop.checkpoint(); checkpoint != "" {
+					yield(&session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: checkpoint}}}}}, nil)
 					return
 				}
 			} // end inner for-range over llmAgent.Run(ctx)
@@ -1216,8 +1326,18 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				return
 			}
 
-			// If we didn't retry, the run completed successfully — break out
+			// A successful final narration is not Code plan completion. Resume the
+			// existing ADK invocation with hidden runtime guidance, not a user turn.
 			if !retried {
+				resume, err := codeLoop.resume(ctx)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if resume {
+					attempt--
+					continue
+				}
 				break
 			}
 			// Otherwise, the retry loop continues with the next attempt
@@ -1303,13 +1423,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		// Store the trace keyed by session ID for on-demand /distill
-		c.traceMu.Lock()
-		c.traceHistory[sessionID] = append(c.traceHistory[sessionID], trace)
-		// Prune: keep at most 20 traces per session
-		if len(c.traceHistory[sessionID]) > 20 {
-			c.traceHistory[sessionID] = c.traceHistory[sessionID][len(c.traceHistory[sessionID])-20:]
-		}
-		c.traceMu.Unlock()
+		c.recordConversationTrace(sessionID, trace)
 	}
 }
 

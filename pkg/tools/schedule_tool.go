@@ -43,7 +43,7 @@ type SchedulerJob struct {
 	TestFirst bool              `json:"test_first,omitempty"`
 
 	// Delivery configuration
-	DeliveryMode   string              `json:"delivery_mode,omitempty"`    // owner, team, members, target
+	DeliveryMode   string              `json:"delivery_mode,omitempty"`   // owner, team, members, target
 	MemberIDs      []string            `json:"member_ids,omitempty"`      // for "members" mode
 	ChannelFilter  []string            `json:"channel_filter,omitempty"`  // restrict to these channel types
 	MemberChannels map[string][]string `json:"member_channels,omitempty"` // per-member channel overrides
@@ -70,13 +70,32 @@ func SetSchedulerAccess(sa SchedulerAccess) {
 	schedulerAccessVar = sa
 }
 
+type scopedSchedulerKey struct{}
+
+// WithScopedSchedulerContext makes context-selected scheduler stores and RunJob
+// authoritative. Missing capabilities must never use the daemon singleton.
+func WithScopedSchedulerContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, scopedSchedulerKey{}, true)
+}
+
+func scopedScheduler(ctx context.Context) bool {
+	return ctx != nil && ctx.Value(scopedSchedulerKey{}) == true
+}
+
+func schedulerAccessFromContext(ctx context.Context) SchedulerAccess {
+	if scopedScheduler(ctx) {
+		return nil
+	}
+	return schedulerAccessVar
+}
+
 // getEffectiveSchedulerStore returns the team-scoped SchedulerStore from the
 // context (platform mode) or nil (legacy personal mode uses schedulerAccessVar).
 func getEffectiveSchedulerStore(ctx context.Context) store.SchedulerStore {
 	if ctx == nil {
 		return nil
 	}
-	return store.SchedulerStoreFromContext(ctx)
+	return guardBotSchedules(store.SchedulerStoreFromContext(ctx))
 }
 
 // getPersonalSchedulerStore returns the user's personal SchedulerStore from context.
@@ -84,7 +103,7 @@ func getPersonalSchedulerStore(ctx context.Context) store.SchedulerStore {
 	if ctx == nil {
 		return nil
 	}
-	return store.PersonalSchedulerStoreFromContext(ctx)
+	return guardBotSchedules(store.PersonalSchedulerStoreFromContext(ctx))
 }
 
 // resolveSchedulerStore picks the store for the given scope.
@@ -96,6 +115,9 @@ func resolveSchedulerStore(ctx context.Context, scope string) (store.SchedulerSt
 	case store.JobScopeTeam:
 		return team, store.JobScopeTeam
 	case store.JobScopePersonal:
+		if scopedScheduler(ctx) {
+			return personal, store.JobScopePersonal
+		}
 		if personal != nil {
 			return personal, store.JobScopePersonal
 		}
@@ -228,7 +250,7 @@ type ScheduleJobResult struct {
 
 func scheduleJob(ctx tool.Context, args ScheduleJobArgs) (ScheduleJobResult, error) {
 	ss, jobScope := resolveSchedulerStore(ctx, args.Scope)
-	if ss == nil && schedulerAccessVar == nil {
+	if ss == nil && schedulerAccessFromContext(ctx) == nil {
 		return ScheduleJobResult{}, fmt.Errorf("scheduler is not available — the daemon must be running with scheduler enabled")
 	}
 	if args.Scope == store.JobScopeTeam && ss == nil {
@@ -302,7 +324,7 @@ func scheduleJob(ctx tool.Context, args ScheduleJobArgs) (ScheduleJobResult, err
 				existing = storeJobToToolJob(sj)
 			}
 		} else {
-			existing = schedulerAccessVar.GetJobByName(args.Name)
+			existing = schedulerAccessFromContext(ctx).GetJobByName(args.Name)
 		}
 		if existing != nil {
 			return ScheduleJobResult{
@@ -314,21 +336,21 @@ func scheduleJob(ctx tool.Context, args ScheduleJobArgs) (ScheduleJobResult, err
 
 	// Create job
 	job := &SchedulerJob{
-		Name:           args.Name,
-		Mode:           args.Mode,
-		Cron:           args.Schedule,
-		Timezone:       args.Timezone,
-		Flow:           args.Flow,
-		Params:         args.Params,
-		Instr:          args.Instructions,
-		Channel:        args.Channel,
-		Target:         args.Target,
-		Enabled:        !args.TestFirst,
-		TestFirst:      args.TestFirst,
-		DeliveryMode:   args.DeliveryMode,
-		MemberIDs:      args.DeliveryMembers,
-		ChannelFilter:  args.DeliveryChannels,
-		Scope:          jobScope,
+		Name:          args.Name,
+		Mode:          args.Mode,
+		Cron:          args.Schedule,
+		Timezone:      args.Timezone,
+		Flow:          args.Flow,
+		Params:        args.Params,
+		Instr:         args.Instructions,
+		Channel:       args.Channel,
+		Target:        args.Target,
+		Enabled:       !args.TestFirst,
+		TestFirst:     args.TestFirst,
+		DeliveryMode:  args.DeliveryMode,
+		MemberIDs:     args.DeliveryMembers,
+		ChannelFilter: args.DeliveryChannels,
+		Scope:         jobScope,
 	}
 
 	// Default delivery mode to "owner" if not specified
@@ -369,7 +391,7 @@ func scheduleJob(ctx tool.Context, args ScheduleJobArgs) (ScheduleJobResult, err
 			_ = ss.Update(ctx, storeJob)
 		}
 	} else {
-		if err := schedulerAccessVar.AddJob(job); err != nil {
+		if err := schedulerAccessFromContext(ctx).AddJob(job); err != nil {
 			return ScheduleJobResult{
 				Status:  "error",
 				Message: fmt.Sprintf("Failed to create job: %v", err),
@@ -383,8 +405,8 @@ func scheduleJob(ctx tool.Context, args ScheduleJobArgs) (ScheduleJobResult, err
 		var execErr error
 		if runJob := store.RunJobFuncFromContext(ctx); runJob != nil {
 			result, execErr = runJob(ctx, job.ID)
-		} else if schedulerAccessVar != nil {
-			result, execErr = schedulerAccessVar.RunNow(ctx, job.ID)
+		} else if schedulerAccessFromContext(ctx) != nil {
+			result, execErr = schedulerAccessFromContext(ctx).RunNow(ctx, job.ID)
 		} else {
 			execErr = fmt.Errorf("no execution path available (scheduler not configured)")
 		}
@@ -439,7 +461,7 @@ type JobSummary struct {
 func listScheduledJobs(ctx tool.Context, args ListScheduledJobsArgs) (ListScheduledJobsResult, error) {
 	personal := getPersonalSchedulerStore(ctx)
 	team := getEffectiveSchedulerStore(ctx)
-	if personal == nil && team == nil && schedulerAccessVar == nil {
+	if personal == nil && team == nil && schedulerAccessFromContext(ctx) == nil {
 		return ListScheduledJobsResult{
 			Message: "Scheduler is not available — the daemon must be running with scheduler enabled",
 		}, nil
@@ -462,7 +484,7 @@ func listScheduledJobs(ctx tool.Context, args ListScheduledJobsArgs) (ListSchedu
 			}
 		}
 	} else {
-		jobs = schedulerAccessVar.ListJobs()
+		jobs = schedulerAccessFromContext(ctx).ListJobs()
 	}
 	summaries := make([]JobSummary, 0, len(jobs))
 	for _, j := range jobs {
@@ -520,7 +542,7 @@ type RemoveScheduledJobResult struct {
 func removeScheduledJob(ctx tool.Context, args RemoveScheduledJobArgs) (RemoveScheduledJobResult, error) {
 	personal := getPersonalSchedulerStore(ctx)
 	team := getEffectiveSchedulerStore(ctx)
-	if personal == nil && team == nil && schedulerAccessVar == nil {
+	if personal == nil && team == nil && schedulerAccessFromContext(ctx) == nil {
 		return RemoveScheduledJobResult{
 			ToolResult: toolError("Scheduler is not available"),
 		}, nil
@@ -555,7 +577,7 @@ func removeScheduledJob(ctx tool.Context, args RemoveScheduledJobArgs) (RemoveSc
 	}
 
 	if jobID == "" && args.JobName != "" {
-		if job := schedulerAccessVar.GetJobByName(args.JobName); job != nil {
+		if job := schedulerAccessFromContext(ctx).GetJobByName(args.JobName); job != nil {
 			jobID = job.ID
 		}
 		if jobID == "" {
@@ -564,7 +586,7 @@ func removeScheduledJob(ctx tool.Context, args RemoveScheduledJobArgs) (RemoveSc
 			}, nil
 		}
 	}
-	if err := schedulerAccessVar.RemoveJob(jobID); err != nil {
+	if err := schedulerAccessFromContext(ctx).RemoveJob(jobID); err != nil {
 		return RemoveScheduledJobResult{
 			ToolResult: toolError("Failed to remove job: %v", err),
 		}, nil
@@ -592,7 +614,7 @@ type UpdateScheduledJobResult struct {
 func updateScheduledJob(ctx tool.Context, args UpdateScheduledJobArgs) (UpdateScheduledJobResult, error) {
 	personal := getPersonalSchedulerStore(ctx)
 	team := getEffectiveSchedulerStore(ctx)
-	if personal == nil && team == nil && schedulerAccessVar == nil {
+	if personal == nil && team == nil && schedulerAccessFromContext(ctx) == nil {
 		return UpdateScheduledJobResult{
 			ToolResult: toolError("Scheduler is not available"),
 		}, nil

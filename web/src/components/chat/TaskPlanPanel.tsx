@@ -1,8 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { ChevronDown, Loader, Check, Wrench, ListTodo, RotateCcw, Code, Globe, GitFork, FileUp } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { markdownComponents } from './markdownComponents'
+import DelegationDetail from './DelegationDetail'
 import type { SubTaskExecutionMessage, SubTaskEvent } from './chatTypes'
 import { fetchSubtaskEvents } from '../../api/studioChat'
 
@@ -40,7 +38,6 @@ function stepIcon(task: TaskState) {
 // timestamps on hover, click to expand details.
 export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecutionMessage; sessionId?: string }) {
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({})
-  const [expandedContent, setExpandedContent] = useState<Set<string>>(new Set())
   // Lazy-loaded tool events for tasks that only have summary after page refresh
   const [fetchedEvents, setFetchedEvents] = useState<Record<string, SubTaskEvent[]>>({})
   const [loadingTasks, setLoadingTasks] = useState<Set<string>>(new Set())
@@ -95,6 +92,25 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
     }
   }, [sessionId, data.batch_id])
 
+  const previousStatuses = useRef(new Map<string, string>())
+  useEffect(() => {
+    visibleTaskStates.forEach(task => {
+      const key = detailKey(task)
+      const previous = previousStatuses.current.get(key)
+      previousStatuses.current.set(key, task.status)
+      if (previous === 'running' && task.status !== 'running') {
+        // A snapshot requested while running is incomplete even if the detail is
+        // now collapsed. Drop it (and any in-flight response) before it can hide
+        // the final activity; collapsed details reload lazily on the next open.
+        requests.current.get(key)?.abort()
+        requests.current.delete(key)
+        setFetchedEvents(prev => { const next = { ...prev }; delete next[key]; return next })
+        setLoadingTasks(prev => { const next = new Set(prev); next.delete(key); return next })
+        if (expandedTasks[key]) void loadTaskEvents(task)
+      }
+    })
+  }, [visibleTaskStates, expandedTasks, loadTaskEvents])
+
   const completedCount = taskStates.filter(t => t.status === 'complete').length
   const totalCount = taskStates.length
   const allDone = data.status !== 'running'
@@ -103,16 +119,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
     const key = detailKey(task)
     const willExpand = !expandedTasks[key]
     setExpandedTasks(prev => ({ ...prev, [key]: willExpand }))
-    if (willExpand && !fetchedEvents[key] && !task.events.some(e => e.type === 'task_tool_call' || e.type === 'task_tool_result')) loadTaskEvents(task)
-  }
-
-  const toggleContent = (eventKey: string) => {
-    setExpandedContent(prev => {
-      const next = new Set(prev)
-      if (next.has(eventKey)) next.delete(eventKey)
-      else next.add(eventKey)
-      return next
-    })
+    if (willExpand && !fetchedEvents[key]) loadTaskEvents(task)
   }
 
   // Status dot for the timeline
@@ -139,118 +146,6 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
       )
     }
     return <div className="timeline-dot timeline-dot--pending" />
-  }
-
-  const TRUNCATE_THRESHOLD = 800
-
-  const renderCardContent = (cardData: unknown, eventKey: string) => {
-    if (cardData == null || cardData === undefined) return null
-    const text = typeof cardData === 'string' ? cardData : JSON.stringify(cardData, null, 2)
-    if (!text) return null
-
-    const isTruncatable = text.length > TRUNCATE_THRESHOLD
-    const isFullyExpanded = expandedContent.has(eventKey)
-    const displayText = (isTruncatable && !isFullyExpanded) ? text.slice(0, TRUNCATE_THRESHOLD) : text
-
-    return (
-      <div className="px-3 pb-2">
-        <div className="relative">
-          <pre
-            className="text-xs whitespace-pre-wrap break-words font-mono p-2 rounded"
-            style={{
-              background: 'rgba(0,0,0,0.3)',
-              color: 'var(--text-secondary)',
-              maxHeight: isFullyExpanded ? 'none' : '200px',
-              overflowY: 'hidden',
-            }}
-          >
-            {displayText}
-          </pre>
-          {isTruncatable && !isFullyExpanded && (
-            <div
-              className="absolute bottom-0 left-0 right-0 h-10 flex items-end justify-center rounded-b"
-              style={{ background: 'linear-gradient(transparent, rgba(0,0,0,0.5))' }}
-            >
-              <button
-                onClick={() => toggleContent(eventKey)}
-                className="text-[10px] hover:opacity-80 px-2 py-0.5 mb-1 rounded bg-black/50 cursor-pointer"
-                style={{ color: 'var(--brand)' }}
-              >
-                Show more ({Math.ceil(text.length / 1000)}k chars)
-              </button>
-            </div>
-          )}
-          {isTruncatable && isFullyExpanded && (
-            <div className="flex justify-center mt-1">
-              <button
-                onClick={() => toggleContent(eventKey)}
-                className="text-[10px] hover:opacity-80 px-2 py-0.5 rounded bg-black/30 cursor-pointer"
-                style={{ color: 'var(--brand)' }}
-              >
-                Show less
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
-
-  const renderToolCard = (evt: SubTaskEvent, eventKey: string) => {
-    const isCall = evt.type === 'task_tool_call'
-    const name = evt.tool_name || 'unknown'
-    const cardData = isCall ? (evt.tool_args || null) : (evt.tool_result || null)
-
-    return (
-      <div
-        key={eventKey}
-        className="my-1.5 rounded-lg overflow-hidden"
-        style={{ border: '1px solid var(--border-color)', background: 'rgba(255,255,255,0.03)' }}
-      >
-        <div className="flex items-center gap-2 px-3 py-1.5">
-          <Wrench size={12} className={isCall ? 'text-primary' : 'text-green-400'} />
-          <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
-            {isCall ? 'Tool Call' : 'Tool Result'}: <code className="bg-primary/15 text-primary px-1 py-0.5 rounded text-[11px]">{name}</code>
-          </span>
-        </div>
-        {renderCardContent(cardData, eventKey)}
-      </div>
-    )
-  }
-
-  const renderTaskText = (evt: SubTaskEvent, eventKey: string) => {
-    const textContent = evt.text || ''
-    if (!textContent) return null
-
-    return (
-      <div key={eventKey} className="my-1.5">
-        <div
-          className="p-3 rounded-lg text-sm"
-          style={{
-            background: 'rgba(255,255,255,0.05)',
-            border: '1px solid var(--border-color)',
-          }}
-        >
-          <div className="markdown-body text-xs" style={{ color: 'var(--text-primary)' }}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{textContent}</ReactMarkdown>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  const renderTaskEvent = (evt: SubTaskEvent, taskIdx: number, evtIdx: number) => {
-    const eventKey = `subtask-${taskIdx}-${evtIdx}`
-    if (evt.type === 'task_start' || evt.type === 'task_complete' || evt.type === 'task_failed') {
-      return null
-    }
-    if (evt.type === 'task_tool_call' || evt.type === 'task_tool_result') {
-      return renderToolCard(evt, eventKey)
-    }
-    if (evt.type === 'task_text') {
-      return renderTaskText(evt, eventKey)
-    }
-    return null
   }
 
   return (
@@ -390,7 +285,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                           }
                           setSelectedAttempts(prev => ({ ...prev, [task.id]: attempt.attempt! }))
                           setExpandedTasks(prev => ({ ...prev, [detailKey(selected)]: true }))
-                          if (!attempt.events.some(e => e.type === 'task_tool_call') && !fetchedEvents[detailKey(selected)]) loadTaskEvents(selected)
+                          if (!fetchedEvents[detailKey(selected)]) loadTaskEvents(selected)
                         }}
                       >
                         Attempt {attempt.attempt}
@@ -405,25 +300,10 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                   {task.events.length === 0 && task.status === 'pending' && (
                     <div className="text-xs py-1" style={{ color: 'var(--text-muted)' }}>Waiting to start...</div>
                   )}
-                  {/* Show loading indicator while fetching child session events */}
-                  {loadingTasks.has(detailKey(task)) && (
-                    <div className="flex items-center gap-2 text-xs py-2" style={{ color: 'var(--text-muted)' }}>
-                      <Loader size={10} className="animate-spin" />
-                      <span>Loading execution detail...</span>
-                    </div>
-                  )}
-                  {errors[detailKey(task)] && <div role="alert">{errors[detailKey(task)]} <button onClick={() => loadTaskEvents(task)}>Retry</button></div>}
-                  {fetchedEvents[detailKey(task)]?.length === 0 && <div>No execution detail recorded.</div>}
-                  {!sessionId && !task.events.length && <div>Execution detail unavailable.</div>}
-                  {/* Render lazy-fetched events (tool calls from child session) */}
-                  {fetchedEvents[detailKey(task)] && fetchedEvents[detailKey(task)].map((evt, evtIdx) =>
-                    renderTaskEvent(evt, taskIdx, evtIdx)
-                  )}
-                  {/* Render inline events — suppress task_text when fetched events are available
-                      (the fetched events already include the full output, avoiding duplication) */}
-                  {task.events
-                    .filter(evt => !(fetchedEvents[detailKey(task)] && evt.type === 'task_text'))
-                    .map((evt, evtIdx) => renderTaskEvent(evt, taskIdx, evtIdx + (fetchedEvents[detailKey(task)]?.length || 0)))}
+                  <DelegationDetail key={detailKey(task)} identity={detailKey(task)}
+                    live={task.events} persisted={fetchedEvents[detailKey(task)]}
+                    running={task.status === 'running'} loading={loadingTasks.has(detailKey(task))}
+                    error={errors[detailKey(task)]} retry={() => loadTaskEvents(task)} />
                 </div>
               )}
             </div>

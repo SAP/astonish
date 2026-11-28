@@ -23,6 +23,7 @@ require (
 	github.com/go-rod/rod v0.116.2
 	github.com/go-rod/stealth v0.4.9
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
+	github.com/gofrs/flock v0.13.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gomlx/gomlx v0.27.3
 	github.com/google/uuid v1.6.0
@@ -120,7 +121,6 @@ require (
 	github.com/go-shiori/dom v0.0.0-20230515143342-73569d674e1c // indirect
 	github.com/go-swiss/fonts v0.0.0-20230807175105-90067c2f5042 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
 	github.com/gomlx/exceptions v0.0.3 // indirect
 	github.com/gomlx/go-huggingface v0.3.5 // indirect

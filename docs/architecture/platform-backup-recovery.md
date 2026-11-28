@@ -11,6 +11,18 @@ The design follows the existing tenant topology:
 
 All logical export/import code must go through `pkg/store/entstore`. Backup code may define archive primitives in `pkg/backup`, but it must not open raw Ent clients or bypass the tenant router.
 
+## Bot database-runtime compatibility
+
+File-first export/verify/restore supports format-3 database runtime envelopes and
+format-2 external runtime envelopes together. Database records and inline child
+initial state stay in SQL and validate with production logical codecs; actual
+artifact/configuration/workspace bytes still participate in typed file closure.
+Restore maps named runtime-scope/artifact fields only, neutralizes run admission,
+worker and lease authority, and retains paused Bots. SQL-only Bot archives remain
+rejected. Unsupported versions, corrupted inline payloads and missing/foreign
+artifact references fail closed before target visibility. Older binaries cannot
+consume format 3; rollback requires a compatible archive or dual-reader binary.
+
 ## Archive Format
 
 The archive is a single user-facing `.astonish-backup` file. Internally it is a tar-compatible multi-file logical archive, gzip-compressed by default. Readers detect gzip by magic bytes and continue to accept uncompressed tar archives for compatibility. The archive contains these reserved metadata entries:
@@ -72,6 +84,201 @@ A full PostgreSQL platform backup spans multiple databases, so there is no singl
 
 Physical backup mode is future work. It must use safe backend mechanisms such as SQLite's online backup API or PostgreSQL `pg_dump`; it must not copy live WAL-backed SQLite files naïvely.
 
+## Streaming payload prerequisite and file-first Bot gate
+
+`pkg/backup.Writer.AddFile` no longer buffers a whole payload in RAM. Unknown-size
+readers are copied with a 32 KiB buffer to a mode-0600 temporary file beside the
+archive, then streamed into tar; the temporary file is removed on return.
+`AddFileContext` adds cancellation between reads. `AddFileSized` avoids the
+spool for a fenced, exact-size source, computes SHA-256 during transfer, and
+rejects short/extra bytes. A failure after writing a tar header permanently
+prevents manifest finalization. Readers remain caller-owned: a caller must close
+blocked network reads on cancellation. These primitives do not establish a
+writer fence or verify SQL/file reference closure. Each reserved metadata JSON
+entry is limited to 16 MiB on write/read; this is not a payload-size limit.
+
+**SQLite/Docker file-first recovery uses the public backup and restore commands.**
+The source must be paused/stopped, lease-free and detached. Export holds SQLite
+`BEGIN IMMEDIATE` while capturing each scope's SQL and reference closure, and
+Docker admission locks while streaming ordinary Home and protected storage.
+Legacy inline Bot rows, unknown root metadata, incomplete publication authority,
+missing objects and backends without journaled fresh-Home recovery are refused.
+Ordinary non-Bot logical archives keep their existing behavior.
+
+`platform restore ARCHIVE --confirm` requires a fresh empty target and a journaled
+retained-Home backend. PostgreSQL additionally requires an explicit durable local
+content/journal root (`storage.sqlite.data_dir` in the CLI configuration), CREATEDB,
+the available vector extension, the existing `astonish_app` role, and compatible
+platform schemas. Planning probes these capabilities without creating resources;
+schema initialization and required grants must succeed before publication.
+It freezes and validates the archive, including the SQL-derived reference closure,
+before creating target Homes. Restore allocates new physical Home/private volume
+generations, preserves logical IDs and immutable refs/hashes, increments Home
+revision/fences, and installs staged content at its exact immutable identity.
+Restored Bots are paused with activation blocked for reconciliation. Old receipts
+are historical bytes, not fresh execution permission; live approvals and unsettled
+publications are refused. Scope/owner mappings use validated typed references;
+`--reset-target` remains unsupported for file-first archives. A failed installation
+may leave exclusively reserved, unselected files/volumes; do not reuse an interrupted
+target. Scope SQL commits are not a cross-database atomic transaction, so use a
+dedicated offline target.
+
+PostgreSQL restore calls `receiptPostgresStage` from the public file-first importer.
+Each organization gets an exclusively created `astonish_restore_<generation>`
+database. A private uncached handle verifies its journal, OID and database comment,
+initializes the existing org/team/personal schemas, then imports all child rows in
+one transaction with `SET LOCAL search_path`. Files and mapped immutable references
+have already been installed and verified. Handles close before the receipt becomes
+ready. Only after all tenants succeed does an exclusive platform transaction insert
+platform rows and exact `organizations.db_name` routes together. A durable committed
+journal barrier is written **before** COMMIT: lost acknowledgments require routing
+reconciliation, never cleanup.
+
+`platform restore cleanup ARCHIVE --confirm` requires stopped target writers and the
+same archive digest. Under platform write exclusion it drops only exact uncommitted
+receipt databases; foreign/replaced OIDs or comments, published routes, and attached
+databases refuse cleanup. Failed drops retain the journal for retry. No connections
+are force-terminated and no ordinary provisioning/adoption path is used.
+
+The public `ExportPlatformBackup` builds in a private sibling directory, verifies
+before publication, sets mode 0600, syncs and renames only on success. Public
+`platform backup verify` checks file-first semantic closure, not just checksums.
+`inspect` remains metadata-only. Large payloads are streamed; existing archive
+passphrase encryption still buffers its envelope and is not a bounded-memory tier.
+The historical Bot sections below describe the unsupported old development
+format, not permission to import legacy inline/base64 Task archives.
+
+Physical acceptance: `ASTONISH_TEST_DOCKER=1 ASTONISH_SANDBOX_IMAGE=<local-image>
+go test ./cmd/astonish -run '^TestBotFileFirstBackupCLI$' -count=1 -v -timeout=10m`
+uses an isolated configuration, real CLI subprocesses, detached disposable compute,
+a fresh target generation and exact >16 MiB ordinary/protected file readback.
+
+PostgreSQL public-entrypoint coverage is
+`go test -tags integration ./pkg/store/entstore -run '^TestBackupFileFirstPostgresRestoreStagingBlocker$' -count=1 -v`.
+Despite its historical name, this test now invokes the concrete staging/import and
+publication path for personal and team scopes using an in-memory Home backend.
+It fails explicitly as BLOCKED without disposable `ASTONISH_TEST_DSN`; compilation
+alone is not integration evidence. The PostgreSQL plus physical Docker/Kubernetes
+Home round-trip remains a separate required fixture, not proven by mock-driver or
+in-memory backend tests.
+
+### Internal immutable-content archive (not platform recovery)
+
+`backup_bot_files.go` and `backup_bot_files_archive.go` implement the internal
+`bot-immutable-files-v1` archive. `collectBotBackupRoots` inventories typed disk
+envelopes through the personal/team adapters, including memory catalogue heads
+and session initial-state metadata. Independently owned team templates and intake
+roots are supplied explicitly through `rootFromIndependent`; they are not
+reassigned to the source Bot. Run reports, work candidates and report/publication
+activity payloads contribute typed artifact content edges. Approval arguments,
+checkpoint JSON, transcript tool results and authority/control references are
+opaque data, not recursively searched for reference-shaped JSON.
+
+`exportBotFileContent` requires caller-supplied authorized scopes, a writer and
+attachment fence, root collection under that fence, and an exact-reference stream
+opener. Staged and retained immutable objects are spooled privately, checked for
+exact size and SHA-256, and streamed into the archive in bounded chunks. Artifact
+bytes have no 16 MiB ceiling; typed containers are capped at 64 MiB, metadata at
+16 MiB and inventory at 100,000 objects. The index contains references and codecs,
+not content bodies or SQL. Failed export leaves an existing target untouched and
+removes its private spool files. The completed archive is revalidated before
+publication.
+
+`validateBotFileContentArchive` requires independently collected expected roots;
+archive-declared roots cannot grant scope or establish completeness. It checks
+immutable key/kind/revision/digest metadata, exact bytes, codecs, and reachable
+reference closure, rejecting missing, foreign, conflicting, orphan, duplicate or
+out-of-order objects and malformed typed containers. This is library-level
+immutable-content coverage only: it does not capture ordinary mutable Home files,
+prove a real backend fence, restore content or SQL, or perform binding mapping.
+Consequently the public Bot backup/restore rejection gate stays closed. The
+internal exporter does not enable the buffered encryption path.
+
+## Bot recovery coverage (historical development format; currently rejected)
+
+Logical restore orders Bot aggregate roots before versions/goals/runs, and those before tracked items/approvals/outbox records. This ordering is shared by the SQLite and PostgreSQL import code; schema-hash checks and per-scope foreign-key validation are unchanged.
+
+Phase 2 also persists structured `MemoryAttribution` in existing memory metadata, reviewed memory replacement/source snapshots and `memory_review` receipts in the scoped activity/outbox records, and opaque `BotHomeBinding` records. No new physical-home archive format is implied: mapped documents are reconstructed from records, not separately backed-up files. `RegisterBotHomeBinding` is an internal verified registry/CAS operation, while local sandbox JSON and scoped Ent adapters serialize the binding. Reopen/CAS tests prove those service records survive reconstruction; the archive tests below establish their stated recovery cases, not a blanket acceptance of every newer reviewed-ingest receipt under scope mapping. Sandbox runtime registry rows retain the existing transient restore policy.
+
+`TestRestorePlatformBackupSQLiteFreshTarget` creates personal/team Bots through the scoped router, exports a real archive, and restores into a fresh SQLite deployment. It verifies immutable versions, goals, tracked commitments, correction activity, home-session linkage, team templates and cross-scope denials. Soft-deleted Bots retain their original restore deadline and can restore to paused after archive import. Existing Chat/flow/app recovery and default-paused scheduler assertions remain in the same test.
+
+The shared logical importer now invalidates Bot execution authority inside each scope transaction, even with `--include-transient` and `--enable-scheduled-jobs`:
+
+- Active Bots restore **paused**, with an advanced revision. Draft, paused, stopped and deleted states stay unchanged.
+- Bot/run/outbox fencing counters advance; worker leases are cleared. Existing active-run pointers remain teardown barriers, and `cleanup_complete` resets to false: restoring rows does not prove source containers stopped or home volumes recovered.
+- Queued, running and approval-waiting runs become **interrupted**, with an explicit unverified-recovery note. Terminal outcomes, report evidence and checkpoints are retained. SQL status and embedded run/approval documents agree.
+- Pending and approved exact-action decisions become **revoked**. Consumed, denied, expired and already-revoked history is preserved.
+- Undelivered outbox rows are held at `9999-12-31T23:59:59Z`, with a reconciliation reason; this is a disabled-work sentinel, not a promised delivery date. Payloads, sequence numbers, deduplication keys, attempts and existing delivery receipts remain intact. No false delivered receipt is generated. Recovery tooling must explicitly reconcile these rows before making them eligible again; it is not implemented yet.
+- Bot-trigger jobs always restore paused with no next occurrence. The general enable-jobs option still applies to ordinary schedules.
+
+`TestBotRestoreQuiescenceDocuments` covers both text and object JSON representations, exact counter/cursor precision, preserved teardown barriers and receipts, and malformed documents/counters. `TestBotRestoreMalformedDocumentRollsBackScope` verifies that invalid Bot documents roll back the scope import. The archive round trip exercises all persisted run and approval states in both scopes, with default and explicit runtime restore options.
+
+This coverage does **not** establish a complete operational recovery workflow. The immediate pre-Bot SQLite/PostgreSQL upgrades and Bot logical-recovery acceptance have been exercised; physical home recovery, source-worker shutdown and explicit reconciliation/resume tooling remain pending. Do not enable Bot workers against a restored archive until those recovery gates exist. Logical control-plane backups are not a backup of independently retained home volumes. The internal cleanup callback/receipt seam records trusted attestations only and does not perform or independently verify physical teardown.
+
+The run archive fixture uses production `botJSONMap` envelopes and reads restored state through `botDecode`. Recovery updates the inner `bot_document` and retains its envelope, including exact integer values. `TestBotRestoreApprovalEnvelope` covers wrapped/unwrapped documents in text/object columns and rejects malformed envelopes. Earlier unwrapped-only fixtures did not prove production run-document recovery; the envelope fixture exposed and now covers that gap.
+
+### Bot scope mapping
+
+Bot rows do not use recursive string substitution. Only current root ownership, linked session ownership and viewer cursor keys are remapped using the source organization and destination scope. Bot IDs, names, charter/persona definitions, historical authorship, evidence, action arguments/digests, content hashes and opaque home storage keys are preserved. This keeps immutable reviewed documents intact rather than treating every matching string as a scope reference. A cursor collision resets the mapped viewer to unread. Ordinary non-Bot mapping remains unchanged.
+
+`TestRestorePlatformBackupSQLiteMappedOrgAndTeam` also maps a personal user identity and verifies team/personal Bot reads, home linkage, unchanged reviewed definitions/goals, preserved read positions and rejection of the old principal. `TestBotRestoreMappingPreservesContent` covers legacy object documents and rejects owner mappings from unrelated organizations. Mapping a storage key does not relocate physical files; home recovery is still an operator/runtime reconciliation requirement.
+
+### Bot-local skill recovery
+
+`bot_skills` and `bot_skill_revisions` are durable personal/team Bot-owned rows, not global skill-library entries. Logical export includes both tables. Restore inserts skill roots before immutable revisions, validates row/document identity and revision digests, and rejects revisions whose root belongs to another Bot. Validation runs inside the existing scope transaction; a corrupt revision rolls back that scope. This does not add a platform-wide transaction.
+
+Skill documents, source provenance, historical authorship, revision IDs/digests and run-pinned snapshots are immutable under org/team/user mapping. Only current ownership and routing references follow the existing Bot mapping rules. Execution quiescence remains unconditional and does not rewrite skill history: a recovered skill is not permission to resume a Bot or a worker lease.
+
+The schema compatibility exception also recognizes the exact immediate **pre-skill Bot v1** schema in team/personal scopes: project out only `bot_skills` and `bot_skill_revisions` from the current target hash, retaining every other attribute checked by the backend's existing hash. A legacy archive containing either skill table is rejected; unrelated schema drift remains rejected. The pre-Bot projection excludes these newer tables as well. DDL migration version `2` is independent of the unchanged Bot document schema version `1`.
+
+`TestBotSkillRestoreSQLitePreSkillArchive`, `TestBotSkillRestoreValidation` and `TestBotSkillRestoreMalformedRevisionRollsBackScope` cover exact compatibility, invalid digest/foreign-root rejection and rollback. `TestBotSkillRecoveryHTTPAcceptance` uses real loopback HTTP with production routes/tenant middleware and independent SQLite deployments in both scopes. It creates two skill revisions, maps an archive into a fresh deployment, reopens twice, reads exact head/history and pinned runs, checks paused/interrupted recovery, rejects old-owner/cross-Bot/cross-scope reads, then permanently deletes one Bot after a controlled cleanup attestation. Reopen and a fresh logical export confirm the target's skill rows are removed while another Bot's skill, the source archive and the source deployment remain intact. Authentication, readiness and physical cleanup are controlled fixtures; this is not a live identity-provider, model, daemon or volume-deletion proof.
+
+PostgreSQL equivalents are `TestBotSkillPostgresPreSkillArchive` and `TestBotSkillPostgresRecovery`, including schema version, foreign provenance rejection, transaction rollback, concurrent work/root CAS, replay, archive restore and repeated reopen. They require an **isolated disposable**, admin-capable `ASTONISH_TEST_DSN`; the harness creates and drops generated databases. Explicit acceptance must run:
+
+```sh
+ASTONISH_REQUIRE_SKILL_POSTGRES=1 go test -race -tags integration ./pkg/store/entstore -run '^TestBotSkillPostgres' -count=1 -timeout=5m
+```
+
+The marker makes a missing DSN a failure. Ordinary integration selection without it may skip unavailable infrastructure; a skip is not PostgreSQL evidence. The recovery implementation's local verification had no disposable DSN, so these new PostgreSQL cases remain unverified against a running database.
+
+### Bot Task physical workspace archives
+
+Logical rows alone do not recover Task state files. Trusted offline composition can supply `PlatformBackupExportOptions.WorkspaceBackend`, an exact server-derived `WorkspaceBinding` resolver and `WorkspaceFence` to include `bot-workspace-v1` JSON entries at `orgs/{org}/teams/{team}/bot_workspaces/{bot}.json` or `orgs/{org}/personal/{user}/bot_workspaces/{bot}.json`. The ordinary backup CLI remains logical-row-only unless this capability is explicitly wired; no implicit local volume discovery is performed.
+
+`WithBotWorkspaceArchiveFence` acquires the same scoped per-Bot locks used by authorized physical writers for both the SQL export and full physical inventory. Operators must quiesce new Bot creation and other non-Bot writers during discovery; this is not a global deployment snapshot. The inventory includes TASK.md, supporting scripts, mutable SQLite/state/output files, private immutable revisions and receipt bookkeeping. SQLite snapshots use the sandbox helper's consistent database backup, not a live WAL file copy. The complete transport is bounded to 16 MiB and 4096 regular files: oversized workspaces fail rather than truncate. Paths, ancestor collisions, exact sizes, file digests, canonical inventory digest, Home binding and outer archive checksums are checked. Unknown JSON fields and trailing payloads fail preflight. Archives do not export credential-vault keys, and workspace files must not be used to store plaintext secrets; `--redact-secrets` does not redact arbitrary workspace content.
+
+SQL restore verifies these entries but never provisions or writes Home files. `ReadBotWorkspaceArchive` is read-only. Explicit owner-authorized `ReconcileRestoredBotWorkspaceHome` installs the verified inventory only into a separately provisioned, empty target Home with the exact destination scope, under the repository lock; it updates the opaque binding and revision but leaves the restore reconciliation barrier intact. Source/foreign/nonempty targets fail. Receipt/head binding metadata is rebound to the target; substantive file bytes and immutable SQL Task revision digests remain unchanged. Restore does not grant execution permission, enable schedules, clear interrupted runs, revive approvals or release held publications/outbox entries. No GET path performs recovery and this seam does not implement an operational resume command. K8s physical archive recovery is not certified by Docker tests.
+
+`TestBotTaskWorkspaceArchiveDocker` exercises personal/team SQLite logical export → mapped fresh-target SQL restore → explicit Docker Home recovery with nonempty SQLite state and physical file equality, immutable-definition readback and held pending publications. `TestBotTaskWorkspaceArchivePostgresDocker` repeats real nonempty Task/physical-state archive export and mapped restore against disposable PostgreSQL and Docker. Both require `ASTONISH_TEST_TASK_WORKSPACE=1`; PostgreSQL additionally requires the owned loopback DSN/isolation gates used by the continuity driver and an image with the `vector` extension (for example `pgvector/pgvector:pg16`, not plain `postgres:16-alpine`). `TestBotTaskWorkspaceArchiveStrictDecode` and `TestBotTaskWorkspaceArchiveValidation` cover malformed archive metadata and inventory rejection. These scoped physical cases passed on 2026-11-13; they do not certify the parent continuity stage or normal deployment recovery.
+
+### Immediate pre-Bot archive upgrades
+
+SQLite and PostgreSQL team/personal archives from the immediate pre-Bot schema can restore into the current schema. On a normal schema-hash mismatch, each backend computes a pre-Bot projection of the target: it removes only the enumerated Bot tables (including the later skill tables), four session linkage/classification columns and the team sandbox home-binding column. All other attributes in that backend's schema hash remain checked. The archive must match that projected hash exactly and contain no Bot-table entries in that scope. Platform/org scopes do not use this exception; the general `checkSchemaCompatible` policy is unchanged. This is not arbitrary historical-version compatibility or unrestricted cross-backend schema conversion.
+
+`TestBotMigrationReopen` and `TestRestorePlatformBackupSQLitePreBotArchive` cover SQLite migration/reopen, actual pre-Bot archive restore, retained ordinary Chat classification and default-paused jobs, with no invented Bots. `TestIntegrationBotPostgresPreBotMigration` reconstructs the actual immediate pre-Bot PostgreSQL schemas, reopens twice and checks narrow hash compatibility while rejecting unrelated drift, invalid versions and Bot-bearing legacy archives. `TestIntegrationBotPostgresPreBotBackupRestore` exports that legacy PostgreSQL archive, restores into a fresh deployment and reopens twice to check preserved ordinary rows, paused jobs and the new empty Bot schema.
+
+### PostgreSQL Bot recovery evidence
+
+`TestIntegrationBotPostgresBackupRecovery` uses the existing PostgreSQL backup harness with generated disposable platform/org database names. Through the scoped repositories it creates personal/team Bots, activates them with test-only readiness injection, claims a running invocation, queues another invocation, and persists pending/approved exact-action decisions. It exports and restores a real logical archive with both runtime-related restore options enabled. Assertions cover paused Bots, interrupted runs, revoked approvals with preserved action digests, rejected source-worker lease renewal, retained activity, scope isolation and no immediately eligible outbox entries.
+
+On 2026-11-04, the latest parent live PostgreSQL run selected `^TestIntegration.*(Bot|MemoryAttribution)` with the race detector and passed in **58.512 seconds**. The selector covers these eleven top-level tests:
+
+- `TestIntegrationBotPostgresBackupRecovery`
+- `TestIntegrationBotPostgresPreBotMigration`
+- `TestIntegrationBotPostgresPreBotBackupRestore`
+- `TestIntegrationPostgresBotMemoryPrefilterBeforeTopK`
+- `TestIntegrationPostgresBotServicesSpendRace`
+- `TestIntegrationPostgresBotServicesSpendSettlementAndCaps`
+- `TestIntegrationPostgresBotServicesCorrection`
+- `TestIntegrationPostgresBotServicesCleanup`
+- `TestIntegrationPostgresMemoryAttribution`
+- `TestIntegrationPostgresBotHomeBindingRegistration`
+- `TestIntegrationPostgresBotPausedStoppedConfiguration`
+
+Reproduce with an isolated admin-capable `ASTONISH_TEST_DSN`: `go test -race -tags integration ./pkg/store/entstore -run '^TestIntegration.*(Bot|MemoryAttribution)' -count=1 -timeout=5m`. These tests require the explicit DSN rather than silently claiming skipped acceptance. In addition to recovery, spend, corrections and injected cleanup verification, this exercises structured attribution across scoped vector/FTS/hybrid retrieval, internal home-binding registration, and paused/stopped prose edits preserving lifecycle barriers and revoking obsolete approvals. The parent also reported passing full store/memory/bot/execution/api/sandbox suites, including SQLite reviewed-batch CAS/receipt/evidence tests and HTTP mapped ingest, health apply and finite persisted Bot streaming.
+
+**Phase 2 remains verification pending** until the parent records phase verification. These checks do not perform purchases, provision or retire physical homes, stop live Bot workers, subscribe to live runner SSE or establish runtime usage accounting. Physical mount/delete callbacks, runtime/scheduler composition, source-worker shutdown and explicit operational reconciliation remain later-phase gates.
+
 ## Restore Safety
 
 Restore is a fresh-target recovery workflow first. The target must be empty, or the restore command fails before writing. SQLite targets may opt into a destructive reset path with `--reset-target`; this closes the target store, removes the SQLite platform database, tenant database tree, and legacy file-backed runtime directories under the configured data directory, bootstraps a new empty platform schema, and then imports the archive. Merge-style restore into an existing active platform is future work because it requires explicit conflict policy for users, org slugs, team slugs, app IDs, sessions, scheduler jobs, and credentials.
@@ -129,6 +336,14 @@ The current implementation provides the safe archive foundation, SQLite/PostgreS
 - PostgreSQL integration scaffolding in `pkg/store/entstore/backup_postgres_restore_integration_test.go`, gated by `-tags=integration` and `ASTONISH_TEST_DSN`.
 
 For SQLite and PostgreSQL, `backup create` discovers platform/org/team/personal scopes through the tenant metadata and exports every user table as JSONL records. This includes durable rows for flows, apps, app state, fleets, drills, sessions, memories, settings, MCP servers, credentials, and scheduled jobs when those rows exist. It does not include physical `.db` files. Recovery backups preserve stored values by default, including password hashes and encrypted credential blobs, because those values are required for full system recovery. Use `--redact-secrets` only for portable/support exports that intentionally cannot restore protected values. PostgreSQL destructive reset is intentionally blocked; operators should restore into a fresh PostgreSQL platform database or reset databases externally with site-specific safeguards. App-created SQL schemas and merge-style restore remain planned follow-up work.
+
+## File-first PostgreSQL publication
+
+`RestorePlatformBackup` routes verified file-first archives through `restoreFileFirstBackup`, which installs and reads back fresh retained Homes/content before calling `importFileFirstPostgresStaged`. PostgreSQL requires an explicitly configured durable local content/journal root (`storage.sqlite.data_dir` is passed to the shared backup/restore constructor even with `storage.backend: postgres`); it never falls back to the current directory. Planning checks database-creation capability, available vector extension, existing application role, and platform schema compatibility without creating roles or tenant databases.
+
+The concrete `receiptPostgresStage` uses only `openStagedPostgresOrg`: a private, uncached handle admitted by the journal's acknowledged CREATE, database OID, receipt comment and unpublished route. Existing schema constructors initialize this fresh database, then organization/team/personal logical rows import in one tenant transaction with transaction-local search paths. Child-schema grants fail closed. No platform rows or routes are published until all tenant handles close successfully and every receipt is ready. Platform publication locks the restore tables, rechecks emptiness, and imports all platform rows plus exact generation routes atomically. The no-cleanup journal barrier is durable **before COMMIT**; a lost commit acknowledgment requires reconciliation, never automatic deletion.
+
+`CleanupFileFirstRestore` supports both dialects. PostgreSQL cleanup holds platform write exclusion and drops only exact unpublished receipted generations, without force-terminating attachments. A foreign OID/comment, published route, uncertain CREATE, attached database or committed journal refuses cleanup and retains retry evidence. Home/content cleanup remains exact-generation and reservation-addressed. The integration entrypoint `TestBackupFileFirstPostgresRestoreStagingBlocker` now exercises the public restore path in both scopes and fails with BLOCKED when `ASTONISH_TEST_DSN` is missing; its retained backend is in-memory, so it is not physical Docker/Kubernetes evidence.
 
 ## References
 

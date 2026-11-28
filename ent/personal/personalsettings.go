@@ -3,6 +3,7 @@
 package personal
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/SAP/astonish/ent/personal/personalsettings"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -26,6 +28,8 @@ type PersonalSettings struct {
 	DefaultModel string `json:"default_model,omitempty"`
 	// BrandTheme holds the value of the "brand_theme" field.
 	BrandTheme string `json:"brand_theme,omitempty"`
+	// BotEmail holds the value of the "bot_email" field.
+	BotEmail *store.BotEmailSettings `json:"bot_email,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -38,6 +42,8 @@ func (*PersonalSettings) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case personalsettings.FieldBotEmail:
+			values[i] = new([]byte)
 		case personalsettings.FieldID:
 			values[i] = new(sql.NullInt64)
 		case personalsettings.FieldDefaultProvider, personalsettings.FieldDefaultModel, personalsettings.FieldBrandTheme:
@@ -90,6 +96,14 @@ func (_m *PersonalSettings) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field brand_theme", values[i])
 			} else if value.Valid {
 				_m.BrandTheme = value.String
+			}
+		case personalsettings.FieldBotEmail:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field bot_email", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.BotEmail); err != nil {
+					return fmt.Errorf("unmarshal field bot_email: %w", err)
+				}
 			}
 		case personalsettings.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -150,6 +164,9 @@ func (_m *PersonalSettings) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("brand_theme=")
 	builder.WriteString(_m.BrandTheme)
+	builder.WriteString(", ")
+	builder.WriteString("bot_email=")
+	builder.WriteString(fmt.Sprintf("%v", _m.BotEmail))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

@@ -1,5 +1,28 @@
 # Studio UI System
 
+## Bot Chat interaction contract — 2026-11-07
+
+A simple title creates and starts one durable Chat turn without an activation panel. Queued/running persisted run state drives the existing thinking indicator, including before tokens and after reload; connectivity never signals completion. Waiting `ask_user` replaces thinking with shared Chat question cards (yes/no, selected option IDs and supported custom text), never prose-derived controls. No is input, not permission denial. Empty Home is idle unless queued state exists; terminal state clears thinking; failed submissions retain retryable answers and read-only views cannot submit. Retries reconcile canonical events rather than duplicating titles/questions. Terminal clients consume the same durable run/question contract. Legacy control-only turns and ordinary Chat remain compatible; schedules retain separate consent. Fresh real-provider title-first acceptance remains pending, independent of historical control-conversation receipts.
+
+## Shared Chat and Bot sidebar
+
+The sidebar owns one expanded/collapsed state. Its top Bots header contains
+creation and collapse controls; Chats retains fleet and conversation creation.
+Both headings, icon actions, row typography, relative dates and delete affordances
+use `chat/sidebarPresentation.ts`. Bot rows use the same two-line title and
+conversation-metadata layout as Chat rows. The collapsed rail contains only the
+expand control; Bot items, creation actions, scope tabs and loading/error controls
+are not mounted there.
+
+Bot list responses optionally include `message_count` and `home_updated_at` from
+the exact scope-owned Bot Home session. Linkage, owner, purpose and retention are
+validated before exposing metadata, with no personal/team fallback. For Bot Homes,
+scoped metadata counts indexed event rows without opening private payloads, since
+older transcript writers did not maintain their counters. Counts describe stored
+Home events, not only visible speech bubbles. Unavailable metadata is omitted;
+the UI falls back to the Bot update date and never fabricates a zero count.
+Execution, SSE and report-rendering semantics remain unchanged.
+
 ## Overview
 
 Astonish Studio uses a source-owned UI system built on `shadcn/ui`, Tailwind CSS v4, and product CSS tokens. This document owns:

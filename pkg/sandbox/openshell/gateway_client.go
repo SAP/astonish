@@ -330,10 +330,14 @@ const (
 
 // SandboxStatus contains the current state of a sandbox.
 type SandboxStatus struct {
-	State     SandboxState
-	Message   string
-	PodName   string
-	GatewayID string // gateway-assigned UUID (for ExecSandbox)
+	// Persisted template evidence for safe retained-home adoption.
+	DriverConfig map[string]any
+	Env          map[string]string
+	Labels       map[string]string
+	State        SandboxState
+	Message      string
+	PodName      string
+	GatewayID    string // gateway-assigned UUID (for ExecSandbox)
 }
 
 // ExecRequest contains the parameters for executing a command in a sandbox.

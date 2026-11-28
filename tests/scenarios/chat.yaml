@@ -1057,3 +1057,100 @@ scenarios:
     status: covered
     test_refs:
       - TestE2E_SecurityUrgentLegacyMCPLocalAuthorization
+
+  # ---------------------------------------------------------------------------
+  # Normal-mode plan revisions — coverage is not a paid-provider/live pass claim.
+  # ---------------------------------------------------------------------------
+
+  - id: CHAT-116
+    title: "All valid Normal-mode definition revisions apply immediately"
+    user_story: |
+      After initial Plan-mode announcement and explicit execution approval, I can
+      revise the existing plan in Normal mode with update_plan action=revise and
+      current plan_id/base_revision. Goals, documents, outcomes, files, phase order
+      and implementation changes apply without approval. The deprecated
+      requires_approval field is ignored even when true. Unaffected phases keep
+      status/evidence; affected work returns to pending. Goal/document changes
+      invalidate all evidence. Initial consent and tool authorization are unchanged.
+      Local HTTP/SSE coverage uses a scripted provider and test sandbox transport,
+      not a real paid provider or production sandbox deployment.
+    priority: P0
+    status: covered
+    test_refs:
+      - TestPlanRevisionHTTPAcceptance
+      - TestPlanRevisionBrowserAcceptance
+
+  - id: CHAT-117
+    title: "Direct revisions preserve validation, session isolation and execution consent"
+    user_story: |
+      Immediate definition updates do not bypass stale identity/base validation,
+      active-work busy guards, persistence errors or initial execution consent.
+      Plan/Graph-Plan/Ask cannot revise; ordinary no-plan chat still works. An old
+      decision request cannot apply an obsolete candidate. Following a successful
+      revision I continue in ordinary chat without sending a special decision.
+      Local HTTP coverage is not a paid-provider or production deployment claim.
+    priority: P0
+    status: covered
+    test_refs:
+      - TestPlanRevisionHTTPAcceptance
+      - TestPlanRevisionAdmissionBusyAndOrdinarySession
+      - TestPlanRevisionValidationBeforeInitialization
+      - TestPlanRevisionInitialConsentGuards
+      - TestPlanRevisionBrowserAcceptance
+
+  - id: CHAT-118
+    title: "Studio updates one plan in place without revision approval UX"
+    user_story: |
+      In the built Studio SPA I initially approve a Plan-mode plan. Normal-mode
+      revisions update that card directly, with no review/modal or Approve revision,
+      Reject revision or Request changes buttons. A Hello to Hello World revision
+      changes goal, outcome, files and document immediately, even with legacy
+      requires_approval=true. The existing card, composer focus and reader scroll
+      remain stable. An ordinary next turn works. Active SSE reconnect and SQLite
+      reopen restore the same definition. A manually seeded legacy pending proposal
+      neither blocks restored chat nor silently applies its obsolete candidate.
+      The opt-in real-browser harness uses loopback HTTP, isolated SQLite, real
+      plan tools and a scripted provider/test transport. Implemented coverage is
+      not by itself a recorded live pass or production deployment claim.
+    priority: P0
+    status: covered
+    test_refs:
+      - TestPlanRevisionBrowserAcceptance
+
+  - id: CHAT-119
+    title: "Restored plans preserve authority without inventing completion evidence"
+    user_story: |
+      Restoring my session uses its durable snapshot identity and runtime sequence;
+      stale progress cannot overwrite newer accepted work. Legacy accepted results
+      remain readable with missing statuses pending, but requested tool arguments
+      and prose never manufacture successful completion. Legacy pending candidates
+      are retired without applying them or awaiting decisions. Snapshot and nested
+      legacy/evidence secrets are redacted without changing stored authority.
+      A persistence failure leaves the prior authority intact. Verification must
+      use the authenticated session sandbox transport, never a host fallback, and
+      acceptance requires current passing phase evidence rather than old checkboxes.
+      Local coverage does not establish real paid-provider, production sandbox or
+      interactive PTY acceptance.
+    priority: P0
+    status: covered
+    test_refs:
+      - TestPlanRevisionHTTPAcceptance
+      - TestPlanRevisionBrowserAcceptance
+      - TestPlanRevisionLegacyReplayBootstrapAndRedaction
+      - TestPlanRevisionSnapshotReplayOrderingAndErrors
+      - TestPlanRevisionPersistenceFailureAndVerifierGuards
+
+  - id: CHAT-120
+    title: "Terminal Normal revisions update the existing card without a decision screen"
+    user_story: |
+      In local code and remote chat, every valid Normal-mode definition revision
+      immediately updates the existing card without a modal, review keys or
+      approve/reject/request-changes decision. Composer focus and transcript scroll
+      remain stable, and I can send an ordinary next turn. Reconnect and resume
+      retain snapshot authority; obsolete pending candidates neither block chat nor
+      apply themselves. Initial Plan approval keys and execution consent remain
+      unchanged, as do Plan/Ask revision restrictions and evidence requirements.
+      Terminal model tests are not PTY acceptance: this journey remains missing
+      until recorded interactive coverage establishes the full sequence.
+    priority: P1
+    status: missing

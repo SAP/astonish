@@ -121,6 +121,19 @@ func TestValidateBearer_RejectsInvalidTokens(t *testing.T) {
 	})
 }
 
+func TestValidateBearerAuthenticationEvidence(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	s := newValidatorServer(t)
+	token := validValidatorToken(t, s, jwt.MapClaims{"scope": "chat"})
+	p, e, err := s.ValidateBearerWithEvidence(context.Background(), "Bearer "+token, "", nil, execution.SurfaceStudio)
+	if err != nil || e.Method != execution.AuthMethodOAuth || e.LocalLoopback || !e.ExpiresAt.After(time.Now()) {
+		t.Fatalf("evidence %+v %v", e, err)
+	}
+	if err := (execution.CapabilityAuthorizer{}).Authorize(p, execution.CapabilityToolExecute); err == nil {
+		t.Fatal("chat-only bearer granted tools")
+	}
+}
+
 func newValidatorServer(t *testing.T) *Server {
 	t.Helper()
 	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}

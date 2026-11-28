@@ -466,6 +466,11 @@ func (a *AstonishAgent) executeLLMNodeAttempt(ctx agent.InvocationContext, node 
 	// We need to pass tools if the node uses them
 	var nodeTools []tool.Tool
 	if node.Tools {
+		for _, ts := range a.Toolsets {
+			if err := botSafeToolset(ctx, ts); err != nil {
+				return false, err
+			}
+		}
 		// Validate that all selected tools exist
 		if len(node.ToolsSelection) > 0 {
 			foundTools := make(map[string]bool)
@@ -836,7 +841,7 @@ func (a *AstonishAgent) executeLLMNodeAttempt(ctx agent.InvocationContext, node 
 			Toolsets:            mcpToolsets,
 			OutputSchema:        outputSchema,
 			OutputKey:           outputKey,
-			BeforeToolCallbacks: beforeToolCallbacks,
+			BeforeToolCallbacks: botNativeCallbacks(beforeToolCallbacks, nil),
 			AfterToolCallbacks:  afterToolCallbacks,
 		})
 	} else {

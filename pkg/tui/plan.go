@@ -17,6 +17,9 @@ import (
 // generic markdown-in-a-box path so history never goes blank.
 func (m model) renderPlanDocument(it events.Item, width int) string {
 	content := it.Content
+	if s := it.PlanSnapshot; s != nil {
+		return m.renderPlanCard(s.Goal, s.Document, s.Steps, it, width)
+	}
 	if doc, goal, steps, err := agent.ParsePlanDocument(content); err == nil && len(steps) > 0 {
 		return m.renderPlanCard(goal, doc, steps, it, width)
 	}
@@ -35,7 +38,6 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 
 	nFiles := 0
 	nNew, nModify, nDelete := 0, 0, 0
-	complete, running, pending := 0, 0, 0
 	for _, s := range steps {
 		nFiles += len(s.Files)
 		for _, f := range s.Files {
@@ -47,16 +49,6 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 			default:
 				nModify++
 			}
-		}
-		switch s.Status {
-		case "complete":
-			complete++
-		case "running":
-			running++
-		case "failed":
-			// failed phases still count toward "done" once nothing is pending/running
-		default:
-			pending++
 		}
 	}
 
@@ -105,7 +97,7 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 		body = append(body, m.planBand("RESULTS", results, inner)...)
 	}
 
-	footer := planProgressFooter(complete, running, pending, len(steps))
+	footer := planProgressFooter(summarizePlanSteps(steps))
 	body = append(body, m.planApprovalLines(it, inner)...)
 	title := strings.TrimSpace(goal)
 	if title == "" {
@@ -334,19 +326,19 @@ func (m model) planApprovalLines(it events.Item, inner int) []string {
 	switch it.PlanStatus {
 	case events.PlanPending:
 		lines = append(lines, m.theme.PlanHeader.Render("✦ Plan Ready · choose how to proceed"))
-		opts := it.Options
-		if len(opts) == 0 {
-			opts = []string{planOptApprove, planOptRequest, planOptDecline}
-		}
+		opts := m.planApprovalOptions(it)
 		cursor := m.tr.ApprovalCursor
 		for i, option := range opts {
-			key := []string{"Enter", "r", "n"}[min(i, 2)]
-			label := fmt.Sprintf("%s  %s", key, option)
+			label := m.planApprovalLabel(option, i)
 			if i == cursor {
 				lines = append(lines, m.theme.PlanHeader.Bold(true).Render("▸ "+label))
 			} else {
 				lines = append(lines, m.theme.PlanMuted.Render("  "+label))
 			}
+		}
+		if m.info.Mode == "code" {
+			lines = append(lines, m.planApprovalDescriptionLines(inner)...)
+			lines = append(lines, m.theme.PlanMuted.Render("↑/↓ move · Enter select · Esc decline"))
 		}
 	case events.PlanApproved:
 		lines = append(lines, m.theme.Success.Render("✓ Approved"))
@@ -382,14 +374,20 @@ func planFileKindStyle(kind string, th Theme) (string, lipgloss.Style) {
 	}
 }
 
-func planProgressFooter(complete, running, pending, total int) string {
+func planProgressFooter(s planStepSummary) string {
 	switch {
-	case running > 0:
-		return fmt.Sprintf("%d/%d · running", complete, total)
-	case pending == 0 && running == 0:
-		return fmt.Sprintf("%d/%d done", complete, total)
+	case s.Total == 0:
+		return "Progress: unavailable"
+	case s.Failed > 0:
+		return fmt.Sprintf("%d/%d · failed", s.Complete, s.Total)
+	case s.Running > 0:
+		return fmt.Sprintf("%d/%d · running", s.Complete, s.Total)
+	case s.Complete == s.Total:
+		return fmt.Sprintf("%d/%d done", s.Complete, s.Total)
+	case s.Unknown > 0:
+		return fmt.Sprintf("%d/%d · unknown", s.Complete, s.Total)
 	default:
-		return fmt.Sprintf("%d/%d ready", complete, total)
+		return fmt.Sprintf("%d/%d ready", s.Complete, s.Total)
 	}
 }
 

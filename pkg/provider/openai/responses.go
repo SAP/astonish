@@ -90,20 +90,22 @@ func toResponsesRequest(req *model.LLMRequest, modelName string, messages []open
 		responseReq.Temperature = req.Config.Temperature
 		if req.Config.ResponseMIMEType == "application/json" && len(responseTools) == 0 {
 			responseReq.Text = &openai.ResponseTextConfig{Format: &openai.ResponseTextFormat{Type: "json_object"}}
+			if req.Config.ResponseJsonSchema != nil {
+				responseReq.Text.Format = &openai.ResponseTextFormat{Type: "json_schema", Name: "structured_response", Schema: req.Config.ResponseJsonSchema, Strict: true}
+			}
 		}
 	}
 	return responseReq
 }
 
-func (p *Provider) generateResponsesStream(ctx context.Context, req openai.CreateResponseRequest, yield func(*model.LLMResponse, error) bool) {
+func (p *Provider) generateResponsesStream(ctx context.Context, req openai.CreateResponseRequest, emitPartials bool, yield func(*model.LLMResponse, error) bool) {
 	stream, err := p.client.CreateResponseStream(ctx, req)
 	if err != nil {
-		yield(nil, wrapOpenAIError(err))
+		yield(nil, responsesStreamError(ctx, err))
 		return
 	}
 	defer stream.Close()
 
-	var finalResponse *openai.CreateResponseResponse
 	var thinkingReported, toolsReported, outputSeen bool
 	fail := func(err error) {
 		if outputSeen {
@@ -113,28 +115,24 @@ func (p *Provider) generateResponsesStream(ctx context.Context, req openai.Creat
 	}
 	for {
 		event, err := stream.Recv()
+		if ctx.Err() != nil {
+			fail(context.Cause(ctx))
+			return
+		}
 		if errors.Is(err, io.EOF) {
-			if finalResponse == nil {
-				fail(fmt.Errorf("OpenAI Responses stream ended without response.completed"))
-				return
-			}
-			llmResp, convertErr := responseToLLMResponse(*finalResponse)
-			if convertErr != nil {
-				fail(convertErr)
-				return
-			}
-			yield(llmResp, nil)
+			fail(fmt.Errorf("OpenAI Responses stream ended without response.completed"))
 			return
 		}
 		if err != nil {
-			fail(wrapOpenAIError(err))
+			fail(responsesStreamError(ctx, err))
 			return
 		}
 
+		streaming.ReportUpstreamActivity(ctx)
 		switch event.Type {
 		case openai.ResponseStreamEventOutputTextDelta:
 			outputSeen = outputSeen || event.Delta != ""
-			if event.Delta != "" && !yield(&model.LLMResponse{
+			if emitPartials && event.Delta != "" && !yield(&model.LLMResponse{
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: event.Delta}}},
 				Partial: true,
 			}, nil) {
@@ -151,14 +149,24 @@ func (p *Provider) generateResponsesStream(ctx context.Context, req openai.Creat
 				streaming.Report(ctx, streaming.Progress{Phase: streaming.PhaseThinking})
 			}
 			outputSeen = outputSeen || event.Delta != ""
-			if event.Delta != "" && !yield(&model.LLMResponse{
+			if emitPartials && event.Delta != "" && !yield(&model.LLMResponse{
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: event.Delta, Thought: true}}},
 				Partial: true,
 			}, nil) {
 				return
 			}
 		case openai.ResponseStreamEventCompleted:
-			finalResponse = event.Response
+			if event.Response == nil {
+				fail(fmt.Errorf("OpenAI Responses response.completed missing response"))
+				return
+			}
+			llmResp, convertErr := responseToLLMResponse(*event.Response)
+			if convertErr != nil {
+				fail(convertErr)
+				return
+			}
+			yield(llmResp, nil)
+			return // completed is terminal; the server need not close the socket.
 		case openai.ResponseStreamEventFailed, openai.ResponseStreamEventIncomplete, openai.ResponseStreamEventError:
 			message := event.Message
 			if event.Error != nil && event.Error.Message != "" {
@@ -171,6 +179,14 @@ func (p *Provider) generateResponsesStream(ctx context.Context, req openai.Creat
 			return
 		}
 	}
+}
+
+// Preserve request-local health cancellation causes through SDK wrapping.
+func responsesStreamError(ctx context.Context, err error) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return wrapOpenAIError(err)
 }
 
 func responseToLLMResponse(resp openai.CreateResponseResponse) (*model.LLMResponse, error) {
@@ -228,8 +244,12 @@ func responseToLLMResponse(resp openai.CreateResponseResponse) (*model.LLMRespon
 			usage.CachedContentTokenCount = int32(resp.Usage.InputTokensDetails.CachedTokens)
 		}
 	}
+	// Upstream completion was validated above. Preserve it for consumers that
+	// distinguish a final answer from unconfirmed text (including Bot synthesis).
 	return &model.LLMResponse{
 		Content:       &genai.Content{Role: "model", Parts: parts},
 		UsageMetadata: usage,
+		TurnComplete:  true,
+		FinishReason:  genai.FinishReasonStop,
 	}, nil
 }

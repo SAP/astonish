@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"io/fs"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/fleet"
@@ -136,12 +137,20 @@ func getSetupProfile(tc tool.Context, args GetSetupProfileArgs) (GetSetupProfile
 	var collected fleet.SetupCollected
 	draftCtx := fleet.SetupDraftContext{}
 	if draftID := strings.TrimSpace(args.DraftID); draftID != "" {
-		if draftStore := setupDraftStoreFromContext(tc); draftStore != nil {
-			if draft, ok := draftStore.Get(tc, draftID); ok {
-				collected = fleet.ParseSetupCollected(draft.Collected)
-				draftCtx.BaseFleetKey = draft.TemplateKey
-			}
+		// An explicit draft is a scoped lookup, not an optional hint. Never
+		// disguise an unavailable or foreign draft as fresh setup progress.
+		draftStore := setupDraftStoreFromContext(tc)
+		if draftStore == nil {
+			err := fmt.Errorf("setup draft store unavailable: %w", store.ErrUnsupported)
+			return GetSetupProfileResult{Status: "error", Message: err.Error()}, err
 		}
+		draft, ok := draftStore.Get(tc, draftID)
+		if !ok || draft == nil {
+			err := fmt.Errorf("setup draft not found in current scope: %w", fs.ErrNotExist)
+			return GetSetupProfileResult{Status: "error", Message: err.Error()}, err
+		}
+		collected = fleet.ParseSetupCollected(draft.Collected)
+		draftCtx.BaseFleetKey = draft.TemplateKey
 	}
 	result.Completion = engine.StepCompletion(profile, collected)
 	result.NextStep = engine.NextIncompleteStep(profile, collected)

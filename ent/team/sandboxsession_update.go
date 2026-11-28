@@ -44,6 +44,18 @@ func (_u *SandboxSessionUpdate) SetNillableChatSessionID(v *string) *SandboxSess
 	return _u
 }
 
+// SetBotHomeBinding sets the "bot_home_binding" field.
+func (_u *SandboxSessionUpdate) SetBotHomeBinding(v map[string]interface{}) *SandboxSessionUpdate {
+	_u.mutation.SetBotHomeBinding(v)
+	return _u
+}
+
+// ClearBotHomeBinding clears the value of the "bot_home_binding" field.
+func (_u *SandboxSessionUpdate) ClearBotHomeBinding() *SandboxSessionUpdate {
+	_u.mutation.ClearBotHomeBinding()
+	return _u
+}
+
 // SetBackend sets the "backend" field.
 func (_u *SandboxSessionUpdate) SetBackend(v string) *SandboxSessionUpdate {
 	_u.mutation.SetBackend(v)
@@ -323,6 +335,12 @@ func (_u *SandboxSessionUpdate) sqlSave(ctx context.Context) (_node int, err err
 	if value, ok := _u.mutation.ChatSessionID(); ok {
 		_spec.SetField(sandboxsession.FieldChatSessionID, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.BotHomeBinding(); ok {
+		_spec.SetField(sandboxsession.FieldBotHomeBinding, field.TypeJSON, value)
+	}
+	if _u.mutation.BotHomeBindingCleared() {
+		_spec.ClearField(sandboxsession.FieldBotHomeBinding, field.TypeJSON)
+	}
 	if value, ok := _u.mutation.Backend(); ok {
 		_spec.SetField(sandboxsession.FieldBackend, field.TypeString, value)
 	}
@@ -416,6 +434,18 @@ func (_u *SandboxSessionUpdateOne) SetNillableChatSessionID(v *string) *SandboxS
 	if v != nil {
 		_u.SetChatSessionID(*v)
 	}
+	return _u
+}
+
+// SetBotHomeBinding sets the "bot_home_binding" field.
+func (_u *SandboxSessionUpdateOne) SetBotHomeBinding(v map[string]interface{}) *SandboxSessionUpdateOne {
+	_u.mutation.SetBotHomeBinding(v)
+	return _u
+}
+
+// ClearBotHomeBinding clears the value of the "bot_home_binding" field.
+func (_u *SandboxSessionUpdateOne) ClearBotHomeBinding() *SandboxSessionUpdateOne {
+	_u.mutation.ClearBotHomeBinding()
 	return _u
 }
 
@@ -727,6 +757,12 @@ func (_u *SandboxSessionUpdateOne) sqlSave(ctx context.Context) (_node *SandboxS
 	}
 	if value, ok := _u.mutation.ChatSessionID(); ok {
 		_spec.SetField(sandboxsession.FieldChatSessionID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.BotHomeBinding(); ok {
+		_spec.SetField(sandboxsession.FieldBotHomeBinding, field.TypeJSON, value)
+	}
+	if _u.mutation.BotHomeBindingCleared() {
+		_spec.ClearField(sandboxsession.FieldBotHomeBinding, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Backend(); ok {
 		_spec.SetField(sandboxsession.FieldBackend, field.TypeString, value)

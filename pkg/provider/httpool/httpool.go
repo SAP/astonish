@@ -1,6 +1,5 @@
 // Package httpool provides a shared, pool-aware HTTP client for LLM providers.
-// Using a single transport with tuned connection pool settings avoids
-// connection churn in fleet scenarios where many providers run concurrently.
+// Using shared transports avoids connection churn under concurrent workloads.
 package httpool
 
 import (
@@ -9,58 +8,41 @@ import (
 	"time"
 )
 
-// sharedTransport is a pool-aware HTTP transport shared by all LLM providers.
-// It overrides Go's conservative defaults to handle concurrent fleet workloads
-// where multiple agents call different provider endpoints simultaneously.
+// sharedTransport retains the bounded response-header wait for unmonitored
+// calls (including auth and discovery). The generation pool is cloned once.
 var sharedTransport = &http.Transport{
-	// Connection pooling
-	MaxIdleConns:        200,               // total across all hosts (default: 100)
-	MaxIdleConnsPerHost: 20,                // per-host idle pool (default: 2)
-	MaxConnsPerHost:     0,                 // unlimited active per host
-	IdleConnTimeout:     120 * time.Second, // keep idle connections longer (default: 90s)
-
-	// Timeouts for connection establishment
-	DialContext: (&net.Dialer{
-		Timeout:   30 * time.Second, // TCP connect timeout
-		KeepAlive: 30 * time.Second, // TCP keepalive interval
-	}).DialContext,
-
-	// TLS handshake timeout
-	TLSHandshakeTimeout: 15 * time.Second,
-
-	// Expect: 100-continue timeout (for large POST bodies)
-	ExpectContinueTimeout: 1 * time.Second,
-
-	// Response header timeout (time to wait for response headers after request is sent)
+	MaxIdleConns:          200,
+	MaxIdleConnsPerHost:   20,
+	MaxConnsPerHost:       0,
+	IdleConnTimeout:       120 * time.Second,
+	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	TLSHandshakeTimeout:   15 * time.Second,
+	ExpectContinueTimeout: time.Second,
 	ResponseHeaderTimeout: 120 * time.Second,
-
-	// Force HTTP/2 (already the default when using TLS, but explicit for clarity)
-	ForceAttemptHTTP2: true,
+	ForceAttemptHTTP2:     true,
 }
 
-// Client returns an HTTP client backed by the shared transport pool.
-// The provided timeout applies to the overall request lifecycle (connect +
-// send + response headers + body). For streaming LLM responses, pass 0 to
-// disable the timeout (the caller controls cancellation via context).
+// Client returns a client backed by shared pools. The supplied timeout remains
+// a total request limit; use 0 when context controls streaming cancellation.
 func Client(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Transport: sharedTransport,
-		Timeout:   timeout,
-	}
+	return &http.Client{Transport: pooledTransport, Timeout: timeout}
 }
 
-// StreamingClient returns an HTTP client suitable for SSE / streaming
-// responses. It uses the shared transport but has no overall timeout since
-// streaming responses can run indefinitely.
-func StreamingClient() *http.Client {
-	return &http.Client{
-		Transport: sharedTransport,
-		Timeout:   0, // no timeout — caller uses context
-	}
-}
+// StreamingClient has no total timeout. Only monitored requests bypass the
+// ordinary response-header timeout; upstream activity is observed on reads.
+func StreamingClient() *http.Client { return Client(0) }
 
-// Transport returns the shared pool-aware transport for use as the base
-// round-tripper inside custom transports (e.g. auth-injecting wrappers).
-func Transport() http.RoundTripper {
-	return sharedTransport
+// Transport returns a request-local pool selector for custom auth wrappers.
+// Unmonitored requests retain all ordinary transport timeouts. The result is not
+// a *http.Transport; use BaseTransports to inspect the underlying pools.
+func Transport() http.RoundTripper { return pooledTransport }
+
+// BaseTransports returns the ordinary and monitored-generation connection pools.
+// Both are shared across clients. Treat them as immutable after use: changing
+// fields while requests are in flight is unsafe. Callers configuring transport
+// policy before use must configure both pools consistently (including TLS and
+// dial policy), preserving the generation pool's zero ResponseHeaderTimeout.
+// For isolated clients, clone rather than mutate these shared transports.
+func BaseTransports() (ordinary, generation *http.Transport) {
+	return sharedTransport, generationTransport
 }

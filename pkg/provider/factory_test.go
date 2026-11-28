@@ -82,25 +82,27 @@ func TestFactoryOAuthDiscoveryRecoveryAndPersistence(t *testing.T) {
 		fmt.Fprint(w, `{"data":[{"id":"grok"}]}`)
 	}))
 	defer server.Close()
-	transport := httpool.Transport().(*http.Transport)
-	oldDial, oldTLS, oldProxy := transport.DialContext, transport.TLSClientConfig, transport.Proxy
-	transport.CloseIdleConnections()
-	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	transport.TLSClientConfig.ServerName = "example.com"
-	transport.Proxy = nil
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, _, _ := net.SplitHostPort(address)
-		if host != "api.x.ai" && host != "auth.x.ai" {
-			return nil, fmt.Errorf("external connection forbidden: %s", address)
-		}
-		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
-	}
-	defer func() {
+	ordinary, generation := httpool.BaseTransports()
+	for _, transport := range []*http.Transport{ordinary, generation} {
+		oldDial, oldTLS, oldProxy := transport.DialContext, transport.TLSClientConfig, transport.Proxy
 		transport.CloseIdleConnections()
-		transport.DialContext = oldDial
-		transport.TLSClientConfig = oldTLS
-		transport.Proxy = oldProxy
-	}()
+		transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+		transport.TLSClientConfig.ServerName = "example.com"
+		transport.Proxy = nil
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(address)
+			if host != "api.x.ai" && host != "auth.x.ai" {
+				return nil, fmt.Errorf("external connection forbidden: %s", address)
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		}
+		defer func() {
+			transport.CloseIdleConnections()
+			transport.DialContext = oldDial
+			transport.TLSClientConfig = oldTLS
+			transport.Proxy = oldProxy
+		}()
+	}
 	cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"subscription": {"type": "xai_oauth", "access_token": "old", "refresh_token": "refresh", "expires_at": "2099-01-01T00:00:00Z"}}, ProviderTokenRefresh: func(name, access, refresh string, expiry time.Time) error {
 		callbacks++
 		if name != "subscription" || !strings.HasPrefix(access, "renewed-") || refresh != "rotated" || !expiry.After(time.Now()) {

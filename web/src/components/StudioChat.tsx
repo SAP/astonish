@@ -1,3 +1,6 @@
+import { BotPublicationDelivery } from './bots/BotFilesPanel'
+import { isBotFilePublication } from '@/api/botFiles'
+import { BotStatus } from '../api/bots'
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, User, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X, Bug } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
@@ -23,6 +26,8 @@ import FleetStartDialog from './chat/FleetStartDialog'
 import FleetTemplatePicker from './chat/FleetTemplatePicker'
 import FleetExecutionPanel from './chat/FleetExecutionPanel'
 import TaskPlanPanel from './chat/TaskPlanPanel'
+import { isPlanEvent, reducePlanProgress, normalizePlanHistory, planFromSnapshot } from './chat/planState'
+import type { PlanSnapshot } from './chat/chatTypes'
 import PlanPanel from './chat/PlanPanel'
 import FilePanel from './chat/FilePanel'
 import TodoPanel from './chat/TodoPanel'
@@ -30,9 +35,14 @@ import AppsPanel from './chat/AppsPanel'
 import HarnessPanel from './chat/HarnessPanel'
 import HarnessPlaceholder from './chat/HarnessPlaceholder'
 import ChatErrorBoundary from './chat/ChatErrorBoundary'
-import YesNoCard from './chat/questions/YesNoCard'
-import SingleSelectCard from './chat/questions/SingleSelectCard'
-import QuestionOptionThumb from './chat/questions/QuestionOptionThumb'
+import QuestionCard from './chat/questions/QuestionCard'
+import { isBotOperation, mergeBotOperation, botOperationsBusy, type BotOperations, type BotOperationView } from '../api/botOperationResult'
+import { projectBotOperation } from './chat/botOperationProjection'
+import { botLocalFailure, BotFailureKind } from './chat/botEmployeeFeedback'
+import BotEmployeeMessage from './bots/BotEmployeeMessage'
+import BotOperationResult from './bots/BotOperationResult'
+import BotTerminalStatus from './bots/BotTerminalStatus'
+import { botRunOpen, botRunStatusLabel, mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
 import {
   deriveLatestHarness,
   harnessFocusEquals,
@@ -54,6 +64,9 @@ import ModelCredentialBanner from './chat/ModelCredentialBanner'
 import DebugPanel from './chat/DebugPanel'
 import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
+import { connectBotEvents } from '../api/botEvents'
+import BotWorkspace from './bots/BotWorkspace'
+import BotCreateDialog from './bots/BotCreateDialog'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
 
 function normalizeBlueprintScenes(raw: unknown): TutorialBlueprintPreviewMessage['scenes'] {
@@ -288,6 +301,10 @@ interface PendingAttachment {
 
 interface StudioChatProps {
   theme: string
+  hideSidebar?: boolean
+  botRoute?: import('./bots/botRoute').BotRoute
+  userId?: string
+  botThread?: { botId: string; scope: import('../api/bots').BotScope; readOnly: boolean; status?: import('../api/bots').BotStatusValue; toolFree?: boolean; pendingApprovalIds?: string[]; questionApprovalIds?: string[]; questionApprovalAnchors?: { reviewId: string; questionId: string }[]; renderReview?: (kind: 'proposal' | 'approval', id: string, question?: import('@/api/questions').Question) => React.ReactNode; operations?: BotOperationView[]; decisionsReadOnly?: boolean; runStates?: BotRunState[]; onOperationsChange?: (operations: BotOperationView[]) => void; onSend: (text: string, attachments?: AttachmentPayload[], operations?: BotOperationView[]) => Promise<import('../api/botReviews').BotMessageReceipt | void> }
   initialSessionId?: string | null
   pendingChatMessage?: { message: string; systemContext?: string } | null
   onPendingChatMessageConsumed?: () => void
@@ -297,12 +314,19 @@ interface StudioChatProps {
   isPlatformMode?: boolean
 }
 
-export function appendStreamingAgentText(messages: ChatMsg[], chunk: string, invocationId?: string): ChatMsg[] {
+function validAgentTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return undefined
+  return Number.isFinite(Date.parse(value)) ? value : undefined
+}
+
+export function appendStreamingAgentText(messages: ChatMsg[], chunk: string, invocationId?: string, timestamp?: string): ChatMsg[] {
   const last = messages[messages.length - 1]
-  if (last?.type === 'agent' && (last as AgentMessage)._streaming) {
-    return [...messages.slice(0, -1), { ...last, content: last.content + chunk, invocationId: invocationId ?? last.invocationId } as AgentMessage]
+  const invocationChanged = last?.type === 'agent' && last.invocationId && invocationId && last.invocationId !== invocationId
+  if (last?.type === 'agent' && last._streaming && !invocationChanged) {
+    // The first chunk owns delivery time; later chunks must not restamp it.
+    return [...messages.slice(0, -1), { ...last, content: last.content + chunk, invocationId: invocationId ?? last.invocationId }]
   }
-  return [...messages, { type: 'agent', content: chunk, invocationId, _streaming: true }]
+  return [...finalizeStreamingAgentText(messages), { type: 'agent', content: chunk, invocationId, timestamp: validAgentTimestamp(timestamp), _streaming: true }]
 }
 
 export function finalizeStreamingAgentText(messages: ChatMsg[]): ChatMsg[] {
@@ -332,7 +356,54 @@ function writeDebugPreference(enabled: boolean) {
   catch { /* Browser storage may be unavailable in restricted contexts. */ }
 }
 
-export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName, platformRole, isPlatformMode = false }: StudioChatProps) {
+export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName, platformRole, isPlatformMode = false, hideSidebar = false, botRoute, botThread, userId }: StudioChatProps) {
+  const [promoteOpen, setPromoteOpen] = useState(false)
+  const [sourceIntake, setSourceIntake] = useState<{ resumeId?: string } | null>(null)
+  useEffect(() => {
+    if (hideSidebar) return
+    // A second sidebar action must not remount/reset an unfinished editor.
+    // The current intake has explicit Save and close / Discard actions.
+    const open = (event: Event) => {
+      const detail = (event as CustomEvent<{ scope?: unknown; resumeId?: unknown }>).detail
+      // Team intake IDs must never be reinterpreted as personal resume requests.
+      if (detail?.scope !== 'personal') return
+      setSourceIntake(current => current || { ...(typeof detail.resumeId === 'string' ? { resumeId: detail.resumeId } : {}) })
+    }
+    window.addEventListener('astonish:source-intake', open)
+    return () => window.removeEventListener('astonish:source-intake', open)
+  }, [hideSidebar])
+  const [botSubmitting, setBotSubmitting] = useState(false)
+  const [botSendError, setBotSendError] = useState('')
+  const [botStreamError, setBotStreamError] = useState('')
+  const [botRunStates, setBotRunStates] = useState<BotRunStates>({})
+  const [botReplayComplete, setBotReplayComplete] = useState(false)
+  const [botOperations, setBotOperations] = useState<BotOperations>({})
+  useEffect(() => { setBotOperations({}); setBotRunStates({}); setBotReplayComplete(false); setBotSendError(''); setBotStreamError('') }, [botThread?.botId, initialSessionId])
+  useEffect(() => {
+    if (!botThread || !initialSessionId) return
+    setBotOperations(prev => (botThread.operations || []).reduce((states, state) => mergeBotOperation(states, state, botThread.botId, initialSessionId!), prev))
+  }, [botThread?.operations, botThread?.botId, initialSessionId])
+  useEffect(() => {
+    if (!botThread || !initialSessionId) return
+    setBotRunStates(prev => (botThread.runStates || []).reduce((states, state) => mergeBotRunState(states, state, botThread.botId, initialSessionId!), prev))
+  }, [botThread?.runStates, botThread?.botId, initialSessionId])
+  const botBusy = botThread?.status !== 'stopped' && botThread?.status !== 'deleted' && (botRunsBusy(botRunStates) || botOperationsBusy(botOperations))
+  const botSubmittingRef = useRef(false)
+  // Tracks whether the component is still mounted. Deferred timers (e.g. the
+  // post-stream loadSessions below) may fire after unmount; guarding on this
+  // prevents a state update against a destroyed React/jsdom environment.
+  const isMountedRef = useRef(true)
+  useEffect(() => () => { isMountedRef.current = false }, [])
+  const botThreadRef = useRef(botThread)
+  botThreadRef.current = botThread
+  const botOperationsRef = useRef(botOperations)
+  botOperationsRef.current = botOperations
+  useEffect(() => {
+    botThreadRef.current?.onOperationsChange?.(Object.values(botOperations))
+  }, [botOperations])
+  const savedChatSession = useRef(initialSessionId)
+  if (!botRoute) savedChatSession.current = initialSessionId
+  if (botRoute) initialSessionId = savedChatSession.current
   // Session state
   const [sessions, setSessions] = useState<SidebarSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialSessionId || null)
@@ -353,6 +424,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
   // Chat state
   const [messages, setMessages] = useState<ChatMsg[]>([])
+  useEffect(() => {
+    if (!botThread || !botReplayComplete) return
+    setMessages(prev => Object.values(botOperations).filter(operation => operation.bot_id === botThread.botId && operation.home_session_id === initialSessionId).reduce((next, operation) => projectBotOperation(next, operation), prev))
+  }, [botOperations, botReplayComplete, botThread?.botId, initialSessionId])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [activeAppId, setActiveAppId] = useState<string | null>(null) // ID of app currently being refined
@@ -427,6 +502,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const streamGenRef = useRef(0)
 
   const startSessionMemoryPolling = useCallback((sessionId: string | null | undefined) => {
+    if (botThreadRef.current) return
     if (!sessionId) {
       setIsConsolidatingMemories(false)
       return
@@ -649,6 +725,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // derived state so the inline tracker and header side panel cannot disagree.
   const latestPlanWithSteps = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
+      const canonical = messages[i]
+      if (canonical.type === 'plan' && canonical.snapshot) return canonical.steps.length > 0 ? canonical : null
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.type === 'plan') {
         const plan = m as PlanMessage
@@ -802,6 +882,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [])
 
   useEffect(() => {
+    if (botThread) {
+      if (initialSessionId) reconnectToChatRunner(initialSessionId)
+      return () => { ++streamGenRef.current; abortRef.current?.abort(); abortRef.current = null }
+    }
     loadSessions()
 
     const init = async () => {
@@ -863,8 +947,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     loadSessionHistory(sid)
   }, [initialSessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll on new messages — only if user is near the bottom
+  // Plan-only updates replace the existing card without moving the reader.
+  const previousScrollMessages = useRef(messages)
   useEffect(() => {
+    const previous = previousScrollMessages.current
+    previousScrollMessages.current = messages
+    const onlyPlanUpdates = previous.length === messages.length && messages.every((msg, index) =>
+      msg === previous[index] || (msg.type === 'plan' && previous[index]?.type === 'plan'))
+    if (onlyPlanUpdates) return
     if (scrollRef.current && isNearBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
@@ -906,15 +996,17 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [isStreaming, activeSessionId])
 
   const loadSessions = async () => {
+    if (!isMountedRef.current) return
     try {
       setIsLoadingSessions(true)
       const data = await fetchSessions()
+      if (!isMountedRef.current) return
       setSessions(Array.isArray(data) ? data : [])
     } catch (err: any) {
       console.error('Failed to load sessions:', err)
-      setSessions([])
+      if (isMountedRef.current) setSessions([])
     } finally {
-      setIsLoadingSessions(false)
+      if (isMountedRef.current) setIsLoadingSessions(false)
     }
   }
 
@@ -1042,6 +1134,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               questionId: m.questionId || m.QuestionID || '',
               kind: (m.kind || m.questionKind || m.QuestionKind || 'yesno') as ChatQuestionMessage['kind'],
               prompt: m.prompt || m.Prompt || '',
+              allow_custom_answer: m.allow_custom_answer as boolean | undefined,
               options: (m.options || m.Options || []) as ChatQuestionMessage['options'],
             } as ChatQuestionMessage
           }
@@ -1051,13 +1144,16 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           if (m.type === 'image' && m.data && m.mimeType) {
             return { type: 'image', data: m.data, mimeType: m.mimeType } as ImageMessage
           }
+          if ((m.type === 'plan' || m.type === 'plan_snapshot') && m.snapshot) {
+            return planFromSnapshot(m.snapshot as PlanSnapshot)
+          }
           if (m.type === 'plan') {
             return { type: 'plan', goal: m.goal || '', steps: m.steps ?? [], context: m.context, whatNotToDo: m.whatNotToDo, verification: m.verification } as PlanMessage
           }
           return m as unknown as ChatMsg
         })
         const mapped = restored
-        setMessages(collapseDocsUpdates(normalizeDelegationHistory(mapped)))
+        setMessages(collapseDocsUpdates(normalizePlanHistory(normalizeDelegationHistory(mapped))))
         // Restore active app state from session history
         const appPreviews = mapped.filter((m): m is AppPreviewMessage => m.type === 'app_preview')
         if (appPreviews.length > 0) {
@@ -1085,6 +1181,577 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       .catch(() => { /* ignore */ })
   }, [changeSession])
 
+  // One presentation boundary for POST, reconnect, and adapted Bot events.
+  // Transport/session lifecycle stays with the caller; replay must not dispatch commands.
+  const applyChatEvent = useCallback((eventType: string, data: Record<string, unknown>, context: {
+    sessionId: string
+    generation: number
+    allowCommands?: boolean
+    onSession: (data: Record<string, unknown>) => void
+  }) => {
+    const { sessionId, generation } = context
+    // Discard events from a stale stream (session was switched)
+    if (streamGenRef.current !== generation) return
+    if (TEXT_BOUNDARY_EVENTS.has(eventType)) {
+      setGenerationProgress(null)
+      setMessages(finalizeStreamingAgentText)
+    }
+    if (botThreadRef.current && eventType === 'bot_operation') {
+      const botId = botThreadRef.current.botId
+      if (!isBotOperation(data) || data.bot_id !== botId || data.home_session_id !== sessionId) return
+      const previous = botOperationsRef.current[data.operation_id]
+      if (previous && (data.revision < previous.revision || data.state_sequence < previous.state_sequence)) return
+      const heads = mergeBotOperation(botOperationsRef.current, data, botId, sessionId)
+      botOperationsRef.current = heads
+      setBotOperations(heads)
+      // Replay placement is independent of head advancement: snapshots can
+      // preload this exact head before its durable transcript row arrives.
+      setMessages(prev => projectBotOperation(finalizeStreamingAgentText(prev), heads[data.operation_id], true))
+      return
+    }
+    if (botThreadRef.current && eventType === 'bot_run_state') {
+      setBotRunStates(prev => mergeBotRunState(prev, data as unknown as BotRunState, botThreadRef.current!.botId, sessionId))
+      return
+    }
+    if (botThreadRef.current && eventType === 'bot_review') {
+      if (data.kind !== 'proposal' && data.kind !== 'approval') return
+      const kind = data.kind
+      const reviewId = String(data.review_id || data.reviewId || '')
+      const question = data.question as import('@/api/questions').Question | undefined
+      if (reviewId) setMessages(prev => prev.some(m => m.type === 'bot_review' && m.kind === kind && m.reviewId === reviewId) ? prev.map(m => m.type === 'bot_review' && m.kind === kind && m.reviewId === reviewId && question ? { ...m, question } : m) : [...finalizeStreamingAgentText(prev), { type: 'bot_review', kind, reviewId, question, eventId: String(data.eventId || reviewId) }])
+      return
+    }
+    // Bot ADK envelopes feed this same reducer, never a second transcript store.
+    if (botThreadRef.current && eventType === 'user_message') {
+      setMessages(prev => [...finalizeStreamingAgentText(prev), { type: 'user', content: String(data.text || ''), eventId: String(data.eventId || '') }])
+      return
+    }
+    if (botThreadRef.current && eventType === 'turn_complete') { setMessages(finalizeStreamingAgentText); return }
+    switch (eventType) {
+      case 'session':
+        context.onSession(data)
+        break
+
+      case 'bot_file_publication':
+        if (botThreadRef.current && isBotFilePublication(data) && data.bot_id === botThreadRef.current.botId) {
+          const publication = data
+          setMessages(prev => prev.some(m => m.type === 'bot_file_publication' && m.publication.event_id === publication.event_id) ? prev : [...prev, { type: 'bot_file_publication', publication }])
+        }
+        break
+
+      case 'text':
+        if (data.text) {
+          setGenerationProgress(null)
+          setMessages(prev => appendStreamingAgentText(prev, data.text as string, data.invocationId as string | undefined, validAgentTimestamp(data.timestamp)))
+        }
+        break
+
+      case 'tool_call':
+        // Finalize any streaming text before tool call
+        setMessages((prev: ChatMsg[]) => [...prev, { type: 'tool_call', toolName: data.name, toolArgs: data.args }])
+        break
+
+      case 'tool_result':
+        // Detect browser handoff with VNC viewer
+        if (data.name === 'browser_request_human' && data.result && typeof data.result === 'object' && (data.result as Record<string, unknown>).vnc_proxy_url) {
+          const result = data.result as Record<string, unknown>
+          const vncUrl = String(result.vnc_proxy_url || '')
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'browser_handoff',
+            vncProxyUrl: vncUrl,
+            pageUrl: String(result.page_url || ''),
+            pageTitle: String(result.page_title || ''),
+            reason: String(result.message || 'Human assistance needed'),
+          } as BrowserHandoffMessage])
+        } else {
+          setMessages((prev: ChatMsg[]) => [...prev, { type: 'tool_result', toolName: data.name, toolResult: data.result }])
+        }
+        // Clear wizard context once the fleet plan or drill suite has been saved
+        if (context.allowCommands && (data.name === 'save_fleet_plan' || data.name === 'save_drill')) {
+          setActiveWizardContext(null)
+        }
+        break
+
+      case 'memory_saved':
+        // Mark that this session has memories (optimistic)
+        setHasSessionMemories(true)
+        break
+
+      case 'network_denial_hint':
+        if (data.denials && (data.denials as unknown[]).length > 0) {
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'network_denial',
+            denials: data.denials as NetworkDenialMessage['denials'],
+            sandbox_name: (data.sandbox_name as string) || '',
+          }])
+        } else if (data.session_id) {
+          fetchNetworkDenials(String(data.session_id)).then(resp => {
+            if (resp.denials && resp.denials.length > 0) {
+              setMessages((prev: ChatMsg[]) => [...prev, {
+                type: 'network_denial',
+                denials: resp.denials,
+                sandbox_name: resp.sandbox_name,
+              }])
+            }
+          }).catch(() => { /* non-fatal */ })
+        }
+        break
+
+      case 'image':
+        if (data.data && data.mimeType) {
+          setMessages((prev: ChatMsg[]) => [...prev, { type: 'image', data: data.data, mimeType: data.mimeType }])
+        }
+        break
+
+      case 'docs_update':
+        if (data.type === 'slides' && data.deckSlug) {
+          setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
+        }
+        break
+
+      case 'artifact':
+        if (data.path) {
+          const fileName = (data.path as string).split('/').pop() || 'file'
+          const fileType = fileTypeFromFileName(fileName)
+          setSessionArtifacts(prev => {
+            const path = data.path as string
+            const toolName = (data.tool_name as string) || 'write_file'
+            const existing = prev.find(a => a.path === path)
+            if (!existing) return [...prev, { path, fileName, fileType, toolName, revision: 1 }]
+            return prev.map(a => a.path === path
+              ? { ...a, fileName, fileType, toolName, revision: (a.revision || 0) + 1 }
+              : a,
+            )
+          })
+          // Also add inline artifact message to the chat thread
+          setMessages((prev: ChatMsg[]) => {
+            const path = data.path as string
+            const toolName = (data.tool_name as string) || 'write_file'
+            const latestRevision = prev.reduce((max, m) => (
+              m.type === 'artifact' && (m as ArtifactMessage).path === path
+                ? Math.max(max, (m as ArtifactMessage).revision || 0)
+                : max
+            ), 0) + 1
+            return [...prev, {
+              type: 'artifact',
+              path,
+              toolName,
+              revision: latestRevision,
+            } as ArtifactMessage]
+          })
+        }
+        break
+
+      case 'report_marker':
+        // Metadata only: preserve the Markdown + last-turn + isReport gate.
+        if (data.path) {
+          const reportPath = data.path as string
+          const reportTitle = (data.title as string) || ''
+          setSessionArtifacts(prev => prev.map(a =>
+            a.path === reportPath
+              ? { ...a, isReport: true, reportTitle }
+              : a,
+          ))
+          setMessages((prev: ChatMsg[]) => prev.map(m =>
+            m.type === 'artifact' && (m as ArtifactMessage).path === reportPath
+              ? { ...(m as ArtifactMessage), isReport: true, reportTitle }
+              : m,
+          ))
+        }
+        break
+
+      case 'flow_output':
+        // Flow output delivered directly — bypass LLM, render as markdown.
+        // Finalize any pending streaming text first.
+        if (data.content) {
+          setMessages((prev: ChatMsg[]) => [...prev, { type: 'agent', content: data.content as string }])
+        }
+        break
+
+      case 'new_session':
+        if (!context.allowCommands) break
+        if (data.sessionId) {
+          changeSession(data.sessionId as string)
+          setMessages([])
+          setGenerationProgress(null)
+          loadSessions()
+        }
+        break
+
+      case 'session_title':
+        // Update the session title in the sidebar.
+        // Use sessionId from the event payload to avoid stale closure issues
+        // (activeSessionId may still be null for newly created sessions).
+        // Upsert when the session isn't in the list yet (title can arrive
+        // before the deferred loadSessions after isNew).
+        if (data.title && data.sessionId) {
+          const sid = data.sessionId as string
+          const title = data.title as string
+          setSessions(prev => {
+            const idx = prev.findIndex(s => s.id === sid)
+            if (idx >= 0) {
+              return prev.map(s => s.id === sid ? { ...s, title } : s)
+            }
+            const now = new Date().toISOString()
+            return [{
+              id: sid,
+              title,
+              createdAt: now,
+              updatedAt: now,
+              messageCount: 0,
+            }, ...prev]
+          })
+        }
+        break
+
+      case 'system':
+        if (data.content) {
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'system',
+            content: data.content as string,
+          }])
+        }
+        break
+
+      case 'approval':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'approval',
+          toolName: data.tool,
+          options: data.options,
+        }])
+        break
+
+      case 'auto_approved':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'auto_approved',
+          toolName: data.tool,
+        }])
+        break
+
+      case 'thinking':
+        if (data.text) setGenerationProgress(data.text as string)
+        break
+
+      case 'fleet_redirect':
+        if (!context.allowCommands) break
+        // /fleet [task] command opens the fleet dialog, optionally pre-populated
+        setIsStreaming(false)
+        setFleetDialogMessage((data.task as string) || '')
+        setShowFleetDialog(true)
+        break
+
+      case 'fleet_plan_redirect':
+        if (!context.allowCommands) break
+        // /fleet-plan [hint] command: start plan creation in a fresh conversation.
+        // If the backend found a plan_wizard in the template, use it as system context.
+        // If no hint, show a template picker dialog so the user selects one first.
+        setIsStreaming(false)
+        {
+          const hint = (data.hint as string) || ''
+          const wizardSystemPrompt = (data.wizard_system_prompt as string) || ''
+          const pinnedGroups = (data.pinned_tool_groups as string[]) || null
+          const setupDraftId = (data.setup_draft_id as string) || ''
+          const setupProfileKey = (data.setup_profile_key as string) || ''
+          const currentStepTitle = (data.current_setup_step_title as string) || ''
+
+          if (wizardSystemPrompt) {
+            setActiveWizardContext(wizardSystemPrompt)
+            if (pinnedGroups && pinnedGroups.length > 0) {
+              setActivePinnedToolGroups(pinnedGroups)
+            }
+            const kickoff = currentStepTitle
+              ? `Help me set up a fleet plan. Let's start with ${currentStepTitle.toLowerCase()}.`
+              : 'Help me set up a fleet plan.'
+            const agentOps = setupDraftId
+              ? `\n\nSETUP SESSION:\n- draft_id: ${setupDraftId}\n- profile_key: ${setupProfileKey || hint || 'generic'}\n- Call get_setup_profile with draft_id and profile_key before asking questions.\n- Work ONLY on the current step.\n- Call update_setup_draft when the step is complete.\n- Follow the profile step order; do not skip ahead.`
+              : ''
+            setPendingFleetPlanPrompt({
+              message: kickoff,
+              systemContext: wizardSystemPrompt + agentOps,
+              pinnedToolGroups: pinnedGroups || undefined,
+            })
+          } else if (hint) {
+            // Profile resolution failed — still avoid hardcoding identity-first ordering.
+            const genericSystemPrompt = `You are helping the user create a fleet plan based on the "${hint}" fleet template. The base_fleet_key is "${hint}". Call get_setup_profile to load the setup profile and current step, then follow that step order strictly. Do not ask for plan identity unless the current setup step is identity. Before saving, call validate_fleet_plan with all config including credentials. Only call save_fleet_plan after validation passes.`
+            setActiveWizardContext(genericSystemPrompt)
+            setPendingFleetPlanPrompt({
+              message: `Help me create a fleet plan from the "${hint}" template.`,
+              systemContext: genericSystemPrompt,
+            })
+          } else {
+            // No hint: show template picker so user selects one, then re-issue /fleet-plan <key>
+            setShowTemplatePicker(true)
+          }
+        }
+        break
+
+      case 'drill_redirect':
+        if (!context.allowCommands) break
+        // /drill or /tutorial-drill [hint]: start drill/tutorial suite creation wizard
+        setIsStreaming(false)
+        {
+          const hint = (data.hint as string) || ''
+          const wizardSystemPrompt = (data.wizard_system_prompt as string) || ''
+          const wizardKind = (data.wizard_kind as string) || 'drill'
+          const pinnedGroups = (data.pinned_tool_groups as string[]) || null
+
+          if (wizardSystemPrompt) {
+            setActiveWizardContext(wizardSystemPrompt)
+            if (pinnedGroups) setActivePinnedToolGroups(pinnedGroups)
+            let kickoff: string
+            if (wizardKind === 'tutorial') {
+              kickoff = hint
+                ? `I'd like to create a tutorial drill. Here's the flow to teach: ${hint}`
+                : 'I\'d like to create a tutorial drill for my product UI.'
+            } else {
+              kickoff = hint
+                ? `I'd like to create a drill suite. Here's what I want to test: ${hint}`
+                : 'I\'d like to create a drill suite for my project.'
+            }
+            setPendingDrillPrompt({
+              message: kickoff,
+              systemContext: wizardSystemPrompt,
+              pinnedToolGroups: pinnedGroups || undefined,
+            })
+          }
+        }
+        break
+
+      case 'drill_add_redirect':
+        if (!context.allowCommands) break
+        // /drill-add or /tutorial-drill-add <suite>: add drills to an existing suite
+        setIsStreaming(false)
+        {
+          const suiteName = (data.suite_name as string) || ''
+          const wizardSystemPrompt = (data.wizard_system_prompt as string) || ''
+          const wizardKind = (data.wizard_kind as string) || 'drill'
+          const pinnedGroups = (data.pinned_tool_groups as string[]) || null
+
+          if (wizardSystemPrompt) {
+            setActiveWizardContext(wizardSystemPrompt)
+            if (pinnedGroups) setActivePinnedToolGroups(pinnedGroups)
+            const kickoff = wizardKind === 'tutorial'
+              ? `I'd like to add new tutorial drills to the "${suiteName}" suite.`
+              : `I'd like to add new drills to the "${suiteName}" suite.`
+            setPendingDrillPrompt({
+              message: kickoff,
+              systemContext: wizardSystemPrompt,
+              pinnedToolGroups: pinnedGroups || undefined,
+            })
+          }
+        }
+        break
+
+      case 'fleet_progress':
+        // Accumulate fleet progress events into a structured fleet_execution message.
+        // Each event is appended to the phases array; the UI renders a collapsible panel.
+        setMessages((prev: ChatMsg[]) => {
+          const existing = prev.find(m => m.type === 'fleet_execution') as FleetExecutionMessage | undefined
+          const event: FleetEvent = {
+            ...data,
+            type: data.type as string,
+            timestamp: Date.now(),
+            // Preserve rich data fields from SSE payload
+            args: data.args || null,
+            result: data.result !== undefined ? data.result : null,
+            text: (data.text as string) || '',
+          }
+          const maxParallelAgents = Number(data.max_parallel_agents || data.maxParallelAgents || existing?.maxParallelAgents || 1)
+
+          if (existing) {
+            const updated: FleetExecutionMessage = { ...existing, events: [...existing.events, event], maxParallelAgents }
+            // Update current phase/status
+            if (data.type === 'phase_start' || data.type === 'conversation_start') {
+              updated.currentPhase = data.phase as string
+              updated.currentAgent = data.agent as string
+            } else if (data.type === 'fleet_complete') {
+              updated.status = 'complete'
+              updated.currentPhase = null
+            }
+            return prev.map(m => m.type === 'fleet_execution' ? updated : m)
+          }
+
+          // First event: create the fleet_execution message
+          return [...prev, {
+            type: 'fleet_execution',
+            events: [event],
+            currentPhase: (data.type === 'phase_start' || data.type === 'conversation_start') ? data.phase as string : null,
+            currentAgent: (data.type === 'phase_start' || data.type === 'conversation_start') ? data.agent as string : null,
+            status: 'running',
+            maxParallelAgents,
+          } as FleetExecutionMessage]
+        })
+        break
+
+      case 'subtask_progress': {
+        if (isPlanEvent(data.event_type)) {
+          setMessages(prev => reducePlanProgress(prev, data))
+          break
+        }
+        setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
+        break
+      }
+
+      case 'retry':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'retry',
+          attempt: data.attempt,
+          maxRetries: data.maxRetries,
+          reason: data.reason,
+        }])
+        break
+
+      case 'model_changed':
+        setModelStatus(prev => prev ? {
+          ...prev,
+          effectiveProvider: (data.effectiveProvider as string) || (data.provider as string) || prev.effectiveProvider,
+          effectiveModel: (data.effectiveModel as string) || (data.model as string) || prev.effectiveModel,
+          pinnedProvider: (data.pinnedProvider as string) ?? (data.provider as string) ?? prev.pinnedProvider,
+          pinnedModel: (data.pinnedModel as string) ?? (data.model as string) ?? prev.pinnedModel,
+          credentialsAvailable: data.credentialsAvailable !== undefined ? !!data.credentialsAvailable : prev.credentialsAvailable,
+        } : prev)
+        break
+
+      case 'error':
+        setMessages(interruptActiveDelegations)
+        if (botThreadRef.current) setBotStreamError(botLocalFailure(data).message)
+        else setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
+        break
+
+      case 'error_info':
+        if (botThreadRef.current) setBotStreamError(botLocalFailure(data).message)
+        else setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'error_info',
+          title: data.title,
+          reason: data.reason,
+          suggestion: data.suggestion,
+          originalError: data.originalError,
+        }])
+        break
+
+      case 'distill_preview':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'distill_preview',
+          yaml: data.yaml as string,
+          flowName: data.flowName as string,
+          description: data.description as string,
+          tags: (data.tags as string[]) || [],
+          explanation: data.explanation as string || '',
+        } as DistillPreviewMessage])
+        break
+
+      case 'tutorial_blueprint_preview':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'tutorial_blueprint_preview',
+          title: (data.title as string) || '',
+          suite: (data.suite as string) || '',
+          blueprintYaml: (data.blueprint_yaml as string) || '',
+          scenes: normalizeBlueprintScenes(data.scenes),
+        } as TutorialBlueprintPreviewMessage])
+        break
+
+      case 'tutorial_blueprint_approved':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'tutorial_blueprint_approved',
+          title: (data.title as string) || '',
+          suite: (data.suite as string) || '',
+          blueprintYaml: (data.blueprint_yaml as string) || '',
+          drillYaml: (data.drill_yaml as string) || '',
+          drillName: (data.drill_name as string) || '',
+          content: (data.message as string) || '',
+        } as TutorialBlueprintApprovedMessage])
+        break
+
+      case 'tutorial_scene_slideshow':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'tutorial_scene_slideshow',
+          title: (data.title as string) || '',
+          suite: (data.suite as string) || '',
+          drill: (data.drill as string) || '',
+          manifestPath: (data.manifest_path as string) || '',
+          scenes: normalizeTutorialScenes(data.scenes),
+        } as TutorialSceneSlideshowMessage])
+        break
+
+      case 'app_preview':
+        // Finalize any streaming text first
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'app_preview',
+          code: data.code as string,
+          title: data.title as string || 'App Preview',
+          description: data.description as string || '',
+          version: (data.version as number) || 1,
+          appId: data.appId as string || undefined,
+        } as AppPreviewMessage])
+        if (data.appId) setActiveAppId(data.appId as string)
+        break
+
+      case 'chat_question':
+        // Live SSE: backend emits { questionId, kind, prompt, options:[{id,label,description?,thumbnail?}] }.
+        // Finalize any streaming text first (mirror app_preview / distill_preview above).
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'chat_question',
+          questionId: data.questionId as string,
+          kind: data.kind as ChatQuestionMessage['kind'],
+          prompt: data.prompt as string,
+          allow_custom_answer: data.allow_custom_answer as boolean | undefined,
+          options: (data.options as ChatQuestionMessage['options']) || [],
+        } as ChatQuestionMessage])
+        break
+
+      case 'app_done':
+      case 'app_saved':
+        setActiveAppId(null)
+        if (data.name) {
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'app_saved',
+            name: data.name as string || '',
+            path: data.path as string || '',
+          } as AppSavedMessage])
+        }
+        window.dispatchEvent(new Event('astonish:apps-updated'))
+        break
+
+      case 'distill_saved':
+        setMessages((prev: ChatMsg[]) => [...prev, {
+          type: 'distill_saved',
+          filePath: data.filePath as string,
+          runCommand: data.runCommand as string,
+        } as DistillSavedMessage])
+        // Notify App to refresh the flows list
+        window.dispatchEvent(new Event('astonish:flows-updated'))
+        break
+
+      case 'done':
+        setMessages(interruptActiveDelegations)
+        // Finalize streaming text and stop the processing indicator.
+        // The SSE stream may stay open briefly (grace period for async
+        // events like session_title), but the user-facing response is
+        // complete — hide the spinner immediately.
+        setIsStreaming(false)
+        // The emitted session ID, rather than a render-time activeSessionId,
+        // identifies the turn whose asynchronous memory save should be polled.
+        startSessionMemoryPolling(sessionId)
+        break
+
+      case 'usage': {
+        const input = (data.input_tokens as number) || 0
+        const output = (data.output_tokens as number) || 0
+        const total = (data.total_tokens as number) || 0
+        setTokenUsage(prev => ({
+          inputTokens: prev.inputTokens + input,
+          outputTokens: prev.outputTokens + output,
+          totalTokens: prev.totalTokens + total,
+        }))
+        break
+      }
+
+      default:
+        break
+    }
+
+  }, [changeSession, startSessionMemoryPolling])
+
   // Reconnect to an active background chat runner. The runner streams all
   // buffered events (catch-up) followed by live events. This uses the same
   // event handler as sendMessage so all event types are handled identically.
@@ -1093,359 +1760,38 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     // retry replays persisted events into the existing reducers.
     if (attempt === 0) {
       setMessages([])
+      setBotReplayComplete(false)
       setSessionArtifacts([])
       setSessionStartTime(Date.now())
     }
-    setIsStreaming(true)
+    if (!botThreadRef.current) setIsStreaming(true)
     setGenerationProgress(null)
     const streamGen = ++streamGenRef.current
 
-    const controller = connectChatStream({
+    let botReconnecting = false
+    const connectStream: typeof connectChatStream = botThreadRef.current
+      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onReplayComplete: () => { if (streamGenRef.current === streamGen) setBotReplayComplete(true) }, onState: state => { if (streamGenRef.current !== streamGen) return; if (state === 'loading' || state === 'reconnecting') setBotReplayComplete(false); if (state === 'reconnecting') { botReconnecting = true; setBotStreamError(botLocalFailure().message) }; if (state === 'live') { setBotStreamError(''); if (botReconnecting) window.dispatchEvent(new CustomEvent('astonish:bot-files-refresh', { detail: { botId: botThreadRef.current?.botId } })); botReconnecting = false } } })
+      : connectChatStream
+    const controller = connectStream({
       sessionId,
       onEvent: (eventType, data) => {
-        // Discard events from a stale stream (session was switched)
-        if (streamGenRef.current !== streamGen) return
-        if (TEXT_BOUNDARY_EVENTS.has(eventType)) {
-          setGenerationProgress(null)
-          setMessages(finalizeStreamingAgentText)
-        }
-        // Reuse the exact same event handling as sendMessage's onEvent
-        switch (eventType) {
-          case 'session':
-            if (data.sessionId) {
-              changeSession(data.sessionId as string)
-            }
-            break
-
-          case 'text':
-            if (data.text) {
-              setGenerationProgress(null)
-              setMessages(prev => appendStreamingAgentText(prev, data.text as string, data.invocationId as string | undefined))
-            }
-            break
-
-          case 'tool_call':
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'tool_call', toolName: data.name, toolArgs: data.args }])
-            break
-
-          case 'tool_result':
-            if (data.name === 'browser_request_human' && data.result && typeof data.result === 'object' && (data.result as Record<string, unknown>).vnc_proxy_url) {
-              const result = data.result as Record<string, unknown>
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'browser_handoff',
-                vncProxyUrl: String(result.vnc_proxy_url || ''),
-                pageUrl: String(result.page_url || ''),
-                pageTitle: String(result.page_title || ''),
-                reason: String(result.message || 'Human assistance needed'),
-              } as BrowserHandoffMessage])
-            } else {
-              setMessages((prev: ChatMsg[]) => [...prev, { type: 'tool_result', toolName: data.name, toolResult: data.result }])
-            }
-            break
-
-          case 'image':
-            if (data.data && data.mimeType) {
-              setMessages((prev: ChatMsg[]) => [...prev, { type: 'image', data: data.data, mimeType: data.mimeType }])
-            }
-            break
-
-          case 'memory_saved':
-            setHasSessionMemories(true)
-            break
-
-          case 'network_denial_hint':
-            // Backend detected a proxy denial and extracted host:port from output.
-            // Use inline denial data if available; fall back to API poll otherwise.
-            if (data.denials && (data.denials as unknown[]).length > 0) {
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'network_denial',
-                denials: data.denials as NetworkDenialMessage['denials'],
-                sandbox_name: (data.sandbox_name as string) || '',
-              }])
-            } else if (data.session_id) {
-              fetchNetworkDenials(String(data.session_id)).then(resp => {
-                if (resp.denials && resp.denials.length > 0) {
-                  setMessages((prev: ChatMsg[]) => [...prev, {
-                    type: 'network_denial',
-                    denials: resp.denials,
-                    sandbox_name: resp.sandbox_name,
-                  }])
-                }
-              }).catch(() => { /* non-fatal */ })
-            }
-            break
-
-          case 'docs_update':
-            if (data.type === 'slides' && data.deckSlug) {
-              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
-            }
-            break
-
-          case 'artifact':
-            if (data.path) {
-              const fileName = (data.path as string).split('/').pop() || 'file'
-              const fileType = fileTypeFromFileName(fileName)
-              setSessionArtifacts(prev => {
-                const path = data.path as string
-                const toolName = (data.tool_name as string) || 'write_file'
-                const existing = prev.find(a => a.path === path)
-                if (!existing) return [...prev, { path, fileName, fileType, toolName, revision: 1 }]
-                return prev.map(a => a.path === path
-                  ? { ...a, fileName, fileType, toolName, revision: (a.revision || 0) + 1 }
-                  : a,
-                )
-              })
-              // Also add inline artifact message to the chat thread
-              setMessages((prev: ChatMsg[]) => {
-                const path = data.path as string
-                const toolName = (data.tool_name as string) || 'write_file'
-                const latestRevision = prev.reduce((max, m) => (
-                  m.type === 'artifact' && (m as ArtifactMessage).path === path
-                    ? Math.max(max, (m as ArtifactMessage).revision || 0)
-                    : max
-                ), 0) + 1
-                return [...prev, {
-                  type: 'artifact',
-                  path,
-                  toolName,
-                  revision: latestRevision,
-                } as ArtifactMessage]
-              })
-            }
-            break
-
-          case 'report_marker':
-            // The agent emitted an ```astonish-report``` fence whose `path`
-            // matched a same-turn write_file/edit_file artifact. Flip the
-            // matching artifact's isReport flag so the embed gate
-            // (embeddedArtifactPaths useMemo) admits it. The marker carries
-            // no on-screen content of its own — only metadata.
-            if (data.path) {
-              const reportPath = data.path as string
-              const reportTitle = (data.title as string) || ''
-              setSessionArtifacts(prev => prev.map(a =>
-                a.path === reportPath
-                  ? { ...a, isReport: true, reportTitle }
-                  : a,
-              ))
-              setMessages((prev: ChatMsg[]) => prev.map(m =>
-                m.type === 'artifact' && (m as ArtifactMessage).path === reportPath
-                  ? { ...(m as ArtifactMessage), isReport: true, reportTitle }
-                  : m,
-              ))
-            }
-            break
-
-          case 'flow_output':
-            if (data.content) {
-              setMessages((prev: ChatMsg[]) => [...prev, { type: 'agent', content: data.content as string }])
-            }
-            break
-
-          case 'approval':
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'approval', toolName: data.tool, options: data.options }])
-            break
-
-          case 'auto_approved':
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'auto_approved', toolName: data.tool }])
-            break
-
-          case 'thinking':
-            if (data.text) setGenerationProgress(data.text as string)
-            break
-
-          case 'retry':
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'retry', attempt: data.attempt, maxRetries: data.maxRetries, reason: data.reason }])
-            break
-
-          case 'model_changed':
-            setModelStatus(prev => prev ? {
-              ...prev,
-              effectiveProvider: (data.effectiveProvider as string) || (data.provider as string) || prev.effectiveProvider,
-              effectiveModel: (data.effectiveModel as string) || (data.model as string) || prev.effectiveModel,
-              pinnedProvider: (data.pinnedProvider as string) ?? (data.provider as string) ?? prev.pinnedProvider,
-              pinnedModel: (data.pinnedModel as string) ?? (data.model as string) ?? prev.pinnedModel,
-              credentialsAvailable: data.credentialsAvailable !== undefined ? !!data.credentialsAvailable : prev.credentialsAvailable,
-            } : prev)
-            break
-
-          case 'error':
-            setMessages(interruptActiveDelegations)
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
-            break
-
-          case 'error_info':
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'error_info', title: data.title, reason: data.reason, suggestion: data.suggestion, originalError: data.originalError }])
-            break
-
-          case 'distill_preview':
-            // Finalize any streaming text first
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'distill_preview',
-              yaml: data.yaml as string,
-              flowName: data.flowName as string,
-              description: data.description as string,
-              tags: (data.tags as string[]) || [],
-              explanation: data.explanation as string || '',
-            } as DistillPreviewMessage])
-            break
-
-          case 'tutorial_blueprint_preview':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'tutorial_blueprint_preview',
-              title: (data.title as string) || '',
-              suite: (data.suite as string) || '',
-              blueprintYaml: (data.blueprint_yaml as string) || '',
-              scenes: normalizeBlueprintScenes(data.scenes),
-            } as TutorialBlueprintPreviewMessage])
-            break
-
-          case 'tutorial_blueprint_approved':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'tutorial_blueprint_approved',
-              title: (data.title as string) || '',
-              suite: (data.suite as string) || '',
-              blueprintYaml: (data.blueprint_yaml as string) || '',
-              drillYaml: (data.drill_yaml as string) || '',
-              drillName: (data.drill_name as string) || '',
-              content: (data.message as string) || '',
-            } as TutorialBlueprintApprovedMessage])
-            break
-
-          case 'tutorial_scene_slideshow':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'tutorial_scene_slideshow',
-              title: (data.title as string) || '',
-              suite: (data.suite as string) || '',
-              drill: (data.drill as string) || '',
-              manifestPath: (data.manifest_path as string) || '',
-              scenes: normalizeTutorialScenes(data.scenes),
-            } as TutorialSceneSlideshowMessage])
-            break
-
-          case 'app_preview':
-            // Finalize any streaming text first
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'app_preview',
-              code: data.code as string,
-              title: data.title as string || 'App Preview',
-              description: data.description as string || '',
-              version: (data.version as number) || 1,
-              appId: data.appId as string || undefined,
-            } as AppPreviewMessage])
-            if (data.appId) setActiveAppId(data.appId as string)
-            break
-
-          case 'chat_question':
-            // Live SSE: backend emits { questionId, kind, prompt, options:[{id,label,description?,thumbnail?}] }.
-            // Finalize any streaming text first (mirror app_preview / distill_preview above).
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'chat_question',
-              questionId: data.questionId as string,
-              kind: data.kind as ChatQuestionMessage['kind'],
-              prompt: data.prompt as string,
-              options: (data.options as ChatQuestionMessage['options']) || [],
-            } as ChatQuestionMessage])
-            break
-
-          case 'app_done':
-          case 'app_saved':
-            setActiveAppId(null)
-            if (data.name) {
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'app_saved',
-                name: data.name as string || '',
-                path: data.path as string || '',
-              } as AppSavedMessage])
-            }
-            window.dispatchEvent(new Event('astonish:apps-updated'))
-            break
-
-          case 'distill_saved':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'distill_saved',
-              filePath: data.filePath as string,
-              runCommand: data.runCommand as string,
-            } as DistillSavedMessage])
-            // Notify App to refresh the flows list
-            window.dispatchEvent(new Event('astonish:flows-updated'))
-            break
-
-          case 'done':
-            setMessages(interruptActiveDelegations)
-            setIsStreaming(false)
-            // After done, poll the known stream session for async reflector saves.
-            startSessionMemoryPolling(sessionId)
-            break
-
-          case 'subtask_progress': {
-            const stEventType = data.event_type as string
-
-            // ── Plan events ──
-            if (stEventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
-                name: s.name,
-                description: s.description,
-                status: 'pending' as const,
-                details: s.details,
-                files: s.files,
-                verify: s.verify,
-                parallelGroup: s.parallel_group,
-              }))
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'plan',
-                goal: (data.plan_goal as string) || '',
-                steps,
-                context: (data.plan_context as string) || undefined,
-                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
-                verification: (data.plan_verification as string) || undefined,
-              } as PlanMessage])
-              break
-            }
-
-            if (stEventType === 'plan_step_update') {
-              const stepName = data.step_name as string
-              const stepStatus = data.step_status as PlanStepInfo['status']
-              setMessages((prev: ChatMsg[]) => {
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  if (prev[i].type === 'plan') {
-                    const plan = prev[i] as PlanMessage
-                    const updatedSteps = plan.steps.map(s =>
-                      s.name === stepName ? { ...s, status: stepStatus } : s
-                    )
-                    return prev.map((m, idx) => idx === i ? { ...plan, steps: updatedSteps } : m)
-                  }
-                }
-                return prev
-              })
-              break
-            }
-
-            setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
-            break
-          }
-
-          case 'usage': {
-            const input = (data.input_tokens as number) || 0
-            const output = (data.output_tokens as number) || 0
-            const total = (data.total_tokens as number) || 0
-            setTokenUsage(prev => ({
-              inputTokens: prev.inputTokens + input,
-              outputTokens: prev.outputTokens + output,
-              totalTokens: prev.totalTokens + total,
-            }))
-            break
-          }
-
-          default:
-            break
-        }
+        applyChatEvent(eventType, data, {
+          sessionId,
+          generation: streamGen,
+          onSession: data => { if (data.sessionId) changeSession(data.sessionId as string) },
+        })
       },
       onError: (err) => {
         if (streamGenRef.current !== streamGen) return
         setGenerationProgress(null)
         setMessages(finalizeStreamingAgentText)
         console.error('Chat reconnect stream error:', err)
+        if (botThreadRef.current) {
+          if ('status' in err && [401, 403, 404, 410].includes(Number(err.status))) { setMessages([]); setBotRunStates({}); setBotOperations({}); setBotReplayComplete(false) }
+          setBotStreamError(botLocalFailure(err).message)
+          setIsStreaming(false)
+          return
+        }
         void fetchSessionStatus(sessionId).then(status => {
           if (streamGenRef.current !== streamGen) return
           if (status.running && attempt < 3) {
@@ -1476,6 +1822,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           const last = prev[prev.length - 1]
           if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
             const finalized = finalizeStreamingAgentText(prev)
+            if (botThreadRef.current) return finalized
             return [...finalized, {
               type: 'error',
               content: 'The model stopped responding unexpectedly. You can send a follow-up message to continue.',
@@ -1489,7 +1836,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     })
 
     abortRef.current = controller
-  }, [changeSession])
+  }, [applyChatEvent, changeSession])
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
     // Cancel any active stream
@@ -1710,51 +2057,38 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // --- Attachment handlers ---
 
   const validateAndAddFiles = useCallback((files: FileList | File[]) => {
+    if (botSubmittingRef.current) return
+    if (botThreadRef.current?.toolFree) {
+      setBotSendError(botLocalFailure(undefined, BotFailureKind.Attachments).message)
+      return
+    }
+    if (botThreadRef.current?.readOnly) {
+      setMessages(prev => [...prev, { type: 'error', content: 'This Bot thread is read-only; files were not attached.' }])
+      return
+    }
     const fileArray = Array.from(files)
     const errors: string[] = []
 
-    setAttachments(prev => {
-      const remaining = MAX_ATTACHMENTS - prev.length
-      if (remaining <= 0) {
-        errors.push(`Maximum ${MAX_ATTACHMENTS} files allowed`)
-        return prev
+    const prev = attachments
+    const remaining = MAX_ATTACHMENTS - prev.length
+    const toAdd: PendingAttachment[] = []
+    for (const file of fileArray.slice(0, Math.max(0, remaining))) {
+      if (file.size > MAX_FILE_SIZE || file.size === 0) {
+        errors.push(`${file.name}: files must be non-empty and at most 10 MB`)
+        continue
       }
-
-      const toAdd: typeof prev = []
-      for (const file of fileArray.slice(0, remaining)) {
-        if (file.size > MAX_FILE_SIZE) {
-          errors.push(`${file.name} exceeds 10 MB limit`)
-          continue
-        }
-        // Check MIME type or extension
-        const isAcceptedMime = ACCEPTED_MIME_TYPES.some(t => file.type.startsWith(t.replace('*', '')))
-        const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-        const isAcceptedExt = ACCEPTED_EXTENSIONS.split(',').includes(ext)
-        if (!isAcceptedMime && !isAcceptedExt) {
-          errors.push(`${file.name}: unsupported file type`)
-          continue
-        }
-
-        const id = crypto.randomUUID()
-        let preview: string | null = null
-        if (file.type.startsWith('image/')) {
-          preview = URL.createObjectURL(file)
-        }
-        toAdd.push({ id, file, preview, mimeType: file.type || 'application/octet-stream', name: file.name })
+      const isAcceptedMime = ACCEPTED_MIME_TYPES.some(t => file.type.startsWith(t.replace('*', '')))
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+      if (!isAcceptedMime && !ACCEPTED_EXTENSIONS.split(',').includes(ext)) {
+        errors.push(`${file.name}: unsupported file type`)
+        continue
       }
-
-      if (fileArray.length > remaining) {
-        errors.push(`Only ${remaining} more file(s) can be added`)
-      }
-
-      return [...prev, ...toAdd]
-    })
-
-    // Show errors as console warnings (could be toast in the future)
-    if (errors.length > 0) {
-      console.warn('Attachment errors:', errors)
+      toAdd.push({ id: crypto.randomUUID(), file, preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : null, mimeType: file.type || 'application/octet-stream', name: file.name })
     }
-  }, [])
+    if (fileArray.length > remaining) errors.push(`Maximum ${MAX_ATTACHMENTS} files allowed; some files were not attached`)
+    setAttachments([...prev, ...toAdd])
+    if (errors.length > 0) setMessages(prev => [...prev, { type: 'error', content: errors.join('; ') }])
+  }, [attachments])
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments(prev => {
@@ -1821,8 +2155,28 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
   // --- End attachment handlers ---
 
-  const sendMessage = useCallback(async (text: string, options: { systemContext?: string, pinnedToolGroups?: string[] } = {}) => {
-    if (!text.trim() && attachments.length === 0) return
+  const sendMessage = useCallback(async (text: string, options: { systemContext?: string, pinnedToolGroups?: string[], approvedPlanExecution?: boolean } = {}) => {
+    if (botThreadRef.current) {
+      if (botSubmittingRef.current || botThreadRef.current.readOnly || (!text.trim() && attachments.length === 0)) return
+      if (botThreadRef.current.toolFree && attachments.length) { setBotSendError(botLocalFailure(undefined, BotFailureKind.Attachments).message); return }
+      botSubmittingRef.current = true
+      setBotSubmitting(true); setBotSendError('')
+      try {
+        const payloads = await prepareAttachmentPayloads()
+        const thread = botThreadRef.current
+        const generation = streamGenRef.current
+        const receipt = await thread.onSend(text.trim(), payloads.length ? payloads : undefined, Object.values(botOperationsRef.current))
+        if (generation !== streamGenRef.current || thread.botId !== botThreadRef.current?.botId) return
+        if (receipt) setBotRunStates(prev => mergeBotReceipt(prev, receipt, thread.botId, activeSessionId || ''))
+        setInput('')
+        clearAttachments()
+      }
+      catch (e) { setBotSendError(botLocalFailure(e).message) }
+      finally { botSubmittingRef.current = false; setBotSubmitting(false) }
+      return
+    }
+    const planAction = !!options.approvedPlanExecution
+    if (!text.trim() && attachments.length === 0 && !planAction) return
     const userMsg = text.trim()
 
     // Reset scroll position — user expects to see the conversation flow
@@ -1832,7 +2186,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     // Prepare attachments (async base64 encoding)
     let attachmentPayloads: AttachmentPayload[] = []
     let attachmentInfos: AttachmentInfo[] = []
-    if (attachments.length > 0) {
+    if (attachments.length > 0 && !planAction) {
       attachmentPayloads = await prepareAttachmentPayloads()
       // For image previews in local messages, include base64 data for thumbnails
       attachmentInfos = attachments.map(a => ({
@@ -1844,7 +2198,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     }
 
     // Add user message to chat (unless it's a slash command or internal action)
-    if (!userMsg.startsWith('/') && !userMsg.startsWith('__distill_') && !userMsg.startsWith('__app_') && !userMsg.startsWith('__tutorial_blueprint_')) {
+    if (!planAction && !userMsg.startsWith('/') && !userMsg.startsWith('__distill_') && !userMsg.startsWith('__app_') && !userMsg.startsWith('__tutorial_blueprint_')) {
       const userChatMsg: UserMessage = { type: 'user', content: userMsg }
       if (attachmentInfos.length > 0) {
         userChatMsg.attachments = attachmentInfos
@@ -1852,8 +2206,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       setMessages((prev: ChatMsg[]) => [...prev, userChatMsg])
     }
 
-    setInput('')
-    if (inputRef.current) {
+    if (!planAction) setInput('')
+    if (!planAction && inputRef.current) {
       inputRef.current.style.height = 'auto'
     }
     setIsStreaming(true)
@@ -1861,7 +2215,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setGenerationProgress(null)
 
     // Clear attachments after capturing payloads
-    clearAttachments()
+    if (!planAction) clearAttachments()
 
     let streamSessionId = activeSessionId || ''
     const streamGen = ++streamGenRef.current
@@ -1869,6 +2223,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     const controller = connectChat({
       sessionId: streamSessionId,
       message: userMsg,
+      approvedPlanExecution: options.approvedPlanExecution,
       attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
       systemContext: options.systemContext || activeWizardContext || undefined,
       pinnedToolGroups: options.pinnedToolGroups || activePinnedToolGroups || undefined,
@@ -1877,14 +2232,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       memoryScope,
       debug: canDebug && debugEnabled,
       onEvent: (eventType, data) => {
-        // Discard events from a stale stream (session was switched)
-        if (streamGenRef.current !== streamGen) return
-        if (TEXT_BOUNDARY_EVENTS.has(eventType)) {
-          setGenerationProgress(null)
-          setMessages(finalizeStreamingAgentText)
-        }
-        switch (eventType) {
-          case 'session':
+        applyChatEvent(eventType, data, {
+          sessionId: streamSessionId || activeSessionId || '',
+          generation: streamGen,
+          allowCommands: true,
+          onSession: data => {
             if (data.sessionId) {
               const sid = data.sessionId as string
               streamSessionId = sid
@@ -1922,561 +2274,18 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   })
               }
             }
-            break
-
-          case 'text':
-            if (data.text) {
-              setGenerationProgress(null)
-              setMessages(prev => appendStreamingAgentText(prev, data.text as string, data.invocationId as string | undefined))
-            }
-            break
-
-          case 'tool_call':
-            // Finalize any streaming text before tool call
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'tool_call', toolName: data.name, toolArgs: data.args }])
-            break
-
-          case 'tool_result':
-            // Detect browser handoff with VNC viewer
-            if (data.name === 'browser_request_human' && data.result && typeof data.result === 'object' && (data.result as Record<string, unknown>).vnc_proxy_url) {
-              const result = data.result as Record<string, unknown>
-              const vncUrl = String(result.vnc_proxy_url || '')
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'browser_handoff',
-                vncProxyUrl: vncUrl,
-                pageUrl: String(result.page_url || ''),
-                pageTitle: String(result.page_title || ''),
-                reason: String(result.message || 'Human assistance needed'),
-              } as BrowserHandoffMessage])
-            } else {
-              setMessages((prev: ChatMsg[]) => [...prev, { type: 'tool_result', toolName: data.name, toolResult: data.result }])
-            }
-            // Clear wizard context once the fleet plan or drill suite has been saved
-            if (data.name === 'save_fleet_plan' || data.name === 'save_drill') {
-              setActiveWizardContext(null)
-            }
-            break
-
-          case 'memory_saved':
-            // Mark that this session has memories (optimistic)
-            setHasSessionMemories(true)
-            break
-
-          case 'network_denial_hint':
-            if (data.denials && (data.denials as unknown[]).length > 0) {
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'network_denial',
-                denials: data.denials as NetworkDenialMessage['denials'],
-                sandbox_name: (data.sandbox_name as string) || '',
-              }])
-            } else if (data.session_id) {
-              fetchNetworkDenials(String(data.session_id)).then(resp => {
-                if (resp.denials && resp.denials.length > 0) {
-                  setMessages((prev: ChatMsg[]) => [...prev, {
-                    type: 'network_denial',
-                    denials: resp.denials,
-                    sandbox_name: resp.sandbox_name,
-                  }])
-                }
-              }).catch(() => { /* non-fatal */ })
-            }
-            break
-
-          case 'image':
-            if (data.data && data.mimeType) {
-              setMessages((prev: ChatMsg[]) => [...prev, { type: 'image', data: data.data, mimeType: data.mimeType }])
-            }
-            break
-
-          case 'docs_update':
-            if (data.type === 'slides' && data.deckSlug) {
-              setMessages((prev: ChatMsg[]) => upsertDocsUpdate(prev, docsUpdateFromEvent(data)))
-            }
-            break
-
-          case 'artifact':
-            if (data.path) {
-              const fileName = (data.path as string).split('/').pop() || 'file'
-              const fileType = fileTypeFromFileName(fileName)
-              setSessionArtifacts(prev => {
-                const path = data.path as string
-                const toolName = (data.tool_name as string) || 'write_file'
-                const existing = prev.find(a => a.path === path)
-                if (!existing) return [...prev, { path, fileName, fileType, toolName, revision: 1 }]
-                return prev.map(a => a.path === path
-                  ? { ...a, fileName, fileType, toolName, revision: (a.revision || 0) + 1 }
-                  : a,
-                )
-              })
-              // Also add inline artifact message to the chat thread
-              setMessages((prev: ChatMsg[]) => {
-                const path = data.path as string
-                const toolName = (data.tool_name as string) || 'write_file'
-                const latestRevision = prev.reduce((max, m) => (
-                  m.type === 'artifact' && (m as ArtifactMessage).path === path
-                    ? Math.max(max, (m as ArtifactMessage).revision || 0)
-                    : max
-                ), 0) + 1
-                return [...prev, {
-                  type: 'artifact',
-                  path,
-                  toolName,
-                  revision: latestRevision,
-                } as ArtifactMessage]
-              })
-            }
-            break
-
-          case 'report_marker':
-            // Mirror of the primary handler — see comments at the first
-            // case 'report_marker' above. Both SSE consumers (sendMessage
-            // and reconnect) must apply the same flip so a tab refresh in
-            // the middle of a streaming turn produces the same result as
-            // the original stream.
-            if (data.path) {
-              const reportPath = data.path as string
-              const reportTitle = (data.title as string) || ''
-              setSessionArtifacts(prev => prev.map(a =>
-                a.path === reportPath
-                  ? { ...a, isReport: true, reportTitle }
-                  : a,
-              ))
-              setMessages((prev: ChatMsg[]) => prev.map(m =>
-                m.type === 'artifact' && (m as ArtifactMessage).path === reportPath
-                  ? { ...(m as ArtifactMessage), isReport: true, reportTitle }
-                  : m,
-              ))
-            }
-            break
-
-          case 'flow_output':
-            // Flow output delivered directly — bypass LLM, render as markdown.
-            // Finalize any pending streaming text first.
-            if (data.content) {
-              setMessages((prev: ChatMsg[]) => [...prev, { type: 'agent', content: data.content as string }])
-            }
-            break
-
-          case 'new_session':
-            if (data.sessionId) {
-              changeSession(data.sessionId as string)
-              setMessages([])
-              setGenerationProgress(null)
-              loadSessions()
-            }
-            break
-
-          case 'session_title':
-            // Update the session title in the sidebar.
-            // Use sessionId from the event payload to avoid stale closure issues
-            // (activeSessionId may still be null for newly created sessions).
-            // Upsert when the session isn't in the list yet (title can arrive
-            // before the deferred loadSessions after isNew).
-            if (data.title && data.sessionId) {
-              const sid = data.sessionId as string
-              const title = data.title as string
-              setSessions(prev => {
-                const idx = prev.findIndex(s => s.id === sid)
-                if (idx >= 0) {
-                  return prev.map(s => s.id === sid ? { ...s, title } : s)
-                }
-                const now = new Date().toISOString()
-                return [{
-                  id: sid,
-                  title,
-                  createdAt: now,
-                  updatedAt: now,
-                  messageCount: 0,
-                }, ...prev]
-              })
-            }
-            break
-
-          case 'system':
-            if (data.content) {
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'system',
-                content: data.content as string,
-              }])
-            }
-            break
-
-          case 'approval':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'approval',
-              toolName: data.tool,
-              options: data.options,
-            }])
-            break
-
-          case 'auto_approved':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'auto_approved',
-              toolName: data.tool,
-            }])
-            break
-
-          case 'thinking':
-            if (data.text) setGenerationProgress(data.text as string)
-            break
-
-          case 'fleet_redirect':
-            // /fleet [task] command opens the fleet dialog, optionally pre-populated
-            setIsStreaming(false)
-            setFleetDialogMessage((data.task as string) || '')
-            setShowFleetDialog(true)
-            break
-
-          case 'fleet_plan_redirect':
-            // /fleet-plan [hint] command: start plan creation in a fresh conversation.
-            // If the backend found a plan_wizard in the template, use it as system context.
-            // If no hint, show a template picker dialog so the user selects one first.
-            setIsStreaming(false)
-            {
-              const hint = (data.hint as string) || ''
-              const wizardSystemPrompt = (data.wizard_system_prompt as string) || ''
-              const pinnedGroups = (data.pinned_tool_groups as string[]) || null
-              const setupDraftId = (data.setup_draft_id as string) || ''
-              const setupProfileKey = (data.setup_profile_key as string) || ''
-              const currentStepTitle = (data.current_setup_step_title as string) || ''
-
-              if (wizardSystemPrompt) {
-                setActiveWizardContext(wizardSystemPrompt)
-                if (pinnedGroups && pinnedGroups.length > 0) {
-                  setActivePinnedToolGroups(pinnedGroups)
-                }
-                const kickoff = currentStepTitle
-                  ? `Help me set up a fleet plan. Let's start with ${currentStepTitle.toLowerCase()}.`
-                  : 'Help me set up a fleet plan.'
-                const agentOps = setupDraftId
-                  ? `\n\nSETUP SESSION:\n- draft_id: ${setupDraftId}\n- profile_key: ${setupProfileKey || hint || 'generic'}\n- Call get_setup_profile with draft_id and profile_key before asking questions.\n- Work ONLY on the current step.\n- Call update_setup_draft when the step is complete.\n- Follow the profile step order; do not skip ahead.`
-                  : ''
-                setPendingFleetPlanPrompt({
-                  message: kickoff,
-                  systemContext: wizardSystemPrompt + agentOps,
-                  pinnedToolGroups: pinnedGroups || undefined,
-                })
-              } else if (hint) {
-                // Profile resolution failed — still avoid hardcoding identity-first ordering.
-                const genericSystemPrompt = `You are helping the user create a fleet plan based on the "${hint}" fleet template. The base_fleet_key is "${hint}". Call get_setup_profile to load the setup profile and current step, then follow that step order strictly. Do not ask for plan identity unless the current setup step is identity. Before saving, call validate_fleet_plan with all config including credentials. Only call save_fleet_plan after validation passes.`
-                setActiveWizardContext(genericSystemPrompt)
-                setPendingFleetPlanPrompt({
-                  message: `Help me create a fleet plan from the "${hint}" template.`,
-                  systemContext: genericSystemPrompt,
-                })
-              } else {
-                // No hint: show template picker so user selects one, then re-issue /fleet-plan <key>
-                setShowTemplatePicker(true)
-              }
-            }
-            break
-
-          case 'drill_redirect':
-            // /drill or /tutorial-drill [hint]: start drill/tutorial suite creation wizard
-            setIsStreaming(false)
-            {
-              const hint = (data.hint as string) || ''
-              const wizardSystemPrompt = (data.wizard_system_prompt as string) || ''
-              const wizardKind = (data.wizard_kind as string) || 'drill'
-              const pinnedGroups = (data.pinned_tool_groups as string[]) || null
-
-              if (wizardSystemPrompt) {
-                setActiveWizardContext(wizardSystemPrompt)
-                if (pinnedGroups) setActivePinnedToolGroups(pinnedGroups)
-                let kickoff: string
-                if (wizardKind === 'tutorial') {
-                  kickoff = hint
-                    ? `I'd like to create a tutorial drill. Here's the flow to teach: ${hint}`
-                    : 'I\'d like to create a tutorial drill for my product UI.'
-                } else {
-                  kickoff = hint
-                    ? `I'd like to create a drill suite. Here's what I want to test: ${hint}`
-                    : 'I\'d like to create a drill suite for my project.'
-                }
-                setPendingDrillPrompt({
-                  message: kickoff,
-                  systemContext: wizardSystemPrompt,
-                  pinnedToolGroups: pinnedGroups || undefined,
-                })
-              }
-            }
-            break
-
-          case 'drill_add_redirect':
-            // /drill-add or /tutorial-drill-add <suite>: add drills to an existing suite
-            setIsStreaming(false)
-            {
-              const suiteName = (data.suite_name as string) || ''
-              const wizardSystemPrompt = (data.wizard_system_prompt as string) || ''
-              const wizardKind = (data.wizard_kind as string) || 'drill'
-              const pinnedGroups = (data.pinned_tool_groups as string[]) || null
-
-              if (wizardSystemPrompt) {
-                setActiveWizardContext(wizardSystemPrompt)
-                if (pinnedGroups) setActivePinnedToolGroups(pinnedGroups)
-                const kickoff = wizardKind === 'tutorial'
-                  ? `I'd like to add new tutorial drills to the "${suiteName}" suite.`
-                  : `I'd like to add new drills to the "${suiteName}" suite.`
-                setPendingDrillPrompt({
-                  message: kickoff,
-                  systemContext: wizardSystemPrompt,
-                  pinnedToolGroups: pinnedGroups || undefined,
-                })
-              }
-            }
-            break
-
-          case 'fleet_progress':
-            // Accumulate fleet progress events into a structured fleet_execution message.
-            // Each event is appended to the phases array; the UI renders a collapsible panel.
-            setMessages((prev: ChatMsg[]) => {
-              const existing = prev.find(m => m.type === 'fleet_execution') as FleetExecutionMessage | undefined
-              const event: FleetEvent = {
-                ...data,
-                type: data.type as string,
-                timestamp: Date.now(),
-                // Preserve rich data fields from SSE payload
-                args: data.args || null,
-                result: data.result !== undefined ? data.result : null,
-                text: (data.text as string) || '',
-              }
-              const maxParallelAgents = Number(data.max_parallel_agents || data.maxParallelAgents || existing?.maxParallelAgents || 1)
-
-              if (existing) {
-                const updated: FleetExecutionMessage = { ...existing, events: [...existing.events, event], maxParallelAgents }
-                // Update current phase/status
-                if (data.type === 'phase_start' || data.type === 'conversation_start') {
-                  updated.currentPhase = data.phase as string
-                  updated.currentAgent = data.agent as string
-                } else if (data.type === 'fleet_complete') {
-                  updated.status = 'complete'
-                  updated.currentPhase = null
-                }
-                return prev.map(m => m.type === 'fleet_execution' ? updated : m)
-              }
-
-              // First event: create the fleet_execution message
-              return [...prev, {
-                type: 'fleet_execution',
-                events: [event],
-                currentPhase: (data.type === 'phase_start' || data.type === 'conversation_start') ? data.phase as string : null,
-                currentAgent: (data.type === 'phase_start' || data.type === 'conversation_start') ? data.agent as string : null,
-                status: 'running',
-                maxParallelAgents,
-              } as FleetExecutionMessage]
-            })
-            break
-
-          case 'subtask_progress': {
-            // Handle plan events and sub-task progress events.
-            // Plan events create/update a PlanMessage; delegation events manage SubTaskExecutionMessage.
-            const eventType = data.event_type as string
-
-            // ── Plan events ──
-            if (eventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
-                name: s.name,
-                description: s.description,
-                status: 'pending' as const,
-                details: s.details,
-                files: s.files,
-                verify: s.verify,
-                parallelGroup: s.parallel_group,
-              }))
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'plan',
-                goal: (data.plan_goal as string) || '',
-                steps,
-                context: (data.plan_context as string) || undefined,
-                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
-                verification: (data.plan_verification as string) || undefined,
-              } as PlanMessage])
-              break
-            }
-
-            if (eventType === 'plan_step_update') {
-              const stepName = data.step_name as string
-              const stepStatus = data.step_status as PlanStepInfo['status']
-              setMessages((prev: ChatMsg[]) => {
-                // Find the most recent plan message
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  if (prev[i].type === 'plan') {
-                    const plan = prev[i] as PlanMessage
-                    const updatedSteps = plan.steps.map(s =>
-                      s.name === stepName ? { ...s, status: stepStatus } : s
-                    )
-                    return prev.map((m, idx) => idx === i ? { ...plan, steps: updatedSteps } : m)
-                  }
-                }
-                return prev
-              })
-              break
-            }
-
-            setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
-            break
-          }
-
-          case 'retry':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'retry',
-              attempt: data.attempt,
-              maxRetries: data.maxRetries,
-              reason: data.reason,
-            }])
-            break
-
-          case 'model_changed':
-            setModelStatus(prev => prev ? {
-              ...prev,
-              effectiveProvider: (data.effectiveProvider as string) || (data.provider as string) || prev.effectiveProvider,
-              effectiveModel: (data.effectiveModel as string) || (data.model as string) || prev.effectiveModel,
-              pinnedProvider: (data.pinnedProvider as string) ?? (data.provider as string) ?? prev.pinnedProvider,
-              pinnedModel: (data.pinnedModel as string) ?? (data.model as string) ?? prev.pinnedModel,
-              credentialsAvailable: data.credentialsAvailable !== undefined ? !!data.credentialsAvailable : prev.credentialsAvailable,
-            } : prev)
-            break
-
-          case 'error':
-            setMessages(interruptActiveDelegations)
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
-            break
-
-          case 'error_info':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'error_info',
-              title: data.title,
-              reason: data.reason,
-              suggestion: data.suggestion,
-              originalError: data.originalError,
-            }])
-            break
-
-          case 'distill_preview':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'distill_preview',
-              yaml: data.yaml as string,
-              flowName: data.flowName as string,
-              description: data.description as string,
-              tags: (data.tags as string[]) || [],
-              explanation: data.explanation as string || '',
-            } as DistillPreviewMessage])
-            break
-
-          case 'tutorial_blueprint_preview':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'tutorial_blueprint_preview',
-              title: (data.title as string) || '',
-              suite: (data.suite as string) || '',
-              blueprintYaml: (data.blueprint_yaml as string) || '',
-              scenes: normalizeBlueprintScenes(data.scenes),
-            } as TutorialBlueprintPreviewMessage])
-            break
-
-          case 'tutorial_blueprint_approved':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'tutorial_blueprint_approved',
-              title: (data.title as string) || '',
-              suite: (data.suite as string) || '',
-              blueprintYaml: (data.blueprint_yaml as string) || '',
-              drillYaml: (data.drill_yaml as string) || '',
-              drillName: (data.drill_name as string) || '',
-              content: (data.message as string) || '',
-            } as TutorialBlueprintApprovedMessage])
-            break
-
-          case 'tutorial_scene_slideshow':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'tutorial_scene_slideshow',
-              title: (data.title as string) || '',
-              suite: (data.suite as string) || '',
-              drill: (data.drill as string) || '',
-              manifestPath: (data.manifest_path as string) || '',
-              scenes: normalizeTutorialScenes(data.scenes),
-            } as TutorialSceneSlideshowMessage])
-            break
-
-          case 'app_preview':
-            // Finalize any streaming text first
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'app_preview',
-              code: data.code as string,
-              title: data.title as string || 'App Preview',
-              description: data.description as string || '',
-              version: (data.version as number) || 1,
-              appId: data.appId as string || undefined,
-            } as AppPreviewMessage])
-            if (data.appId) setActiveAppId(data.appId as string)
-            break
-
-          case 'chat_question':
-            // Live SSE: backend emits { questionId, kind, prompt, options:[{id,label,description?,thumbnail?}] }.
-            // Finalize any streaming text first (mirror app_preview / distill_preview above).
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'chat_question',
-              questionId: data.questionId as string,
-              kind: data.kind as ChatQuestionMessage['kind'],
-              prompt: data.prompt as string,
-              options: (data.options as ChatQuestionMessage['options']) || [],
-            } as ChatQuestionMessage])
-            break
-
-          case 'app_done':
-          case 'app_saved':
-            setActiveAppId(null)
-            if (data.name) {
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'app_saved',
-                name: data.name as string || '',
-                path: data.path as string || '',
-              } as AppSavedMessage])
-            }
-            window.dispatchEvent(new Event('astonish:apps-updated'))
-            break
-
-          case 'distill_saved':
-            setMessages((prev: ChatMsg[]) => [...prev, {
-              type: 'distill_saved',
-              filePath: data.filePath as string,
-              runCommand: data.runCommand as string,
-            } as DistillSavedMessage])
-            // Notify App to refresh the flows list
-            window.dispatchEvent(new Event('astonish:flows-updated'))
-            break
-
-          case 'done':
-            setMessages(interruptActiveDelegations)
-            // Finalize streaming text and stop the processing indicator.
-            // The SSE stream may stay open briefly (grace period for async
-            // events like session_title), but the user-facing response is
-            // complete — hide the spinner immediately.
-            setIsStreaming(false)
-            // After done, poll the stream-emitted session ID for async reflector
-            // saves. React activeSessionId may still be stale for newly-created chats.
-            startSessionMemoryPolling(streamSessionId || activeSessionId)
-            break
-
-          case 'usage': {
-            const input = (data.input_tokens as number) || 0
-            const output = (data.output_tokens as number) || 0
-            const total = (data.total_tokens as number) || 0
-            setTokenUsage(prev => ({
-              inputTokens: prev.inputTokens + input,
-              outputTokens: prev.outputTokens + output,
-              totalTokens: prev.totalTokens + total,
-            }))
-            break
-          }
-
-          default:
-            break
-        }
+          },
+        })
       },
       onError: (err) => {
         if (streamGenRef.current !== streamGen) return
         setGenerationProgress(null)
         setMessages(finalizeStreamingAgentText)
         console.error('Chat stream error:', err)
+        if (planAction) {
+          setIsStreaming(false)
+          return
+        }
         if (!streamSessionId) {
           setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: err.message }])
           setIsStreaming(false)
@@ -2513,6 +2322,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           const last = prev[prev.length - 1]
           if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
             const finalized = finalizeStreamingAgentText(prev)
+            if (botThreadRef.current) return finalized
             return [...finalized, {
               type: 'error',
               content: 'The model stopped responding unexpectedly. You can send a follow-up message to continue.',
@@ -2527,7 +2337,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     })
 
     abortRef.current = controller
-  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, reconnectToChatRunner, startSessionMemoryPolling, memoryScope, canDebug, debugEnabled])
+  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, applyChatEvent, reconnectToChatRunner, memoryScope, canDebug, debugEnabled])
 
   // Process deferred fleet plan prompt (set by fleet_plan_redirect SSE event)
   useEffect(() => {
@@ -2583,6 +2393,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     e.preventDefault()
     if (isStreaming && !isFleetMode) return
 
+    if (botThread) { void sendMessage(input); return }
+
     // In fleet mode, send as human message to the fleet
     if (isFleetMode && input.trim()) {
       sendFleetHumanMessage(input)
@@ -2618,6 +2430,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setInput(val)
     autoResize(e.target)
 
+    if (botThread) { setShowSlashPopup(false); return }
     if (val === '/') {
       setShowSlashPopup(true)
       setSlashFilter('')
@@ -2698,20 +2511,43 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     return sessions.filter(s => (s.title || s.id).toLowerCase().includes(q))
   }, [sessions, sessionFilter])
 
+  const durablePendingApprovalIds = [...new Set([...(botThread?.pendingApprovalIds || []), ...(botThread?.questionApprovalIds || [])])]
+  const transcriptApprovalIds = useMemo(() => new Set(messages.filter((message): message is Extract<ChatMsg, { type: 'bot_review' }> => message.type === 'bot_review' && message.kind === 'approval').map(message => message.reviewId)), [messages])
+  const questionReviewByIndex = new Map<number, string>()
+  for (const anchor of botThread?.questionApprovalAnchors || []) {
+    if (!durablePendingApprovalIds.includes(anchor.reviewId)) continue
+    const index = messages.findIndex(message =>
+      message.type === 'chat_question' ? message.questionId === anchor.questionId :
+      message.type === 'tool_result' && message.toolName === 'ask_user' &&
+      !!message.toolResult && typeof message.toolResult === 'object' &&
+      (message.toolResult as { questionId?: string }).questionId === anchor.questionId)
+    const reviewIndex = messages.findIndex(message => message.type === 'bot_review' && message.kind === 'approval' && message.reviewId === anchor.reviewId)
+    if (index >= 0 && (reviewIndex < 0 || index < reviewIndex)) questionReviewByIndex.set(index, anchor.reviewId)
+  }
+  const anchoredReviewIds = new Set(questionReviewByIndex.values())
+  const fallbackPendingApprovalIds = durablePendingApprovalIds.filter(id => !transcriptApprovalIds.has(id) && !anchoredReviewIds.has(id))
+
   // One lossless display projection for live and restored transcript records.
   const { activityByStart, skipIndices: toolActivitySkipIndices, lastActivityStart } = useMemo(
-    () => buildChronologicalActivityRenderIndex(messages),
-    [messages],
+    () => buildChronologicalActivityRenderIndex(messages.map((message, index) => questionReviewByIndex.has(index) ? { type: 'bot_review', kind: 'approval', reviewId: questionReviewByIndex.get(index)!, eventId: `question/${questionReviewByIndex.get(index)}` } : message), botThread ? 'preserve-agent' : 'fold-intermediate'),
+    [messages, !!botThread, botThread?.questionApprovalAnchors, botThread?.questionApprovalIds],
   )
 
   const liveStreamStatus = useMemo(() => {
+    if (botThread) {
+      if (botThread.status === 'stopped' || botThread.status === 'deleted') return null
+      const open = Object.values(botRunStates).filter(state => botRunOpen(state) && (state.progress || state.status === 'running' || state.status === 'queued'))
+      if (open.length) return [...new Set(open.map(state => !state.progress && (state.status === 'running' || state.status === 'queued') ? 'Working…' : botRunStatusLabel(state)))].join(' · ')
+      return botBusy ? 'Working…' : null
+    }
     if (!isStreaming) return null
     const activity = activityByStart.get(lastActivityStart)
     const running = activity?.steps.find(step => step.status === 'running')
     return running ? liveActivityHint(running) : generationProgress || 'Thinking…'
-  }, [isStreaming, activityByStart, lastActivityStart, generationProgress])
+  }, [isStreaming, botThread, botBusy, botRunStates, activityByStart, lastActivityStart, generationProgress])
 
   const renderAgentMessage = (msg: AgentMessage & { invocationId?: string }, index: number, placement: 'transcript' | 'activity') => {
+                const deliveryTimestamp = validAgentTimestamp(msg.timestamp)
                 // Collect web source URLs for citation pill
                 const sourceUrls = !(msg as AgentMessage)._streaming ? collectSourceUrls(messages, index) : []
 
@@ -2723,9 +2559,16 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
                 // Stable key per soft+tool run so content replace doesn't remount chrome
                 return (
-                  <div key={`${activeSessionId}-agent-${index}`} className="space-y-1 min-w-0" data-message-index={index}>
+                  <div key={`${activeSessionId}-agent-${index}`} className="space-y-1 min-w-0" data-message-index={index} data-operation-id={msg.operationId}>
                     <div className="flex items-center justify-between">
-                      <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
+                      <div className="flex flex-wrap items-baseline gap-x-2 text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
+                        <span>Agent</span>
+                        {deliveryTimestamp && (
+                          <time dateTime={deliveryTimestamp} title={new Date(deliveryTimestamp).toLocaleString()} className="font-normal">
+                            {new Date(deliveryTimestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          </time>
+                        )}
+                      </div>
                       <div className="flex gap-1">
                         {canDebug && activeSessionId && msg.invocationId && !(msg as AgentMessage)._streaming && (
                           <button
@@ -2793,7 +2636,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         if (!match) {
                           return (
                             <div style={{ color: 'var(--text-primary)' }} className="markdown-body text-sm">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{cleanedContent}</ReactMarkdown>
+                              {botThread ? <BotEmployeeMessage components={markdownComponents}>{cleanedContent}</BotEmployeeMessage> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{cleanedContent}</ReactMarkdown>}
                             </div>
                           )
                         }
@@ -2894,26 +2737,34 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       className="bg-grad-app flex flex-1 overflow-hidden"
     >
       {/* Session Sidebar */}
-      <SessionSidebar
+      {!hideSidebar && <SessionSidebar
         sessions={filteredSessions}
-        activeSessionId={activeSessionId}
+        activeSessionId={botRoute ? null : activeSessionId}
+        activeBotId={botRoute?.botId}
+        activeBotScope={botRoute?.scope}
         sessionFilter={sessionFilter}
         onSessionFilterChange={setSessionFilter}
         isLoadingSessions={isLoadingSessions}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-        onSelectSession={(session) => handleSelectSession(session.id)}
-        onNewSession={handleNewSession}
+        onSelectSession={(session) => { if (botRoute) window.location.hash = `/chat/${encodeURIComponent(session.id)}`; else void handleSelectSession(session.id) }}
+        onNewSession={() => { if (botRoute) window.location.hash = '/chat'; else handleNewSession() }}
         onDeleteSession={handleDeleteSession}
         onStartFleet={() => { setFleetDialogMessage(''); setShowFleetDialog(true) }}
         theme={theme}
-      />
+      />}
 
+      {sourceIntake && <div className="flex flex-col flex-1 min-w-0"><BotCreateDialog inline open resumeId={sourceIntake.resumeId} onClose={() => setSourceIntake(null)} /></div>}
+      {botRoute && <div className={sourceIntake ? 'hidden' : 'contents'}><BotWorkspace key={`${botRoute.scope}/${botRoute.botId}`} route={botRoute} theme={theme} userId={userId} /></div>}
+      {/* Keep ordinary Chat mounted and hidden: unsent text and attachments survive Bot navigation. */}
+      <div className={botRoute || sourceIntake ? 'hidden' : 'contents'}>
       {/* Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Chat promotion entry point is deferred; keep the dialog wiring for a future UI. */}
+        {promoteOpen && <BotCreateDialog inline open sourceSession={activeSessionId} onClose={() => setPromoteOpen(false)} />}
         {/* Toolbar bar — always visible */}
         <div
-          className="flex shrink-0 items-center justify-between border-b border-border bg-transparent px-3 py-1.5"
+          className={botThread ? 'hidden' : 'flex shrink-0 items-center justify-between border-b border-border bg-transparent px-3 py-1.5'}
         >
           {/* Left side — pre-chat model picker */}
           <div className="flex items-center gap-1.5">
@@ -3115,15 +2966,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               <Loader size={24} className="animate-spin text-primary" />
             </div>
           ) : messages.length === 0 ? (
-            <HomePage
+            botThread ? <p className="text-muted-foreground">No Bot messages yet. Send instructions to start a conversation.</p> : <HomePage
               userDisplayName={userDisplayName || undefined}
               onSuggestionClick={(text) => { setInput(text); inputRef.current?.focus() }}
             />
           ) : (
             messages.map((msg, index) => {
+              const anchoredReview = questionReviewByIndex.get(index)
+              if (anchoredReview) return <div key={`question/${anchoredReview}`}>{botThread?.renderReview?.('approval', anchoredReview)}</div>
+              if (msg.type === 'bot_operation') { const operation = botOperations[msg.operationId]; return operation && botThread ? <BotOperationResult key={msg.eventId} operation={operation} scope={botThread.scope} readOnly={botThread.readOnly || !!botThread.decisionsReadOnly} onChange={next => setBotOperations(prev => mergeBotOperation(prev, next, botThread.botId, initialSessionId || ''))} /> : null }
+              if (msg.type === 'bot_review') return msg.kind === 'approval' && anchoredReviewIds.has(msg.reviewId) ? null : <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId, msg.question)}</div>
               // Turn-level activity fold: render block at segment start; skip covered indices.
               const activityAt = activityByStart.get(index)
               if (activityAt) {
+                // Public activity arriving through the canonical projection uses
+                // the same fold in ordinary Chat and Bot conversations. Private
+                // runtime/checkpoint data is filtered at the server boundary.
                 // Live while this is the latest activity and tools are still running
                 // (or stream open before any trailing agent bubble after the fold).
                 const hasTrailingAgent = messages
@@ -3313,7 +3171,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               }
 
               if (msg.type === 'plan') {
-                return <PlanPanel key={index} data={msg as PlanMessage} />
+                return <PlanPanel key={`${activeSessionId}-plan-${msg.snapshot?.plan_id || index}`} data={msg} disabled={isStreaming || !!botThread || !activeSessionId}
+                  onApprove={() => { void sendMessage('', { approvedPlanExecution: true }) }}
+                  />
               }
 
               if (msg.type === 'subtask_execution') {
@@ -3422,6 +3282,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 )
               }
 
+              if (msg.type === 'bot_file_publication') {
+                return botThread ? <BotPublicationDelivery key={msg.publication.event_id} publication={msg.publication} scope={botThread.scope} /> : null
+              }
+
               if (msg.type === 'artifact') {
                 const artifactMsg = msg as ArtifactMessage
                 // Suppress inline card when this artifact is embedded in the ResultCard
@@ -3493,6 +3357,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
               if (msg.type === 'chat_question') {
                 const questionMsg = msg as ChatQuestionMessage
+                if (botThread) return messages.slice(index + 1).some(m => m.type === 'bot_review' && m.kind === 'approval') ? null : <p key={index} role="status" className="my-3 text-sm text-muted-foreground">Thinking…</p>
                 if (isChatQuestionAnswered(messages, index)) {
                   return (
                     <div key={index} className="space-y-1" data-testid="ask-user-answered">
@@ -3512,31 +3377,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 return (
                   <ChatErrorBoundary key={index}>
                     <div className="my-3 w-full max-w-2xl">
-                      {questionMsg.kind === 'yesno' ? (
-                        <YesNoCard
-                          prompt={questionMsg.prompt}
-                          disabled={questionMsg.answered}
-                          onAnswer={(yes) =>
-                            handleQuestionAnswer(questionMsg, yes ? 'Yes' : 'No', yes ? 'yes' : 'no')
-                          }
-                        />
-                      ) : (
-                        <SingleSelectCard
-                          prompt={questionMsg.prompt}
-                          disabled={questionMsg.answered}
-                          options={(Array.isArray(questionMsg.options) ? questionMsg.options : []).map((o) => ({
-                            id: o.id,
-                            label: o.label,
-                            description: o.description,
-                            thumbnail: o.thumbnail ? (
-                              <QuestionOptionThumb thumbnail={o.thumbnail} label={o.label} />
-                            ) : undefined,
-                          }))}
-                          onSelect={(optionId, label) =>
-                            handleQuestionAnswer(questionMsg, label, optionId)
-                          }
-                        />
-                      )}
+                      <QuestionCard key={`${activeSessionId}/${questionMsg.questionId}`} question={questionMsg} answered={questionMsg.answered} onAnswer={({ answer, label }) => handleQuestionAnswer(questionMsg, label, answer)} />
                     </div>
                   </ChatErrorBoundary>
                 )
@@ -3645,9 +3486,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               return null
             })
           )}
+          {botThread && fallbackPendingApprovalIds.map(id => <div key={`durable-approval/${id}`}>{botThread.renderReview?.('approval', id)}</div>)}
 
           {/* Streaming indicator — brand tokens so pack switch updates color */}
-          {isStreaming && !isFleetMode && messages[messages.length - 1]?.type !== 'fleet_execution' && (
+          {liveStreamStatus && !isFleetMode && messages[messages.length - 1]?.type !== 'fleet_execution' && (
             <div
               className="thinking-indicator flex items-center gap-2 px-3 py-2 w-fit max-w-full"
               data-testid="thinking-indicator"
@@ -3681,6 +3523,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
+          {botThread?.toolFree && <p role="status" className="mb-2 text-sm text-muted-foreground">{botThread.status === BotStatus.Paused ? 'Autonomous work paused · ready to discuss setup.' : 'Setup conversation.'} No external tools or scheduled execution. Attachments are unavailable.</p>}
+          {botThread && <BotTerminalStatus states={botRunStates} />}
+          {botThread && (botSendError || botStreamError) && <p role="alert" className="my-3 text-sm text-muted-foreground">{botSendError || botStreamError}</p>}
           {/* Drag overlay */}
           {isDragOver && (
             <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">
@@ -3760,7 +3605,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             onSubmit={handleSubmit}
             className="flex items-end gap-2.5 rounded-[var(--radius-lg)] border border-[color:var(--border-soft)] bg-[color:var(--input-bg)] p-2.5 pl-3.5 shadow-[var(--input-shadow)]"
           >
-            {isStreaming && (
+            {isStreaming && !botThread && (
               <Button
                 type="button"
                 variant="destructive"
@@ -3786,7 +3631,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               type="button"
               variant="ghost"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming && !isFleetMode}
+              disabled={!!botThread?.toolFree || botSubmitting || !!botThread?.readOnly || (isStreaming && !isFleetMode)}
               className="size-8 shrink-0 rounded-[10px] p-0"
               title="Attach files (images, PDFs, text files)"
             >
@@ -3833,8 +3678,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   }
                 }
               }}
-              disabled={isStreaming && !isFleetMode}
+              // A running turn blocks submission, not drafting or focus. Disabling
+              // this DOM node makes focus() a no-op during plan revisions.
+              disabled={botSubmitting || !!botThread?.readOnly}
               placeholder={
+                botThread ? (botThread.readOnly ? 'Read-only Bot thread' : botThread.toolFree ? (botThread.status === BotStatus.Paused ? 'Discuss this Bot’s setup while autonomous work is paused…' : 'Discuss this Bot’s setup…') : 'Send instructions to request a Bot run…') :
                 isFleetMode
                   ? fleetState?.state === 'waiting_for_customer'
                     ? `${fleetState.active_agent || 'An agent'} is waiting for your response...`
@@ -3853,7 +3701,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             <Button
               data-testid="send-button"
               type="submit"
-              disabled={(isStreaming && !isFleetMode) || (!input.trim() && attachments.length === 0)}
+              disabled={botSubmitting || !!botThread?.readOnly || (isStreaming && !isFleetMode) || (!input.trim() && attachments.length === 0)}
               className="send-gradient size-8 shrink-0 rounded-[10px] p-0 text-white hover:opacity-90"
               aria-label="Send message"
             >
@@ -3875,23 +3723,23 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           containerWidth={chatLayoutWidth}
           sidebarWidth={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH}
           onClose={closeHarness}
-          onAppSave={(name: string) => sendMessage(`__app_save__:${name}`)}
-          onDistillSave={() => sendMessage('__distill_save__')}
+          onAppSave={(name: string) => { if (!botThread) void sendMessage(`__app_save__:${name}`) }}
+          onDistillSave={() => { if (!botThread) void sendMessage('__distill_save__') }}
           onDistillRequestChanges={() => {
             if (inputRef.current) {
               inputRef.current.focus()
               inputRef.current.placeholder = 'Describe what you want to change in the flow...'
             }
           }}
-          onDistillCancel={() => sendMessage('__distill_cancel__')}
-          onTutorialApprove={() => sendMessage('__tutorial_blueprint_approve__')}
+          onDistillCancel={() => { if (!botThread) void sendMessage('__distill_cancel__') }}
+          onTutorialApprove={() => { if (!botThread) void sendMessage('__tutorial_blueprint_approve__') }}
           onTutorialRequestChanges={() => {
             if (inputRef.current) {
               inputRef.current.focus()
               inputRef.current.placeholder = 'Describe how to revise the Scene | Voiceover | Visual blueprint...'
             }
           }}
-          onTutorialCancel={() => sendMessage('__tutorial_blueprint_cancel__')}
+          onTutorialCancel={() => { if (!botThread) void sendMessage('__tutorial_blueprint_cancel__') }}
           onOpenReportInFiles={(path) => {
             setFilePanelInitialPath(path)
             setFilePanelOpen(true)
@@ -3933,6 +3781,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onClose={() => setAppsPanelOpen(false)}
         />
       )}
+      </div>
     </div>
 
     {/* Fleet start dialog */}

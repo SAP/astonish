@@ -6,6 +6,12 @@
 > **Future doc types**: Documents (rich text), Spreadsheets (structured data)
 > **Last research review**: 2026-08-27
 
+## Shared structured questions
+
+`ask_user` supports `yesno`, `select`, and `text`. The optional `allow_custom_answer` boolean is valid only for `select`; omitted or false keeps choices closed. A text/custom response must contain non-whitespace text and at most 4096 Unicode code points (not UTF-8 bytes or UTF-16 units). `pkg/question` owns validation. Bot answers retain exact question correlation, accept option IDs rather than labels for closed choices, and are user input—not permission or execution grants.
+
+The flag passes unchanged through the tool result, `chat_question` SSE, `[chat_question]` persistence and reconstructed history. Omitted flags remain omitted; existing question IDs and thumbnail payloads stay compatible. `web/src/api/questions.ts` and `questions/QuestionCard.tsx` provide transport-independent shared controls; owners deliver answers through their existing transport and key cards by session/question identity. The shared control preserves yes/no and thumbnail/select rendering and adds text, pending, answered, disabled and retryable-error states.
+
 ## Overview
 
 Astonish Docs enables the agent to create, refine, present, and export professional presentations from natural language. Slides are authored as a **versioned, declarative Web Component document** and rendered live in Studio. The same semantic source compiles to:

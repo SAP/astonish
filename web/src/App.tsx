@@ -1644,6 +1644,8 @@ layout:
             <StudioChat
               key={activeTeam || 'personal'}
               theme={theme}
+              userId={auth.user?.id}
+              botRoute={path.params.botId ? { botId: path.params.botId, scope: path.params.botScope === 'team' ? 'team' : 'personal', runId: path.params.runId } : undefined}
               initialSessionId={path.view === 'chat' ? path.params.sessionId : ''}
               pendingChatMessage={pendingChatMessage}
               onPendingChatMessageConsumed={() => setPendingChatMessage(null)}

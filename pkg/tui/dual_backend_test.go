@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,7 +11,40 @@ import (
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
+	"github.com/SAP/astonish/pkg/tui/render"
 )
+
+type closeRecordingBackend struct {
+	staticBackend
+	closes int
+	err    error
+}
+
+func (b *closeRecordingBackend) Close() error { b.closes++; return b.err }
+
+func TestFinalModelClosesOpenedBackends(t *testing.T) {
+	primary := &closeRecordingBackend{staticBackend: staticBackend{info: backend.Info{Mode: "code"}}}
+	failure := errors.New("shutdown failed")
+	alt := &closeRecordingBackend{staticBackend: staticBackend{info: backend.Info{Mode: "platform"}}, err: failure}
+	initial := newModel(context.Background(), Config{Backend: primary, AltBackend: alt})
+	final := initial
+	final.backends[1].opened = true
+	if err := final.closeBackends(); !errors.Is(err, failure) {
+		t.Fatalf("cleanup error lost: %v", err)
+	}
+	if primary.closes != 1 || alt.closes != 1 {
+		t.Fatalf("cleanup counts: %d %d", primary.closes, alt.closes)
+	}
+	if err := final.closeBackends(); err != nil {
+		t.Fatal(err)
+	}
+	if primary.closes != 1 || alt.closes != 1 {
+		t.Fatal("closed twice")
+	}
+	if initial.backends[1].opened {
+		t.Fatal("initial model unexpectedly tracked alternate open")
+	}
+}
 
 func newDualModeModel(t *testing.T) model {
 	t.Helper()
@@ -25,6 +59,36 @@ func newDualModeModel(t *testing.T) model {
 	m.ready = true
 	m.layout()
 	return m
+}
+
+func TestCodeThemeBackendSlots(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	for _, primary := range []string{"code", "platform"} {
+		alt := "platform"
+		if primary == "platform" {
+			alt = "code"
+		}
+		m := newModel(context.Background(), Config{ThemeID: CodeThemeBlueGray, Backend: staticBackend{info: backend.Info{Mode: primary}}, AltBackend: staticBackend{info: backend.Info{Mode: alt}}})
+		defer m.cancel()
+		for i, mode := range []string{primary, alt} {
+			want := ThemeForMode(mode)
+			if m.backends[i].theme.CodeThemeID != want.CodeThemeID || !reflect.DeepEqual(m.backends[i].theme.Background.GetBackground(), want.Background.GetBackground()) {
+				t.Fatalf("slot %d (%s) changed palette", i, mode)
+			}
+			if mode == "platform" && m.backends[i].theme.RenderStyles().TableLayout != render.TableLayoutLegacy {
+				t.Fatal("Code selection enabled framed Platform tables")
+			}
+		}
+		result, _ := m.switchBackend()
+		next := result.(model)
+		want := ThemeForMode(alt)
+		if next.theme.CodeThemeID != want.CodeThemeID || !reflect.DeepEqual(next.theme.Background.GetBackground(), want.Background.GetBackground()) {
+			t.Fatal("backend switch lost the slot palette")
+		}
+	}
+	if err := Run(context.Background(), Config{ThemeID: "invalid"}); err == nil || !strings.Contains(err.Error(), "available: blue-gray") {
+		t.Fatalf("Run must validate before backend open: %v", err)
+	}
 }
 
 func TestCtrlTabSwitchesBackend(t *testing.T) {

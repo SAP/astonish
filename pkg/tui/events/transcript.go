@@ -2,6 +2,8 @@ package events
 
 import (
 	"fmt"
+	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/store"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,8 +40,13 @@ type ToolStep struct {
 
 // Item is one visual block in the transcript.
 type Item struct {
-	Kind    ItemKind
-	Content string
+	BotFilePublication *store.BotFilePublication
+	PlanSnapshot       *agent.PlanSnapshot
+	InvocationID       string // canonical publication boundary, when present
+	EventID            string // stable persisted publication row
+	BotOperationID     string
+	Kind               ItemKind
+	Content            string
 
 	// Activity fold fields (ItemActivity).
 	Steps   []ToolStep
@@ -128,14 +135,17 @@ type DelegationActivity struct {
 
 // Transcript is the reduced UI state built from a stream of Events.
 type Transcript struct {
-	Items     []Item
-	SessionID string
-	Title     string
-	Status    string // live status line (Thinking…, Running X…)
-	Streaming bool
-	Provider  string
-	Model     string
-	LastUsage *Usage
+	BotID         string
+	BotOperations map[string]store.BotOperationView
+	BotRunStates  map[string]store.BotRunState
+	Items         []Item
+	SessionID     string
+	Title         string
+	Status        string // live status line (Thinking…, Running X…)
+	Streaming     bool
+	Provider      string
+	Model         string
+	LastUsage     *Usage
 	// ContextTokens is the current context-window occupancy: the token count of
 	// the most recent LLM request/response in the latest turn (input + output).
 	// Unlike LastUsage (which accumulates across the whole session), this tracks
@@ -190,6 +200,79 @@ type Transcript struct {
 	delegationItemIdx int
 }
 
+// upsertPlanSnapshot updates a durable plan in place. A higher pending revision
+// is re-presented for plan approval; old/replayed sequences cannot roll state back.
+func (t *Transcript) upsertPlanSnapshot(snapshot *agent.PlanSnapshot) {
+	if snapshot == nil || snapshot.PlanID == "" {
+		return
+	}
+	s := snapshot.Clone()
+	s.Document.PlanID, s.Document.Revision, s.Document.Sequence = s.PlanID, s.Revision, s.Sequence
+	s.Document.PendingRevision = s.PendingRevision.Clone()
+	idx := -1
+	presentRevision := false
+	for i := range t.Items {
+		it := &t.Items[i]
+		if it.Kind != ItemPlan {
+			continue
+		}
+		if it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == s.PlanID {
+			if it.PlanSnapshot.Sequence >= s.Sequence {
+				return
+			}
+			presentRevision = s.Revision > it.PlanSnapshot.Revision && s.Document.Lifecycle == "" && s.PendingRevision == nil
+			idx = i
+			break
+		}
+		if it.PlanSnapshot == nil {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		status := PlanApproved
+		if s.Document.Lifecycle == "" && s.PendingRevision == nil {
+			status = PlanPending
+		}
+		t.Items = append(t.Items, Item{Kind: ItemPlan, PlanStatus: status, ApprovalKind: "plan"})
+		idx = len(t.Items) - 1
+		t.copyLastRouting(&t.Items[idx])
+	}
+	if presentRevision {
+		// Re-present the same plan at the current conversation position. Keep one
+		// authoritative card, not a detached approval for a card far above it.
+		item := t.Items[idx]
+		copy(t.Items[idx:], t.Items[idx+1:])
+		t.Items[len(t.Items)-1] = item
+		if t.delegationItemIdx > idx {
+			t.delegationItemIdx--
+		}
+		if t.ApprovalIdx == idx {
+			t.ClearApproval()
+		} else if t.ApprovalIdx > idx {
+			t.ApprovalIdx--
+		}
+		idx = len(t.Items) - 1
+		t.Items[idx].PlanStatus = PlanPending
+		t.Items[idx].Expanded = true
+	}
+	it := &t.Items[idx]
+	it.PlanSnapshot = &s
+	it.Content = agent.NewPlanState(s.Goal, s.Document, s.Steps).RenderMarkdown()
+	it.PlanContext, it.PlanWhatNotToDo, it.PlanVerification = s.Document.Context, s.Document.WhatNotToDo, s.Document.Verification
+	if it.PlanStatus == PlanPending && s.Document.Lifecycle == "" && s.PendingRevision == nil && !t.Awaiting {
+		it.ApprovalKind, it.Options = "plan", PlanApprovalOptions()
+		t.Awaiting, t.ApprovalIdx, t.ApprovalCursor = true, idx, 0
+	}
+	if s.Document.Lifecycle != "" || s.PendingRevision != nil {
+		it.PlanStatus = PlanApproved
+		it.ApprovalKind, it.Options = "plan", nil
+		if t.ApprovalIdx == idx {
+			t.ClearApproval()
+		}
+	}
+
+}
+
 // NewTranscript returns an empty transcript ready for reduction.
 func NewTranscript() *Transcript {
 	return &Transcript{
@@ -201,7 +284,19 @@ func NewTranscript() *Transcript {
 // Apply reduces a single event into the transcript. It is pure aside from
 // mutating t; safe to call from the bubbletea Update path.
 func (t *Transcript) Apply(ev Event) {
+	defer t.restoreBotOperationState()
+	defer t.restoreBotRunState()
+	if ev.Kind == KindBotOperation {
+		t.applyBotOperation(ev.BotOperation)
+		return
+	}
+	if ev.Kind == KindBotRunState {
+		t.applyBotRunState(ev.BotRunState)
+		return
+	}
 	switch ev.Kind {
+	case KindBotReport:
+		t.appendBotReport(ev)
 	case KindSession:
 		if ev.SessionID != "" {
 			t.SessionID = ev.SessionID
@@ -241,7 +336,12 @@ func (t *Transcript) Apply(ev Event) {
 		if t.Streaming && !t.hasRunningTools() {
 			t.Status = "Thinking…"
 		}
+	case KindPlanSnapshot:
+		t.upsertPlanSnapshot(ev.PlanSnapshot)
 	case KindPlan:
+		if len(ev.Options) == 0 {
+			ev.Options = PlanApprovalOptions()
+		}
 		status := ev.PlanStatus
 		if status == "" {
 			status = PlanPending
@@ -269,6 +369,9 @@ func (t *Transcript) Apply(ev Event) {
 		// Legacy/platform plan approval events are attached to the latest plan
 		// item instead of creating a detached approval item.
 		if ev.ApprovalKind == "plan" {
+			if len(ev.Options) == 0 {
+				ev.Options = PlanApprovalOptions()
+			}
 			for i := len(t.Items) - 1; i >= 0; i-- {
 				if t.Items[i].Kind != ItemPlan {
 					continue
@@ -474,12 +577,18 @@ func (t *Transcript) stampCurrentCall(ev Event) {
 		return
 	}
 	last := &t.Items[n-1]
+	if last.isBotPublication() {
+		return
+	}
 	if last.Kind == ItemAgent || last.Kind == ItemPlan {
 		stampItemRouting(last, ev.RoutingModel, ev.RoutingIsStrong, ev.RoutingTier)
 		return
 	}
 	for i := n - 1; i >= 0; i-- {
 		it := &t.Items[i]
+		if it.isBotPublication() {
+			return
+		}
 		switch it.Kind {
 		case ItemUser:
 			return
@@ -789,6 +898,9 @@ func (t *Transcript) addUsage(usage *Usage) {
 // File diffs stay inside the soft turn (do not hard-break).
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
+		if t.Items[i].isBotPublication() {
+			return i + 1
+		}
 		switch t.Items[i].Kind {
 		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem, ItemPlan, ItemCompaction:
 			return i + 1
@@ -853,7 +965,9 @@ func (t *Transcript) appendAgentText(text string) {
 	// chronologically. Never provisional, never reordered below tools.
 	if t.LinearThread {
 		t.nextTextReplaces = false
-		if n := len(t.Items); n > 0 && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
+		// Snapshot-backed plans are complete structured records, not text
+		// streams. Following prose must remain a separate answer.
+		if n := len(t.Items); n > 0 && !t.Items[n-1].isBotPublication() && (t.Items[n-1].Kind == ItemAgent || (t.Items[n-1].Kind == ItemPlan && t.Items[n-1].PlanSnapshot == nil)) {
 			// If the new text is a plan document but the last item is plain
 			// agent text, start a fresh ItemPlan instead of appending. The plan
 			// is a distinct visual block, not a continuation of prior prose.
@@ -888,7 +1002,7 @@ func (t *Transcript) appendAgentText(text string) {
 	t.nextTextReplaces = false
 
 	// Sticky agent already at end (common after tools reordered layout).
-	if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemAgent {
+	if n := len(t.Items); n > 0 && !t.Items[n-1].isBotPublication() && t.Items[n-1].Kind == ItemAgent {
 		if replace {
 			t.Items[n-1].Content = text
 		} else {
@@ -1490,6 +1604,9 @@ func (t *Transcript) ClearApproval() {
 
 // Reset clears transcript items and turn state (used for /new and session switch).
 func (t *Transcript) Reset() {
+	t.BotID = ""
+	t.BotOperations = nil
+	t.BotRunStates = nil
 	t.Items = nil
 	t.Title = ""
 	t.Status = ""

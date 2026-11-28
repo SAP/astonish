@@ -116,6 +116,9 @@ func (_u *SessionEventUpdate) sqlSave(ctx context.Context) (_node int, err error
 			}
 		}
 	}
+	if _u.mutation.EventIDCleared() {
+		_spec.ClearField(sessionevent.FieldEventID, field.TypeString)
+	}
 	if value, ok := _u.mutation.EventData(); ok {
 		_spec.SetField(sessionevent.FieldEventData, field.TypeJSON, value)
 	}
@@ -285,6 +288,9 @@ func (_u *SessionEventUpdateOne) sqlSave(ctx context.Context) (_node *SessionEve
 				ps[i](selector)
 			}
 		}
+	}
+	if _u.mutation.EventIDCleared() {
+		_spec.ClearField(sessionevent.FieldEventID, field.TypeString)
 	}
 	if value, ok := _u.mutation.EventData(); ok {
 		_spec.SetField(sessionevent.FieldEventData, field.TypeJSON, value)

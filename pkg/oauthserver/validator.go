@@ -20,6 +20,17 @@ import (
 // current signing key or active, published Astonish signing keys; it never
 // fetches or accepts keys from an external identity provider.
 func (s *Server) ValidateBearer(ctx context.Context, bearer, resource string, requiredScopes []string, surface execution.Surface) (execution.Principal, error) {
+	return s.validateBearer(ctx, bearer, resource, requiredScopes, surface, nil)
+}
+
+// ValidateBearerWithEvidence returns expiry only from the same verified claims
+// as the principal. Existing protocol adapters retain their original contract.
+func (s *Server) ValidateBearerWithEvidence(ctx context.Context, bearer, resource string, requiredScopes []string, surface execution.Surface) (execution.Principal, execution.AuthenticationEvidence, error) {
+	var evidence execution.AuthenticationEvidence
+	p, err := s.validateBearer(ctx, bearer, resource, requiredScopes, surface, &evidence)
+	return p, evidence, err
+}
+func (s *Server) validateBearer(ctx context.Context, bearer, resource string, requiredScopes []string, surface execution.Surface, evidence *execution.AuthenticationEvidence) (execution.Principal, error) {
 	if s == nil || s.store == nil || s.signing == nil {
 		return execution.Principal{}, errors.New("oauth bearer validator is not initialized")
 	}
@@ -82,6 +93,13 @@ func (s *Server) ValidateBearer(ctx context.Context, bearer, resource string, re
 	}
 	if err := principal.Validate(); err != nil {
 		return execution.Principal{}, fmt.Errorf("validate oauth principal: %w", err)
+	}
+	if evidence != nil {
+		expires, err := claims.GetExpirationTime()
+		if err != nil || expires == nil {
+			return execution.Principal{}, errors.New("verified oauth expiry required")
+		}
+		*evidence = execution.AuthenticationEvidence{Method: execution.AuthMethodOAuth, ExpiresAt: expires.Time}
 	}
 	return principal, nil
 }

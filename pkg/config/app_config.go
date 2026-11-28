@@ -11,13 +11,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/execution"
 	"gopkg.in/yaml.v3"
 )
 
 type ProviderTokenRefreshFunc func(instanceName, accessToken, refreshToken string, expiresAt time.Time) error
 
 type AppConfig struct {
-	ProviderTokenRefresh ProviderTokenRefreshFunc `yaml:"-" json:"-"`
+	BotRuntimePolicy     *execution.BotRuntimePolicy `yaml:"bot_runtime_policy,omitempty" json:"bot_runtime_policy,omitempty"`
+	BotRoutinePolicy     BotRoutinePolicyConfig      `yaml:"bot_routine_policy,omitempty" json:"bot_routine_policy,omitempty"`
+	BotMandates          *BotMandateConfig           `yaml:"bot_mandates,omitempty" json:"bot_mandates,omitempty"`
+	ProviderTokenRefresh ProviderTokenRefreshFunc    `yaml:"-" json:"-"`
 
 	General             GeneralConfig              `yaml:"general"`
 	WebServers          map[string]WebServerConfig `yaml:"web_servers,omitempty" json:"web_servers,omitempty"`
@@ -38,6 +42,47 @@ type AppConfig struct {
 	Sandbox             SandboxConfig              `yaml:"sandbox,omitempty"`
 	Security            SecurityConfig             `yaml:"security,omitempty"`
 	ModelRouting        ModelRoutingConfig         `yaml:"model_routing,omitempty" json:"model_routing,omitempty"`
+}
+
+// BotMandateConfig is a finite operator ceiling, not an execution grant.
+// A nil AppConfig.BotMandates selects defaults; admission limits must be positive.
+type BotMandateConfig execution.BotMandateLimits
+
+func DefaultBotMandateConfig() BotMandateConfig {
+	return BotMandateConfig{MinScheduleIntervalSeconds: 60, MaxSchedules: 8, MaxDailyRuns: 1440, MaxConcurrentRuns: 1}
+}
+func (c BotMandateConfig) Validate() error { return execution.BotMandateLimits(c).Validate() }
+func (c BotMandateConfig) ValidateWithin(operator BotMandateConfig) error {
+	return execution.BotMandateLimits(c).ValidateWithin(execution.BotMandateLimits(operator))
+}
+func (c *AppConfig) EffectiveBotMandateConfig() (BotMandateConfig, error) {
+	v := DefaultBotMandateConfig()
+	if c != nil && c.BotMandates != nil {
+		v = *c.BotMandates
+	}
+	return v, v.Validate()
+}
+
+// EffectiveBotRuntimePolicy is a ceiling for newly authorized work, never a
+// migration of saved versions or grants. Historical execution metadata is not
+// a runtime ceiling.
+func (c *AppConfig) EffectiveBotRuntimePolicy() (*execution.BotRuntimePolicy, error) {
+	if _, err := c.EffectiveBotMandateConfig(); err != nil {
+		return nil, err
+	}
+	if c != nil && c.BotRuntimePolicy != nil {
+		p := c.BotRuntimePolicy.Clone()
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	}
+	if c != nil && c.BotMandates != nil {
+		// Saved operator ceilings retain legacy duration semantics unless the
+		// operator explicitly selects a compatible runtime policy above.
+		return nil, nil
+	}
+	return execution.NewBotProgressRuntimePolicy(), nil
 }
 
 const AutoModelSentinel = "auto"
@@ -229,6 +274,13 @@ type SandboxOpenShellConfig struct {
 	// rules with additional paths. Useful for granting access to custom device
 	// nodes or operator-specific mount points without modifying code.
 	FilesystemPolicy FilesystemPolicyConfig `yaml:"filesystem_policy,omitempty" json:"filesystem_policy,omitempty"`
+
+	// BotHomeMountsEnabled opts into retained PVC sub_path mounts for Bot homes.
+	// Enable only when the gateway supports scoped writable PVC mounts. Ordinary
+	// session workspaces remain unchanged. BotHomeClaimName must name an
+	// independent claim in the gateway's sandbox namespace.
+	BotHomeMountsEnabled bool   `yaml:"bot_home_mounts_enabled,omitempty" json:"bot_home_mounts_enabled,omitempty"`
+	BotHomeClaimName     string `yaml:"bot_home_claim_name,omitempty" json:"bot_home_claim_name,omitempty"`
 
 	// CertBundles mounts operator-provided CA trust material into every
 	// OpenShell sandbox. Source "pvc" uses OpenShell driver_config PVC mounts;
@@ -433,6 +485,8 @@ type SandboxKubernetesConfig struct {
 	// "astonish-layers" / "astonish-uppers".
 	LayersPVCName string `yaml:"layers_pvc_name,omitempty" json:"layers_pvc_name,omitempty"`
 	UppersPVCName string `yaml:"uppers_pvc_name,omitempty" json:"uppers_pvc_name,omitempty"`
+	// HomesPVCName enables retained Bot homes; empty disables the feature.
+	HomesPVCName string `yaml:"homes_pvc_name,omitempty" json:"homes_pvc_name,omitempty"`
 
 	// GC controls the deferred K8s storage reconciler for layers, orphan
 	// upper directories, and stale evicted session uppers.

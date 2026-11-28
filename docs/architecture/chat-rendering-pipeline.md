@@ -1,5 +1,92 @@
 # Chat Rendering Pipeline
 
+## Bot delivery bubbles and timestamps
+
+The shared text reducer starts a new agent bubble when a known invocation ID
+changes, without requiring a transient completion frame between scheduled Bot
+reports. Same-invocation chunks still merge; replay uses stable event identities,
+not content equality. Each bubble retains its first authoritative server timestamp.
+The Agent label displays that date and time using the viewer's local formatting,
+with semantic `time` markup, in both themes and transcript/activity placements.
+Missing or invalid times are omitted, never replaced by the browser receipt time.
+Bot live/reconnect/finite-history payloads use the persisted event timestamp;
+storage content, schedules, terminal report separation and the report harness gate
+are unchanged.
+
+## Bot Employee-only speech boundary
+
+The server Home projection verifies trusted `EmployeeSpeech` and committed
+publication identity/text binding before removing private metadata. Only eligible
+Employee text/questions enter conversation; private Chat, raw tool receipts,
+fallback summaries and operation prose remain diagnostic. Eligibility is not a
+word filter: genuine Employee blockers remain visible regardless of wording or
+execution status. Cursor-only frames preserve ordered reconnect progress.
+
+Studio `projectBotOperation` retains heads for authority/busy state and exact
+blocked-authorization cards, never agent bubbles. Bot client send/SSE/reconnect
+errors and decision acknowledgements are neutral product alerts/status outside
+assistant rendering. Empty remains empty; Working does not impersonate a model.
+Verified artifacts are projected independently of speech and retain preview and
+download access. Ordinary Chat/Code rendering and the report gate are unchanged.
+See `bot-client-employee-feedback.md` for client-local status and recovery controls.
+
+## Bot employee live/restore contract
+
+Bot employee completion remains a canonical committed Chat message, not a new
+approval state or an optimistic success label. The physical objective browser and
+native PTY acceptances share the same production worker fixture and assert owner
+refinement → real acknowledgement → complete sourced inline body, including a
+forced reconnect before source completion and Home/reload restore. User-bubble
+uniqueness is measured on bubbles, separately from the historical answered card.
+Saved question approvals remain in Studio's question display list after they are
+consumed, independently of the pending-action list. When a transcript review row
+is absent, the same `BotReviewCard` renders the saved question and answer on live
+refresh and reload. Its persisted question ID anchors it at the matching
+`chat_question` or `ask_user` result in the chronological display projection,
+outside activity folds, before the owner answer and subsequent messages. Only
+questions with no matching transcript position use the trailing recovery fallback;
+an arriving transcript review row deduplicates that fallback by review ID. Consumed questions do not become pending approvals or regain action authority.
+Explicit artifact publication keeps its existing preview/download path; private
+work judgments never become UI controls. Transport uncertainty must not erase
+already committed useful findings or certify an uncommitted result.
+`TestBotEmployeeCanonicalReportLiveReplay` checks completed, useful partial,
+known pre-dispatch denied, and genuinely uncertain bodies verbatim in both native
+terminal layouts; scheduled-report boundary tests keep autonomous occurrences
+separate even when two committed bodies have identical text.
+
+## Approval paging, file refresh and plan selection
+
+Saved Bot questions are loaded across the entire scoped approval cursor sequence,
+not just the first 200 rows. Server live/history/reconnect enrichment likewise uses
+complete authoritative approval correlation, independently of the eight-row
+transcript warm tail. A consumed question renders its persisted answer once at the
+original anchor before later messages, with no action controls or pending count;
+resolved questions suppress stale waiting-report presentation. Native terminal
+consumes the same public enrichment and retains saved decisions in its existing
+inbox/transcript, not a new optimistic approval state. Empty/error approval reads
+must not fabricate pending questions or saved answers.
+
+`BotFilesPanel` keeps cursor paging only within one current listing identity. Explicit
+Load more appends the next page; repository revision, Refresh, online refresh,
+navigation or close/reopen resets to page one and replaces previous rows. Deleted
+or changed rows cannot survive by concatenating an old page two with a new page one.
+Loading, empty and error states retain their existing presentation; late requests
+cannot cross Bot/team/scope/Home/path/listing identities. Read refresh never submits
+work. Published previews/downloads remain bound to immutable publication identity,
+not the current working-file listing.
+
+Studio plan selection uses the latest valid snapshot for the selected plan and
+preserves current sequence ordering in populated views; absent/malformed data does
+not invent plan authority. Last-plan lookup uses ES2022-compatible iteration rather
+than requiring ES2023 `findLast` declarations. The report last-turn/Markdown/backend
+`isReport` three-signal gate is unchanged in every mode.
+
+`TestBotApprovalReplayBrowserAcceptance` and `TestBotFilePaginationBrowserAcceptance`
+are strict built-Studio personal/team journeys with production HTTP handlers,
+temporary stores and scripted data, without browser state injection or paid calls.
+The gate builds once and rejects missing matches/skips; test names here do not claim
+an unrecorded pass, deployment or corrected-head GitHub CI success.
+
 ## Overview
 
 The Studio Chat (`StudioChat.tsx`) is the primary user interface for Astonish. It orchestrates 17 sub-components, manages 35 state variables, handles 29 SSE event types from the backend, and renders 21 distinct message types. This document is the authoritative reference for how the pipeline works, how to extend it, and what rules must be followed.
@@ -77,16 +164,84 @@ Detail requests carry full identity, are cached under parent/batch/task/attempt/
 
 Focused coverage is in `TaskPlanPanel.test.tsx`, `toolActivity.test.ts`, and `test/scenarios/task-delegation.test.tsx`: attempt cancellation, exact retry-child selection, reused names across batches, replay/history equality, and terminal interruption. All delegation scenario fixtures carry stable identities; backend generic `delegate_tasks` suppression is upstream of the frontend activity grouping.
 
+### Captured handoff and rich delegate detail
+
+For an authorized, selected child, the existing subtask-events response begins with an additive row `{type: "handoff", text: "<versioned JSON>"}`. Local Code exposes the equivalent `DelegationActivity{Type: "handoff", Text: ...}`. The JSON comes only from the child's saved `astonish_delegation_handoff` state; readers validate captured identity against the selected owned child and redact using current credentials before returning it. Empty text (which may be omitted by JSON encoding) means unavailable, not an empty assignment. Missing older records, invalid/unsupported records and identity mismatches do not trigger reconstruction from parent history or the current plan. This is a detail-read projection, not a new lifecycle SSE event or a full-system-prompt endpoint. See the [immutable capture protocol](code-agent-investigation.md#immutable-delegation-handoff).
+
+`TaskPlanPanel` delegates selected-attempt rendering to `DelegationDetail`, with separate **Activity** and **Handoff** views. Handoff uses `parseDelegationHandoff` and `DelegationHandoffView` to display allowlisted captured fields as inert, whitespace-preserving text: original/effective task and instructions, identity, working directory, tools and assigned plan definition. It does not render captured instructions as Markdown, load remote images, or execute anything. Source mirror is a captured provenance label, not file access or authorization. Unsupported/missing capture displays **Handoff unavailable**; individual absent fields display **Not recorded**. Loading and request errors remain distinct, with **Retry** re-fetching detail rather than rerunning the task. No-activity success displays **No execution detail recorded**.
+
+`delegationActivity.ts` builds an ordered projection of child text and tools. Results update their call-ID-paired execution at the call's position; parallel same-name calls with different IDs remain separate, and orphan results remain visible. Legacy ID-less results use name-based pending-call fallback. Handoff rows never enter Activity. REST transcript sequence and SSE sequence are different clocks: while running and live activity exists, use that live activity; otherwise prefer the persisted detail snapshot. Do not concatenate the two into a synthetic ordering.
+
+The Activity view reuses main chat's `ToolActivityBlock`, including ordered Markdown messages, tool disclosure, arguments/results and `FileEditPreview`. Successful edits retain structured result data rather than flattening it to a short status. The shared preview prefers recorded `diff`, then `verification_context`, over argument-derived replacements. Argument fallback is explicitly labeled **Requested edit (not verified)**; recorded evidence is labeled **Recorded edit**. Failed tools do not receive an edit preview. This preserves the distinction between a requested change and observed tool evidence, without asserting plan verification or completion. Terminal detail uses the corresponding existing terminal diff renderer; see [terminal adapters](terminal-app.md#delegation-detail-adapters).
+
+These views apply to local-daemon and platform Studio with the existing theme tokens and selected-attempt request guards. Neither view changes delegation lifecycle, model/tool selection, tenant authorization, plan lifecycle or the report three-signal gate.
+
 ## SSE Transport Layer
+
+### Durable Bot progress
+
+Studio consumes the optional schema-1 `BotRunState.progress` contract documented
+in [Bot live events](bot-live-events.md). The shared `botProgress` validator and
+`botRunState` reducer scope updates to Bot/Home/run/session and order each run by
+its own `state_sequence`; checkpoint revisions and cumulative active duration do
+not regress. Scheduled states enter Home only with validated public progress.
+Missing or unsupported optional fields fall back to the known execution status;
+only committed terminal status denotes a result, never a phase or elapsed timer.
+
+Home uses a single compact employee status for working, evaluation, replanning,
+synthesis, checkpoint saving and necessary waits. `BotProgressDetails` shows
+bounded data-only summary, checkpoint time and cumulative active duration in
+Details, not per-evaluation transcript cards. It shows the optional nonnegative
+`coalesced_occurrences` count when supplied, never a count inferred from state
+sequences. It does not subscribe to traces. Snapshot/read APIs remain authoritative:
+transient refresh failures retain the last state with “Updates unavailable”; access
+loss (401/403/404/410) and identity changes clear protected state. No read retries
+submit work. These semantics are shared in light/dark and personal/team views;
+read-only viewers cannot continue assignments.
+
+Owner continuation is an explicit checkpoint-bound `progress_v1` request using the
+existing continuation transport, without a fabricated question response. Its stable
+idempotency key survives retries; Bot/run/checkpoint/team/scope changes clear local
+pending state and ignore late receipts. Backend admission remains authoritative,
+including scheduled-run support. Configuration changes require reviewed explicit
+opt-in and positive duration-safe nested policy fields; existing legacy limits and
+unrelated saves are preserved. Progress mode is server-gated by default, not a new
+client creation default. Ordinary Chat/code-mode execution indicators are unchanged.
+
+### Provider failure privacy
+
+`ChatRunner` records original errors in trusted typed completion before replacing
+public `error`/`error_info` payloads with server-authored operational-failure text.
+Credential redaction alone cannot make provider diagnostics safe: they may contain
+unregistered tokens, internal endpoints or request bodies. Ordinary Chat persists
+only the same public text; legacy runner-owned `error-*` / `[Error: ...]` rows are
+sanitized on history reads without rewriting storage. Bot runs do not append
+synthetic error messages to Home: their committed typed report is the single
+public failure response. Bot transcript projection also strips legacy synthetic
+rows and sanitizes historical runtime error envelopes. These boundaries apply to
+Studio live/reload/reconnect and terminal consumers; trusted diagnostics and
+non-replayable failure classification remain unchanged.
+
+### Bot narration visibility
+
+Bot Home uses the shared chronological activity rendering and public event
+projection. Ordinary ADK file calls/results and delegation lifecycle remain visible;
+private checkpoint/storage telemetry is classified before rendering, not suppressed
+by tool name or by hiding every Home activity block. Public acknowledgement/progress
+stays ordered with tools, plans, errors and artifacts live and on reload. The terminal
+Bot wire mapper consumes the same public envelopes. No synthetic acknowledgement or
+report promotion is implied: reviewed publication and ordinary Chat's last-turn,
+Markdown/backend-`isReport` gate remain separate.
 
 SSE parsing is implemented **manually** using the `ReadableStream` API in `web/src/api/studioChat.ts` -- not the browser's native `EventSource`. This is because the initial request is a `POST` (EventSource only supports GET).
 
-Two functions share identical parsing logic:
+All three transports use the same `readSSEStream` framing and reader ownership:
 
 | Function | HTTP Method | Endpoint | Purpose |
 |----------|------------|----------|---------|
 | `connectChat()` | POST | `/api/studio/chat` | Send a new message, receive streaming response |
 | `connectChatStream()` | GET | `/api/studio/sessions/{id}/stream` | Reconnect to an active background runner |
+| `connectBotEvents()` | GET | `/api/studio/bots/{botID}/sessions/{id}/events` | Read canonical durable events without starting work |
 
 **Parsing flow:**
 1. Read chunks from `response.body.getReader()` via `TextDecoder`
@@ -95,7 +250,7 @@ Two functions share identical parsing logic:
 4. `JSON.parse(data)` and call `onEvent(eventType, parsedData)`
 5. On stream end, call `onDone()`
 
-**Both connect paths must have identical event handlers.** When adding a new event type, the `case` must be added to both the `connectChat` handler (in `sendMessage`) and the `connectChatStream` handler (in the reconnect logic). Missing one causes events to be silently dropped on reconnect. Persisted transcript DTOs must also map the type during history loading; for example, `docs_update` is projected into a typed slide message and rendered by `SlidesCard` in all three paths.
+**One application boundary handles send and reconnect.** `StudioChat.applyChatEvent` applies ordinary Chat and canonical Bot presentation events. Transport-specific context keeps initial model pinning and command redirects send-only, so replay cannot start a wizard turn. Add presentation handling once at this boundary. Persisted transcript DTOs must also map the type during history loading; for example, `docs_update` is projected into a typed slide message and rendered by `SlidesCard` in all paths.
 
 ## Streaming progress, completion and delivery boundaries
 
@@ -135,6 +290,10 @@ go test ./pkg/api -run 'TestChat(GenerationProgress|StreamDelivery)'
 ```
 
 Key cases are `TestChatGenerationProgressHTTP`, `TestChatGenerationProgressThoughtIsBoundedAndPrivate`, `TestChatStreamDeliveryOverflow`, `TestChatStreamDeliveryCompletionDuringReplay`, `TestChatStreamDeliveryHistoryCursor`, `TestChatStreamDeliveryLateSubscription`, `TestChatStreamDeliveryTitleAfterDone`, `TestChatStreamDeliveryDisconnect`, `TestChatStreamDeliveryWriteFailure`, and `TestChatStreamDeliveryHeartbeat`. These commands name regression coverage, not a recorded live-provider pass count.
+
+### Delegation call chronology
+
+Studio reserves each delegation panel with `subtask_progress` / `delegation_pending` at the persisted FunctionCall position, before parallel workers publish their lifecycle events. The reservation carries only batch identity: real `delegation_start` supplies task identities and sequence. Existing batch-keyed projection updates that position instead of appending in worker scheduling order. Both normal and continuation runner loops use this rule; restored history already reserves the same FunctionCall positions. No text matching or alphabetical sorting is involved. Terminal SSE mapping ignores this presentation-only subtype, preserving its existing real-start lifecycle. `TestChatDelegationCallOrderHTTP`, the toolActivity reverse-start case, and `TestDelegationPendingDoesNotDuplicateTerminalLifecycle` cover this boundary; `TestChatDelegationRegressionBrowser` exercises reconnect and persisted reload.
 
 ### Chronological activity acceptance
 
@@ -215,6 +374,18 @@ At render time, `groupChronologicalActivity` / `buildChronologicalActivityRender
 - Source citation chips (`collectSourceUrls`) still walk raw `tool_result` messages. Display grouping neither rewrites records nor changes SSE/persistence schemas. Existing report three-signal gates and final-only report/video placeholder ownership remain unchanged; nested bubbles do not duplicate harness content.
 
 This presentation is shared by local-daemon and platform Studio, in light and dark themes. The older sticky grouping exports remain for compatibility but are not Studio's rendering projection.
+
+### Plan snapshots and direct Normal-mode revisions
+
+`subtask_progress` carries `{event_type: "plan_snapshot", snapshot, plan_id, revision, sequence}`; clients also accept direct `plan_snapshot` events. The snapshot contains the current goal/document/steps and statuses/evidence. `plan_id` identifies the plan, `revision` advances on definition changes, and `sequence` orders committed runtime changes. `planState.ts` (`upsertPlanSnapshot`, `reducePlanProgress`, `normalizePlanHistory`) is shared by send, reconnect and history. Newer sequences replace the matching card in place; duplicate/older snapshots are ignored. Legacy unversioned progress cannot overwrite snapshot authority; missing legacy statuses default to pending.
+
+Session state `astonish_plan_snapshot` is authoritative across restore/compaction; `plan_session_runtime.go` persists a state-delta event before emitting progress. Accepted tool results are the legacy replay fallback. A model's requested complete status, prose, `done` or EOF is not completion evidence. Evidence and legacy nested data are redacted for clients without changing stored authority. Runtime callbacks are session-scoped, including explicit no-runtime bindings; HTTP admission is scoped by authenticated organization/team/subject/app/session, not a global active plan.
+
+Every valid `update_plan({action: "revise", revision: {...}})` in Normal mode updates the existing plan immediately, including goal, outcome, files and document changes. `requires_approval` is deprecated and ignored even when true. There is **no revision review component, modal, decision screen, Approve revision, Reject revision or Request changes action**. The user continues with an ordinary next turn. The card updates at its existing transcript position without taking composer focus or dragging a reader back to the plan. Without a plan there is no revision UI; stale/busy/validation/persistence errors leave the accepted card intact and are ordinary tool errors, not pending approval state.
+
+Send, active SSE reconnect and restored history project the same committed snapshot into one card. Legacy stored `pending_revision` candidates are retired without applying them; restore neither blocks for a decision nor displays obsolete review controls. Initial Plan-mode approval controls and `approvedPlanExecution` are unchanged, as are tool/folder authorization and completion evidence requirements. Plan/Graph-Plan/Ask and bot contexts still cannot revise plans.
+
+The terminal consumes the same snapshots as `KindPlanSnapshot` and also has no revision decision surface; see [terminal direct revisions](terminal-app.md#direct-revisions-normal-mode). The opt-in `TestPlanRevisionBrowserAcceptance` uses the built SPA, an isolated browser and SQLite, loopback HTTP/SSE and real plan tools. Its scripted provider and session-directory transport are fixtures, not a paid-provider or production-sandbox claim. See [revision protocol](code-agent-investigation.md#normal-mode-plan-revision) and canonical journeys in `tests/scenarios/chat.yaml`; actual harness output determines what was exercised.
 
 ### Document Update Events
 
@@ -667,3 +838,109 @@ These rules were established through bugs and fixes. Violating them will break t
 | `web/src/test/fixtures/scenarios/` | JSON fixture files for SSE simulation |
 | `pkg/api/integration_test.go` | Backend integration tests with MockLLM |
 | `pkg/agent/system_prompt_contracts_test.go` | Prompt contract tests + golden file |
+
+
+### Bot client failure boundary
+
+Bot `error` and `error_info` publications are presented as safe first-person assistant messages in Studio; local send/watch failures use the same assistant renderer without inventing persisted messages or pending operations. `botEmployeeFeedback.ts` exposes a typed local envelope (`source: local`, `outcome: unknown`) and reads only typed HTTP status, never error bodies, endpoints, or stacks. A disconnected client cannot conclude that work failed. Authorization failures explain lack of access without fabricating a result. Global request failures without an authenticated Bot do not require a model call.
+
+Authorization cards retain exact action fields, choices, digests, expiry, read-only checks and decision controls. Their surrounding prose and failed decision feedback are safe employee messages; question payload wording and option identities remain unchanged. Workspace resource hooks normalize errors before rendering and preserve their existing data-retention/invalidation behavior. Terminal Bot error items are projected through the ordinary assistant bubble at render time, leaving stored error events and operation heads untouched; ordinary Chat/Code remains diagnostic. Terminal errors lacking structured status use outcome-unknown rather than guessing authorization from strings.
+
+Coverage is client-local: mounted Studio replay/remount, decision matrices and terminal render tests. This does not claim a live daemon/browser drill or exhaustive coverage of every settings panel, historical tool output, or backend-generated legacy summary.
+
+## Bot file publication and retained workspace
+
+Bot threads consume the typed `bot_file_publication` state delta through the same
+`dispatchBotTranscript` mapper for live and restored transcript rows. The mapper
+preserves the server artifact order and deduplicates committed event IDs. Studio
+renders the short summary followed by cards keyed by immutable artifact ID.
+Cards explicitly open historical files using Bot/run/report/artifact coordinates,
+not the newest working path. This does not widen ordinary Chat's last-turn,
+Markdown and backend `isReport` promotion gate.
+
+`BotFilesPanel` lists ordinary retained Home only while Details is open. Opening
+a directory fetches that directory; selecting a file alone starts preview IO.
+Close or identity changes abort reads and clear preview state. Transient list
+errors retain a disabled, labelled last-known listing; 401/403/404/410 clear it.
+Refresh invalidates selected bytes, and browser-online refresh touches only an
+open panel. No read provisions a Home, invokes a model or resumes work.
+
+The optional `FileAccessAdapter` in the existing EmbeddedFileViewer and
+ArtifactCard keeps ordinary session artifact defaults unchanged. Bot previews
+are bounded JSON text rendered as Markdown or escaped source. Unsupported media
+is download-only; Bot views do not offer session PDF conversion. Native downloads
+POST a scope-bound authorization ticket then click an attachment link, using the
+HttpOnly download cookie. JavaScript never buffers the binary response.
+
+Built-browser acceptance: `TestBotFileWorkspaceBrowserAcceptance` uses built
+Studio, production HTTP handlers, isolated SQLite, controlled physical files and an exact public publication
+receipt adapter;
+it is not evidence for Docker/Kubernetes persistence or worker publication.
+
+## Strict conversation-parity acceptance accounting
+
+`bots_acceptance_driver.py --stage chat-consolidation` retains four distinct
+requirements, not a generic backend acceptance blocker:
+
+| Requirement | Required fresh tiers and scenario parents |
+|---|---|
+| `events-full-presentation-matrix` | Entire `events-http`, `events-projection`, `events-production-capture`; `TestBotPresentationMatrixHTTPAcceptance`, `TestBotHomePresentationMatrixHTTPAcceptance`, `TestSessionEventProjectorOrderedParity`, `TestSessionEventProjectorHomeOrdinaryADKActivity`, `TestSessionEventProjectorHomeOrdinaryADKDelegation`, `TestBotHomeNarrativeHistoricalTelemetry`, `TestBotRuntimeProductionCapture` |
+| `events-linked-session-restore` | Same three event tiers; `TestBotLinkedSessionRestoreProjectionHTTPAcceptance` and both direct ADK Home parents |
+| `clients-all-mode-conversation` | Entire `clients-browser`, `clients-pty`, `events-http`, `events-projection`; `TestBotChatFirstOrderedConversationBrowserAcceptance`, `TestBotScheduledWorkspaceBrowserAcceptance`, `TestBotConversationPresentationBrowserAcceptance` (including reviewed preview/exact native bytes), `TestBotChatFirstConversationHTTPAcceptance`, `TestBotClientStatesSharedVisualBrowserAcceptance`, `TestBotConversationPresentationPTYAcceptance` |
+| `clients-shared-visual-parity` | Entire browser/PTY/terminal plus HTTP/projection tiers; direct shared visual/state parent, both ADK Home parents, linked restore, mixed browser/PTY, `TestBotTranscriptSharedRendering`, `TestSessionEventProjectorOrderedParity` |
+
+The ADK file parent requires all `write_file`, `edit_file`, `load_file` groups
+and each `success`/`failure` child. The direct built Studio parent requires
+personal/team scopes; loading/read-failure/retry/empty, disconnect/cursor/draft/
+busy/catchup, scope cancellation, Escape, populated/paused/stopped/deleted,
+and the team read-only viewer child. Its comparison requires
+`shared_public_visual_comparison/ordinary_comparison`, `/Bot_live_reconnect`
+and `/Bot_restore` under **each** scope. Ordinary baseline here is actual
+ordinary Chat restored public output, not a full ordinary ChatRunner admission
+journey. Native PTY retains its existing draft/active/paused obligations.
+
+Standalone `--phase clients` executes HTTP/projection dependencies freshly;
+`--phase all` runs each dependency once. A stale report, missing parent or any
+missing/skipped child, foreign package, unfinished package, subset manifest,
+missing opt-in/browser/built SPA, or absent owned JSONL evidence blocks closure.
+Synthetic driver tests prove this accounting, never physical browser acceptance.
+
+Both mixed HTTP parents require personal/team and all eight `live`, `history`,
+`reconnect`, `revoked` leaves. The Home parent uses the Home-bound ADK store,
+appends after subscribing, compares complete ordered public live/history frames,
+and reconnects inside a multipart row without losing either concurrent call.
+It checks partial text, equal-text distinct identities, delegation/plan/error,
+private/unreviewed cursor-only rows and reviewed delivery. This is controlled
+HTTP presentation evidence, not a worker publication or retained-backend claim;
+existing committed-publication/review pipeline tests remain required.
+
+Reports remove `built browser` and `native PTY` from `unverified` only after
+required-tier accounting validates fresh complete owned JSONL logs, exact
+commands, package/subcase manifests and prerequisites. PASS labels alone cannot
+remove those entries. Paid-provider workflow remains unverified, and the explicit
+local profile records live Kubernetes/PostgreSQL as DEFERRED, NOT PASS.
+
+The earlier `/tmp/phase5-final-accounting-events.json` was blocked on the missing
+Home HTTP scenario; it is historical evidence and is not reused after expanding
+the required inventory. Final acceptance reruns standalone events followed by
+clients, including fresh HTTP/projection dependencies in the client run.
+
+Fresh standalone events receipt (2026-11-22): `/tmp/phase5-home-final-events.json`
+reports PASS for all three gates and both event IDs in 55.817 seconds. Owned logs
+record 106 passing test outcomes, zero failures/skips, and the Home parent,
+both scopes and all eight leaves. This supersedes the earlier blocked inventory,
+not by importing it but by rerunning the expanded manifest.
+Fresh standalone clients receipt (2026-11-22): `/tmp/phase5-home-final-clients.json`
+reports PASS for all six gates and both client IDs in 289.572 seconds. Owned logs
+in `astonish-chat-consolidation-t9uufiqu` record 158 passing test outcomes with zero
+failures/skips: built Studio (30 required outcomes), native PTY (16), terminal
+projection (5), transport (2), and freshly rerun HTTP/projection dependencies
+(60/22 required outcomes). The HTTP dependency includes the Home parent and all
+eight scope/state leaves; no receipt from the earlier inventory was imported.
+The complete standalone events → clients process exited 0, with 264 passing
+outcomes across its owned logs. Built browser and native PTY are verified in this
+client receipt; only paid-provider workflow, Kubernetes and PostgreSQL remain
+unverified, with the latter two explicitly deferred rather than passed.
+
+No phase-4 receipt/requirement or production/schema/daemon behavior changes are
+part of this accounting update.

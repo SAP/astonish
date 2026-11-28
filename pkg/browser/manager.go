@@ -2,7 +2,9 @@ package browser
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -189,13 +192,16 @@ type Manager struct {
 	browser   *rod.Browser
 	incognito *rod.Browser // ephemeral context with isolated cookies/storage (nil until requested)
 	launch    *launcher.Launcher
-	config    BrowserConfig
-	pages     map[proto.TargetTargetID]*PageState
-	pagesMu   sync.RWMutex
-	activePg  *rod.Page // most recently active page
-	cdpURL    string    // CDP WebSocket endpoint URL (set after launch)
-	xvfb      *Xvfb     // virtual display for headed mode on Linux (nil if not used)
-	logger    *log.Logger
+	// localDisconnect is set only when borrowing an existing profile's browser.
+	// Detach its CDP socket instead of closing a process owned by another manager.
+	localDisconnect func() error
+	config          BrowserConfig
+	pages           map[proto.TargetTargetID]*PageState
+	pagesMu         sync.RWMutex
+	activePg        *rod.Page // most recently active page
+	cdpURL          string    // CDP WebSocket endpoint URL (set after launch)
+	xvfb            *Xvfb     // virtual display for headed mode on Linux (nil if not used)
+	logger          *log.Logger
 
 	// Detected Chrome version (set after launch).
 	chromeVersion string
@@ -266,6 +272,17 @@ type Manager struct {
 	// When true, the browser runs inside the session container instead of locally.
 	SandboxEnabled bool
 
+	// Session artifact callbacks are injected by the shared runtime. Sandbox
+	// tools fail closed when absent; neither callback may use daemon paths.
+	WriteArtifactFunc func(context.Context, string, string, []byte) error
+	StatArtifactFunc  func(context.Context, string, string) (int64, error)
+	// RegisterHandoffFunc binds the authenticated owner and session at construction.
+	// ScopedHandoff forbids the legacy process-global registry fallback.
+	RegisterHandoffFunc func(containerName, sessionID string) (string, error)
+	ScopedHandoff       bool
+
+	responseCaptures map[*rod.Page]*CDPResponseCapture
+
 	// recording tracks an in-progress session capture (nil when idle).
 	recording *activeRecording
 
@@ -280,6 +297,164 @@ type Manager struct {
 
 	// demoOverlay tracks tutorial highlight boxes and the visible demo cursor.
 	demoOverlay *demoOverlayState
+}
+
+// ErrResponseCaptureSuperseded means another Start or Stop owns the capture now.
+var ErrResponseCaptureSuperseded = errors.New("response capture setup superseded")
+
+// CDPResponseCapture observes the page's actual network responses. It never
+// replays requests from the daemon (which would lose browser cookies, TLS and
+// sandbox routing). Cancellation/generation prevents stale listeners publishing
+// into a replacement capture.
+type CDPResponseCapture struct {
+	*ResponseCapture
+	mu                 sync.Mutex
+	cancel             context.CancelFunc
+	initializingCancel context.CancelFunc
+	generation         uint64
+	pattern            string
+}
+
+func (m *Manager) ResponseCaptureFor(pg *rod.Page) *CDPResponseCapture {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.responseCaptures == nil {
+		m.responseCaptures = make(map[*rod.Page]*CDPResponseCapture)
+	}
+	capture := m.responseCaptures[pg]
+	if capture == nil {
+		capture = &CDPResponseCapture{ResponseCapture: NewResponseCapture()}
+		m.responseCaptures[pg] = capture
+	}
+	return capture
+}
+
+func (c *CDPResponseCapture) IsActive() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cancel != nil
+}
+func (c *CDPResponseCapture) Pattern() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pattern
+}
+func (c *CDPResponseCapture) Stop() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clearLocked()
+	c.generation++
+	return nil
+}
+
+// clearLocked releases installed and initializing listeners and their retained data.
+func (c *CDPResponseCapture) clearLocked() {
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	if c.initializingCancel != nil {
+		c.initializingCancel()
+		c.initializingCancel = nil
+	}
+	c.pattern = ""
+	c.responses.Clear()
+	select {
+	case <-c.notify:
+	default:
+	}
+}
+
+func (c *CDPResponseCapture) Start(pg *rod.Page, pattern string) error {
+	if pattern == "" {
+		return fmt.Errorf("urlPattern is required for action=listen")
+	}
+	match, err := regexp.Compile(proto.PatternToReg(pattern))
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(pg.GetContext())
+	c.mu.Lock()
+	c.clearLocked()
+	c.generation++
+	generation := c.generation
+	c.initializingCancel = cancel
+	c.mu.Unlock()
+	// Setup must not hold mu: a replacement or Stop must cancel a blocked CDP call.
+	setupError := func(err error) error {
+		cancel()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.generation != generation {
+			return ErrResponseCaptureSuperseded
+		}
+		c.clearLocked()
+		return err
+	}
+	page := pg.Context(ctx)
+	// Bound retained browser buffers as well as our decoded bodies.
+	maxTotal, maxResource := 8<<20, 2<<20
+	if err := (proto.NetworkEnable{MaxTotalBufferSize: &maxTotal, MaxResourceBufferSize: &maxResource}).Call(page); err != nil {
+		return setupError(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return setupError(err)
+	}
+	pending := make(map[proto.NetworkRequestID]*proto.NetworkResponseReceived)
+	wait := page.EachEvent(func(e *proto.NetworkResponseReceived) {
+		if match.MatchString(e.Response.URL) && len(pending) < 256 {
+			pending[e.RequestID] = e
+		}
+	}, func(e *proto.NetworkLoadingFailed) {
+		delete(pending, e.RequestID)
+	}, func(e *proto.NetworkLoadingFinished) {
+		response := pending[e.RequestID]
+		delete(pending, e.RequestID)
+		if response == nil || e.EncodedDataLength > float64(maxResource) {
+			return
+		}
+		body, err := (proto.NetworkGetResponseBody{RequestID: e.RequestID}).Call(page)
+		if err != nil {
+			return
+		}
+		data := []byte(body.Body)
+		if body.Base64Encoded {
+			data, err = base64.StdEncoding.DecodeString(body.Body)
+			if err != nil {
+				return
+			}
+		}
+		if len(data) > maxResource {
+			return
+		}
+		headers := make(map[string]string, len(response.Response.Headers))
+		for k, v := range response.Response.Headers {
+			headers[k] = v.String()
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.cancel == nil || c.generation != generation {
+			return
+		}
+		c.AddResponse(CapturedResponse{URL: response.Response.URL, Status: response.Response.Status, Headers: headers, Body: string(data), ResourceType: string(response.Type), Timestamp: time.Now()})
+	})
+	c.mu.Lock()
+	if c.generation != generation || ctx.Err() != nil {
+		c.mu.Unlock()
+		// EachEvent has subscribed already; run its canceled wait to release it.
+		err := ctx.Err()
+		cancel()
+		go wait()
+		if err == nil {
+			err = context.Canceled
+		}
+		return setupError(err)
+	}
+	c.cancel, c.pattern = cancel, pattern
+	c.initializingCancel = nil
+	c.mu.Unlock()
+	go wait()
+	return nil
 }
 
 // NewManager creates a Manager with the given config. The browser is NOT
@@ -366,6 +541,18 @@ func (m *Manager) EnsureSessionID(id string) {
 // Close is best-effort and panic-safe: a dead or never-connected rod Browser
 // can panic on Close, and we must still finish the session rebound.
 func (m *Manager) clearBrowserConnectionLocked() {
+	m.stopRecordingLocked()
+	for _, capture := range m.responseCaptures {
+		_ = capture.Stop()
+	}
+	m.responseCaptures = nil
+	m.activePg = nil
+	m.cdpURL = ""
+	m.incognito = nil // belongs to the old browser connection
+	m.pagesMu.Lock()
+	m.pages = make(map[proto.TargetTargetID]*PageState)
+	m.pagesMu.Unlock()
+	m.detachLocalBrowserLocked()
 	if m.browser != nil {
 		b := m.browser
 		m.browser = nil
@@ -527,6 +714,11 @@ func (m *Manager) EnsureCDPReady() error {
 // Must be called with m.mu held.
 func (m *Manager) resetBrowserLocked() {
 	m.stopRecordingLocked()
+	for _, capture := range m.responseCaptures {
+		_ = capture.Stop()
+	}
+	m.responseCaptures = nil
+	m.detachLocalBrowserLocked()
 
 	m.activePg = nil
 	m.cdpURL = ""
@@ -624,6 +816,10 @@ func (m *Manager) GetOrLaunch() (*rod.Browser, error) {
 		return m.connectRemote()
 	}
 
+	if b := m.reconnectLocalProfileLocked(); b != nil {
+		return b, nil
+	}
+
 	headless := m.config.Headless
 
 	// If headed mode is requested (default), ensure a display is available.
@@ -631,64 +827,82 @@ func (m *Manager) GetOrLaunch() (*rod.Browser, error) {
 		headless = m.ensureDisplay()
 	}
 
-	l := launcher.New().
-		Headless(headless).
-		NoSandbox(m.config.NoSandbox).
-		// Remove the default --enable-automation flag that rod sets.
-		// This flag adds "Chrome is being controlled by automated test software"
-		// and sets navigator.webdriver = true.
-		Delete("enable-automation").
-		// Remove flags that signal automation. Normal Chrome doesn't set these;
-		// their presence is detectable by anti-bot systems.
-		Delete("disable-popup-blocking").
-		Delete("disable-default-apps").
-		// Prevent Blink from exposing AutomationControlled feature, which
-		// websites check via navigator.webdriver and other signals.
-		Set(flags.Flag("disable-blink-features"), "AutomationControlled").
-		// Disable Cross-Origin-Opener-Policy enforcement. Google OAuth
-		// popups set COOP: same-origin, which prevents the parent page
-		// (e.g. Reddit) from accessing window.closed on the popup. This
-		// breaks OAuth callback detection. Appending to the existing
-		// disable-features list (which rod sets to "site-per-process,TranslateUI").
-		Append(flags.Flag("disable-features"), "CrossOriginOpenerPolicy").
-		// Prevent Chrome from throttling timers and rendering in background
-		// tabs/windows. Important for consistent behavior in headed Xvfb mode.
-		Set(flags.Flag("disable-background-timer-throttling")).
-		Set(flags.Flag("disable-backgrounding-occluded-windows")).
-		Set(flags.Flag("disable-renderer-backgrounding"))
+	newLauncher := func(headless bool) (*launcher.Launcher, error) {
+		l := launcher.New().
+			Headless(headless).
+			NoSandbox(m.config.NoSandbox).
+			// Remove the default --enable-automation flag that rod sets.
+			// This flag adds "Chrome is being controlled by automated test software"
+			// and sets navigator.webdriver = true.
+			Delete("enable-automation").
+			// Remove flags that signal automation. Normal Chrome doesn't set these;
+			// their presence is detectable by anti-bot systems.
+			Delete("disable-popup-blocking").
+			Delete("disable-default-apps").
+			// Prevent Blink from exposing AutomationControlled feature, which
+			// websites check via navigator.webdriver and other signals.
+			Set(flags.Flag("disable-blink-features"), "AutomationControlled").
+			// Disable Cross-Origin-Opener-Policy enforcement. Google OAuth
+			// popups set COOP: same-origin, which prevents the parent page
+			// (e.g. Reddit) from accessing window.closed on the popup. This
+			// breaks OAuth callback detection. Appending to the existing
+			// disable-features list (which rod sets to "site-per-process,TranslateUI").
+			Append(flags.Flag("disable-features"), "CrossOriginOpenerPolicy").
+			// Prevent Chrome from throttling timers and rendering in background
+			// tabs/windows. Important for consistent behavior in headed Xvfb mode.
+			Set(flags.Flag("disable-background-timer-throttling")).
+			Set(flags.Flag("disable-backgrounding-occluded-windows")).
+			Set(flags.Flag("disable-renderer-backgrounding"))
 
-	if m.config.ChromePath != "" {
-		l = l.Bin(m.config.ChromePath)
-	}
-	if m.config.UserDataDir != "" {
-		// Ensure the profile directory exists with restricted permissions.
-		// Chrome writes cookies, session tokens, and localStorage here.
-		if err := os.MkdirAll(m.config.UserDataDir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create browser profile dir: %w", err)
+		if m.config.ChromePath != "" {
+			l = l.Bin(m.config.ChromePath)
 		}
-		l = l.UserDataDir(m.config.UserDataDir)
-	}
-	if m.config.Proxy != "" {
-		l = l.Set(flags.Flag("proxy-server"), m.config.Proxy)
+		if m.config.UserDataDir != "" {
+			// Ensure the profile directory exists with restricted permissions.
+			// Chrome writes cookies, session tokens, and localStorage here.
+			if err := os.MkdirAll(m.config.UserDataDir, 0700); err != nil {
+				return nil, fmt.Errorf("failed to create browser profile dir: %w", err)
+			}
+			l = l.UserDataDir(m.config.UserDataDir)
+		}
+		if m.config.Proxy != "" {
+			l = l.Set(flags.Flag("proxy-server"), m.config.Proxy)
+		}
+
+		// CloakBrowser fingerprint flags. These are silently ignored by stock
+		// Chromium, so it's safe to set them unconditionally when configured.
+		if m.config.FingerprintSeed != "" {
+			l = l.Set(flags.Flag("fingerprint"), m.config.FingerprintSeed)
+		}
+		if m.config.FingerprintPlatform != "" {
+			l = l.Set(flags.Flag("fingerprint-platform"), m.config.FingerprintPlatform)
+		}
+
+		return l, nil
 	}
 
-	// CloakBrowser fingerprint flags. These are silently ignored by stock
-	// Chromium, so it's safe to set them unconditionally when configured.
-	if m.config.FingerprintSeed != "" {
-		l = l.Set(flags.Flag("fingerprint"), m.config.FingerprintSeed)
+	l, err := newLauncher(headless)
+	if err != nil {
+		return nil, err
 	}
-	if m.config.FingerprintPlatform != "" {
-		l = l.Set(flags.Flag("fingerprint-platform"), m.config.FingerprintPlatform)
-	}
-
 	u, err := l.Launch()
 	if err != nil {
-		// If headed launch failed, try headless as fallback.
+		// A concurrent manager may have started this profile in the meantime.
+		if b := m.reconnectLocalProfileLocked(); b != nil {
+			return b, nil
+		}
+		// Rod launchers are single-use, even when their first launch fails.
 		if !headless {
+			firstErr := err
 			m.logger.Printf("Headed launch failed (%v), falling back to headless", err)
 			m.stopXvfb()
-			l = l.Headless(true)
-			u, err = l.Launch()
+			l, err = newLauncher(true)
+			if err == nil {
+				u, err = l.Launch()
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to launch browser (headed: %v): %w", firstErr, err)
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to launch browser: %w", err)
@@ -1462,6 +1676,11 @@ func (m *Manager) Cleanup() {
 
 	// Finalize any in-progress recording before tearing down the display.
 	m.stopRecordingLocked()
+	for _, capture := range m.responseCaptures {
+		_ = capture.Stop()
+	}
+	m.responseCaptures = nil
+	m.detachLocalBrowserLocked()
 
 	// Stop any active handoff session
 	if m.handoff != nil {

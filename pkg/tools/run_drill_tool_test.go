@@ -12,11 +12,52 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	adrill "github.com/SAP/astonish/pkg/drill"
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // ---------------------------------------------------------------------------
 // executeRunDrill argument validation tests
 // ---------------------------------------------------------------------------
+
+func TestScopedInjectDrillCredentialsNoFallback(t *testing.T) {
+	fs := newMemFlowStore()
+	if err := fs.SaveFlow(t.Context(), "fixture", "name: fixture\ntype: drill_suite\nsuite_config:\n  credentials: {app: owner}\n  credential_injection:\n    files: [{credential: app, path: /workspace/token, field: token}]\n"); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"general-store", "missing-injector", "empty", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			base := WithDrillExecutionContext(store.WithFlowStore(flowDrillPrincipal(t, false), fs), nil)
+			if mode != "general-store" {
+				base = store.WithTeamFlowStore(base, fs)
+			}
+			if mode == "cancelled" {
+				cancelled, cancel := context.WithCancel(base)
+				cancel()
+				base = cancelled
+			}
+			if mode == "empty" {
+				empty := newMemFlowStore()
+				if err := empty.SaveFlow(t.Context(), "fixture", "name: fixture\ntype: drill_suite\nsuite_config: {}\n"); err != nil {
+					t.Fatal(err)
+				}
+				base = store.WithTeamFlowStore(base, empty)
+			}
+			got, err := executeInjectDrillCredentials(&mockToolCtx{Context: base}, &runDrillDeps{}, InjectDrillCredentialsArgs{SuiteName: "fixture"})
+			if mode == "empty" {
+				if err != nil || got.Status != "skipped" {
+					t.Fatalf("empty: %+v %v", got, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("scoped injection fell back: %+v", got)
+			}
+			if mode == "missing-injector" && !strings.Contains(err.Error(), "injector is unavailable") {
+				t.Fatalf("missing actionable error: %v", err)
+			}
+		})
+	}
+}
 
 func TestExecuteRunDrill_EmptySuiteName(t *testing.T) {
 	deps := &runDrillDeps{}

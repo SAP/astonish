@@ -136,6 +136,16 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 	// Inject channel-scoped stores only after the identity has been authorized.
 	// Credentials are personal-first with team fallback, matching Studio chat for linked users.
 	enrichedCtx := principalCtx
+	// Bot commands use the Services container, not legacy per-store context keys.
+	// Never inherit an ambient user's Bot repositories.
+	services := &store.Services{Bots: teamStore.Bots(), Credentials: teamStore.Credentials()}
+	if personalStore != nil {
+		services.PersonalBots = personalStore.Bots()
+		services.PersonalCredentials = personalCredentials
+	}
+	enrichedCtx = store.WithServices(enrichedCtx, services)
+	enrichedCtx = store.WithUserID(enrichedCtx, link.UserID)
+	enrichedCtx = store.WithTenantContext(enrichedCtx, &store.TenantContext{UserID: link.UserID, OrgSlug: orgSlug, TeamSlug: teamSlug})
 	enrichedCtx = store.WithCredentialStore(enrichedCtx, store.NewMergedCredentialStore(personalCredentials, teamStore.Credentials()))
 	enrichedCtx = store.WithFlowStore(enrichedCtx, teamStore.Flows())
 	enrichedCtx = store.WithSkillStores(enrichedCtx, &store.SkillStores{

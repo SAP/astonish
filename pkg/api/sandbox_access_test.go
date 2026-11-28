@@ -85,6 +85,34 @@ func platformSandboxRequest(t *testing.T, userID, role string, sessions *memSess
 	return req.WithContext(store.WithServices(ctx, svc))
 }
 
+func TestBotSandboxDoesNotUseCreatedByFallback(t *testing.T) {
+	fix := newOwnershipFixture(t)
+	sess, err := fix.registry.GetSession("chat-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.CreatedBy = "user-owner"
+	if err := fix.registry.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	svc := store.FromRequest(fix.ownerReq)
+	svc.Sessions = &memSessionStore{metas: map[string]*store.SessionMeta{"chat-owner": {ID: "chat-owner", UserID: "user-owner", BotID: "bot", Purpose: store.SessionPurposeBotHome, Retention: store.SessionRetentionBot}}}
+	if sandboxSessionVisible(fix.ownerReq, fix.registry, "chat-owner") {
+		t.Fatal("Bot compute allowed through owner fallback")
+	}
+	rec := httptest.NewRecorder()
+	if authorizeSandboxSession(rec, fix.ownerReq, fix.registry, "chat-owner") != nil || rec.Code != 404 {
+		t.Fatal("Bot sandbox authorization did not fail closed")
+	}
+	if _, ok := readFromSandboxContainer(fix.ownerReq, "chat-owner", "/reports/x.md"); ok {
+		t.Fatal("Bot artifact resumed generic compute")
+	}
+	svc.PersonalSessions = &botSessionMetaFixture{err: store.ErrBotUnsupported}
+	if sandboxSessionVisible(fix.ownerReq, fix.registry, "chat-owner") {
+		t.Fatal("lookup error allowed compute")
+	}
+}
+
 func TestSandboxPrune_NonAdmin403(t *testing.T) {
 	req := platformSandboxRequest(t, "user-member", "member", &memSessionStore{})
 	rec := httptest.NewRecorder()

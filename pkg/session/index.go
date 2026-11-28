@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // SessionIndex manages the session metadata index file.
@@ -75,8 +78,36 @@ func (idx *SessionIndex) loadUnsafe() (*IndexData, error) {
 	return &index, nil
 }
 
-// Save writes the index to disk atomically.
+// withWriteLock serializes mutations across instances and processes. The sidecar
+// is permanent: locking the index itself would lose protection when atomicWrite
+// replaces its inode. Never remove the sidecar after releasing the lock.
+func (idx *SessionIndex) withWriteLock(fn func() error) (err error) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(idx.path), 0755); err != nil {
+		return fmt.Errorf("failed to create index directory: %w", err)
+	}
+	lock := flock.New(idx.path+".lock", flock.SetFlag(os.O_CREATE|os.O_RDWR), flock.SetPermissions(0600))
+	if err := lock.Lock(); err != nil {
+		return fmt.Errorf("failed to lock session index: %w", err)
+	}
+	defer func() {
+		if unlockErr := lock.Unlock(); unlockErr != nil && err == nil {
+			err = fmt.Errorf("failed to unlock session index: %w", unlockErr)
+		}
+	}()
+	return fn()
+}
+
+// Save atomically replaces the whole index under the mutation locks. It does not
+// merge a previously loaded snapshot; use Add, Update or RemoveSelected for edits.
 func (idx *SessionIndex) Save(index *IndexData) error {
+	return idx.withWriteLock(func() error { return idx.saveUnsafe(index) })
+}
+
+// saveUnsafe writes the index; caller must hold both mutation locks.
+func (idx *SessionIndex) saveUnsafe(index *IndexData) error {
 	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize index: %w", err)
@@ -87,57 +118,70 @@ func (idx *SessionIndex) Save(index *IndexData) error {
 
 // Add adds a new session to the index.
 func (idx *SessionIndex) Add(meta SessionMeta) error {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
+	return idx.withWriteLock(func() error {
+		index, err := idx.loadUnsafe()
+		if err != nil {
+			return err
+		}
 
-	index, err := idx.loadUnsafe()
-	if err != nil {
-		return err
-	}
-
-	index.Sessions[meta.ID] = meta
-	return idx.Save(index)
+		index.Sessions[meta.ID] = meta
+		return idx.saveUnsafe(index)
+	})
 }
 
 // Remove removes a session and all its child sub-sessions from the index.
 func (idx *SessionIndex) Remove(id string) error {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-
-	index, err := idx.loadUnsafe()
-	if err != nil {
-		return err
-	}
-
-	// Cascade: remove any sessions whose ParentID matches this session
-	for childID, meta := range index.Sessions {
-		if meta.ParentID == id {
-			delete(index.Sessions, childID)
+	return idx.withWriteLock(func() error {
+		index, err := idx.loadUnsafe()
+		if err != nil {
+			return err
 		}
-	}
 
-	delete(index.Sessions, id)
-	return idx.Save(index)
+		// Cascade: remove any sessions whose ParentID matches this session
+		for childID, meta := range index.Sessions {
+			if meta.ParentID == id {
+				delete(index.Sessions, childID)
+			}
+		}
+
+		delete(index.Sessions, id)
+		return idx.saveUnsafe(index)
+	})
+}
+
+// RemoveSelected removes only the supplied, confirmed IDs from the latest index.
+// Unlike Remove, it does not cascade to children created after confirmation.
+func (idx *SessionIndex) RemoveSelected(ids []string) error {
+	return idx.withWriteLock(func() error {
+		index, err := idx.loadUnsafe()
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			delete(index.Sessions, id)
+		}
+		return idx.saveUnsafe(index)
+	})
 }
 
 // Update modifies a session in the index using the provided function.
+// The function runs inside the mutation locks and must not call index methods.
 func (idx *SessionIndex) Update(id string, fn func(*SessionMeta)) error {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
+	return idx.withWriteLock(func() error {
+		index, err := idx.loadUnsafe()
+		if err != nil {
+			return err
+		}
 
-	index, err := idx.loadUnsafe()
-	if err != nil {
-		return err
-	}
+		meta, ok := index.Sessions[id]
+		if !ok {
+			return fmt.Errorf("session %s not found in index", id)
+		}
 
-	meta, ok := index.Sessions[id]
-	if !ok {
-		return fmt.Errorf("session %s not found in index", id)
-	}
-
-	fn(&meta)
-	index.Sessions[id] = meta
-	return idx.Save(index)
+		fn(&meta)
+		index.Sessions[id] = meta
+		return idx.saveUnsafe(index)
+	})
 }
 
 // Get retrieves metadata for a specific session.

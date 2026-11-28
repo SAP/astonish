@@ -18,7 +18,17 @@ func OAuthStudioBearerMiddleware(validator BearerPrincipalValidator, resolveTena
 			next.ServeHTTP(w, r)
 			return
 		}
-		principal, err := validator.ValidateBearer(r.Context(), r.Header.Get("Authorization"), "", []string{string(execution.CapabilityChat)}, execution.SurfaceStudio)
+		var principal execution.Principal
+		var evidence execution.AuthenticationEvidence
+		var err error
+		verified, hasEvidence := validator.(interface {
+			ValidateBearerWithEvidence(context.Context, string, string, []string, execution.Surface) (execution.Principal, execution.AuthenticationEvidence, error)
+		})
+		if hasEvidence {
+			principal, evidence, err = verified.ValidateBearerWithEvidence(r.Context(), r.Header.Get("Authorization"), "", []string{string(execution.CapabilityChat)}, execution.SurfaceStudio)
+		} else {
+			principal, err = validator.ValidateBearer(r.Context(), r.Header.Get("Authorization"), "", []string{string(execution.CapabilityChat)}, execution.SurfaceStudio)
+		}
 		if err != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
 			http.Error(w, "Studio OAuth authentication required", http.StatusUnauthorized)
@@ -39,6 +49,13 @@ func OAuthStudioBearerMiddleware(validator BearerPrincipalValidator, resolveTena
 		if err != nil {
 			http.Error(w, "Studio OAuth principal is not authorized", http.StatusForbidden)
 			return
+		}
+		if hasEvidence {
+			ctx, err = execution.WithAuthenticationEvidence(ctx, evidence)
+			if err != nil {
+				http.Error(w, "Studio OAuth evidence invalid", http.StatusUnauthorized)
+				return
+			}
 		}
 		ctx = store.WithTenantContext(ctx, &store.TenantContext{OrgSlug: principal.OrgSlug, TeamSlug: principal.TeamSlug, UserID: principal.Subject})
 		if principal.Kind == execution.PrincipalKindUser && principal.Subject != "" {

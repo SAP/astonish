@@ -1,0 +1,21 @@
+{{- $homes := .Values.sandbox.openshell.botHomes -}}
+{{- if and .Values.sandbox.enabled (eq .Values.sandbox.backend "openshell") $homes.enabled (not $homes.existingClaim) }}
+# Independent retained storage, never owned by an ephemeral Sandbox CR.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $homes.pvcName | quote }}
+  namespace: {{ include "astonish.namespace.sandbox" . | quote }}
+  labels:
+    {{- include "astonish.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openshell-bot-homes
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ $homes.accessMode | quote }}
+  storageClassName: {{ default .Values.sandbox.storage.storageClassName $homes.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ $homes.size | quote }}
+{{- end }}

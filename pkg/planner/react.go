@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/SAP/astonish/pkg/common"
+	"github.com/SAP/astonish/pkg/execution"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -24,6 +25,9 @@ import (
 type ApprovalCallback func(toolName string, args map[string]any) (bool, error)
 
 type ReActPlanner struct {
+	// BotDispatch is a trusted execution adapter, not an interactive approval.
+	// Bot execution fails closed when it is absent.
+	BotDispatch      func(tool.Context, tool.Tool, map[string]any) (map[string]any, error)
 	LLM              model.LLM
 	Tools            []tool.Tool
 	ApprovalCallback ApprovalCallback
@@ -584,6 +588,18 @@ func (p *ReActPlanner) executeTool(ctx context.Context, name string, inputJSON s
 		if strVal, ok := val.(string); ok && (strVal == "map[]" || strVal == "") {
 			args["global_variables"] = map[string]any{}
 		}
+	}
+
+	if _, bot := execution.BotRunIdentityFromContext(ctx); bot || execution.RunPolicyFromContext(ctx) != nil {
+		if p.BotDispatch == nil {
+			return "", fmt.Errorf("bot policy: missing ReAct execution adapter")
+		}
+		result, err := p.BotDispatch(&minimalToolContext{Context: ctx, state: p.State}, selectedTool, args)
+		if err != nil {
+			return "", err
+		}
+		raw, err := json.Marshal(result)
+		return string(raw), err
 	}
 
 	// Check for approval if callback is set

@@ -3,18 +3,43 @@ package entstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/SAP/astonish/pkg/backup"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 )
 
 func TestRestorePlatformBackupSQLiteFreshTarget(t *testing.T) {
+	for _, enable := range []bool{false, true} {
+		name := "default"
+		if enable {
+			name = "explicit-runtime-options"
+		}
+		t.Run(name, func(t *testing.T) {
+			testRestorePlatformBackupSQLiteFreshTarget(t, PlatformRestoreOptions{EnableScheduledJobs: enable, IncludeTransient: enable}, false)
+		})
+	}
+}
+
+func TestBotRestorePlatformBackupSQLiteRejectsSQLOnlyRecovery(t *testing.T) {
+	for _, enable := range []bool{false, true} {
+		t.Run(fmt.Sprint(enable), func(t *testing.T) {
+			testRestorePlatformBackupSQLiteFreshTarget(t, PlatformRestoreOptions{EnableScheduledJobs: enable, IncludeTransient: enable}, true)
+		})
+	}
+}
+
+func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformRestoreOptions, includeBots bool) {
 	ctx := context.Background()
 	sourceDir := t.TempDir()
 	sourceDSN := "file:" + filepath.Join(sourceDir, "platform.db")
@@ -59,6 +84,120 @@ func TestRestorePlatformBackupSQLiteFreshTarget(t *testing.T) {
 	seedSessionBackupRows(t, filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db"))
 	seedScheduledJob(t, filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db"))
 
+	if err := orgStore.Teams().AddMember(ctx, &store.TeamMembership{UserID: userID, TeamID: team.ID, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if includeBots {
+		if err := os.MkdirAll(filepath.Join(sourceDir, "bot-content"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		botCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: userID, OrgSlug: "restore", TeamSlug: "ops", Authenticated: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner := uuid.MustParse(userID)
+		botIDs := map[store.BotScope]uuid.UUID{}
+		for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+			var repo store.BotStore
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			} else {
+				repo = orgStore.ForTeam("ops").Bots()
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "Retain this responsibility"
+			b, err := repo.Create(botCtx, store.BotCreateRequest{Name: "Backup Bot", OwnerID: owner, Version: v, IdempotencyKey: "backup-bot", Goals: []store.BotGoal{{Title: "Delivery", CompletionCriteria: "Received"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			botIDs[scope] = b.ID
+			goals, err := repo.ListGoals(botCtx, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.SaveTrackedItem(botCtx, b.ID, store.BotTrackedItem{ID: uuid.New(), GoalID: goals[0].ID, Title: "Confirm delivery", Status: store.BotTrackedOpen}, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.Correct(botCtx, store.BotCorrection{ID: uuid.New(), BotID: b.ID, ExpectedRevision: 1, SupersededSource: "memory:date", Replacement: "Friday", Evidence: store.BotEvidence{Kind: store.BotEvidenceOwnerConfirmation, ActorID: owner, Source: "owner", Summary: "Date corrected", ObservedAt: time.Now().UTC()}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		deletedIDs := map[store.BotScope]uuid.UUID{}
+		deletedUntil := map[store.BotScope]time.Time{}
+		for scope := range botIDs {
+			var repo store.BotStore
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			} else {
+				repo = orgStore.ForTeam("ops").Bots()
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "Retained deletion"
+			b, err := repo.Create(botCtx, store.BotCreateRequest{Name: "Deleted Bot", OwnerID: owner, Version: v, IdempotencyKey: "deleted"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = repo.BeginDelete(botCtx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Retain for restore"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deletedIDs[scope] = b.ID
+			deletedUntil[scope] = *b.RestoreUntil
+		}
+		for scope, id := range botIDs {
+			dbPath := filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db")
+			if scope == store.BotScopePersonal {
+				dbPath = filepath.Join(sourceDir, "orgs", "restore", "personal", userID+".db")
+			}
+			seedBotRecoveryRows(t, dbPath, id)
+		}
+		if _, err := orgStore.ForTeam("ops").BotTemplates().Publish(botCtx, store.BotTemplateDefinition{SchemaVersion: store.BotSchemaVersion, Name: "Backup template", Charter: "Reviewed public observation"}, 0); err != nil {
+			t.Fatal(err)
+		}
+		archivePath := filepath.Join(t.TempDir(), "unsupported.astonish-backup")
+		if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); !errors.Is(err, store.ErrBotUnsupported) {
+			t.Fatalf("SQL-only Bot export must fail closed: %v", err)
+		}
+		if _, err := backup.Verify(archivePath); err == nil {
+			t.Fatal("failed export left a valid SQL-only archive")
+		}
+		for scope, id := range botIDs {
+			var repo store.BotStore = orgStore.ForTeam("ops").Bots()
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			}
+			b, err := repo.Get(botCtx, id)
+			if err != nil || b.Status != store.BotActive {
+				t.Fatalf("failed export changed source Bot: %+v %v", b, err)
+			}
+			retained, err := repo.Get(botCtx, deletedIDs[scope])
+			if err != nil || retained.Status != store.BotDeleted || retained.RestoreUntil == nil || !retained.RestoreUntil.Equal(deletedUntil[scope]) {
+				t.Fatalf("failed export changed retained deletion: %+v %v", retained, err)
+			}
+			version, err := repo.GetVersion(botCtx, id, 1)
+			if err != nil || version.Charter != "Retain this responsibility" {
+				t.Fatalf("failed export changed disk content: %+v %v", version, err)
+			}
+			goals, err := repo.ListGoals(botCtx, id)
+			if err != nil || len(goals) != 1 || goals[0].Revision != 2 || goals[0].CompletionCriteria != "Received" {
+				t.Fatalf("failed export changed goal evidence: %+v %v", goals, err)
+			}
+			items, err := repo.ListTrackedItems(botCtx, id, goals[0].ID)
+			if err != nil || len(items) != 1 || items[0].Title != "Confirm delivery" {
+				t.Fatalf("failed export changed commitments: %+v %v", items, err)
+			}
+			activity, err := repo.ListActivity(botCtx, id, 0, 50)
+			if err != nil || len(activity) != 3 {
+				t.Fatalf("failed export changed activity: %+v %v", activity, err)
+			}
+			dbPath := filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db")
+			if scope == store.BotScopePersonal {
+				dbPath = filepath.Join(sourceDir, "orgs", "restore", "personal", userID+".db")
+			}
+			assertBotRecoveryRows(t, dbPath)
+		}
+		return
+	}
 	archivePath := filepath.Join(t.TempDir(), "restore.astonish-backup")
 	if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); err != nil {
 		t.Fatalf("ExportPlatformBackup() error = %v", err)
@@ -82,7 +221,7 @@ func TestRestorePlatformBackupSQLiteFreshTarget(t *testing.T) {
 	if len(plan.Blockers) != 0 {
 		t.Fatalf("plan blockers = %v, want none", plan.Blockers)
 	}
-	result, err := target.RestorePlatformBackup(ctx, archivePath, PlatformRestoreOptions{})
+	result, err := target.RestorePlatformBackup(ctx, archivePath, opts)
 	if err != nil {
 		t.Fatalf("RestorePlatformBackup() error = %v", err)
 	}
@@ -102,10 +241,22 @@ func TestRestorePlatformBackupSQLiteFreshTarget(t *testing.T) {
 	assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"), "flows", "name", "backup-flow")
 	assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"), "sessions", "title", "backup-session")
 	assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"), "session_events", "session_id", "backup-session-id")
-	assertRestoredScheduledJobPaused(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"))
+	if !opts.EnableScheduledJobs {
+		assertRestoredScheduledJobPaused(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"))
+	} else {
+		assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"), "scheduled_jobs", "status", "active")
+	}
 }
 
 func TestRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T) {
+	testRestorePlatformBackupSQLiteMappedOrgAndTeam(t, false)
+}
+
+func TestBotRestorePlatformBackupSQLiteRejectsMappedSQLOnlyRecovery(t *testing.T) {
+	testRestorePlatformBackupSQLiteMappedOrgAndTeam(t, true)
+}
+
+func testRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T, includeBots bool) {
 	ctx := context.Background()
 	sourceDir := t.TempDir()
 	sourceDSN := "file:" + filepath.Join(sourceDir, "platform.db")
@@ -141,6 +292,58 @@ func TestRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T) {
 		t.Fatalf("ProvisionTeam error = %v", err)
 	}
 	seedTeamBackupRows(t, filepath.Join(sourceDir, "orgs", "oldorg", "teams", "ops.db"))
+	if err := source.Organizations().AddMember(ctx, userID, orgID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := orgStore.Teams().AddMember(ctx, &store.TeamMembership{UserID: userID, TeamID: team.ID, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if includeBots {
+		if err := os.MkdirAll(filepath.Join(sourceDir, "bot-content"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		botCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: userID, OrgSlug: "oldorg", TeamSlug: "ops", Authenticated: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := map[store.BotScope]uuid.UUID{}
+		for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
+			var repo store.BotStore = orgStore.ForTeam("ops").Bots()
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "oldorg"
+			b, err := repo.Create(botCtx, store.BotCreateRequest{Name: "ops", OwnerID: uuid.MustParse(userID), Version: v, IdempotencyKey: "mapped", Goals: []store.BotGoal{{Title: "oldorg", CompletionCriteria: userID}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids[scope] = b.ID
+			if err := repo.MarkRead(botCtx, store.BotReadCursor{BotID: b.ID, ViewerID: uuid.MustParse(userID), Sequence: 1}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		archivePath := filepath.Join(t.TempDir(), "unsupported-mapped.astonish-backup")
+		if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); !errors.Is(err, store.ErrBotUnsupported) {
+			t.Fatalf("SQL-only Bot mapping export must fail closed: %v", err)
+		}
+		for scope, id := range ids {
+			var repo store.BotStore = orgStore.ForTeam("ops").Bots()
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			}
+			b, err := repo.Get(botCtx, id)
+			if err != nil || b.Name != "ops" || b.OwnerID.String() != userID || b.Status != store.BotActive {
+				t.Fatalf("failed export changed source ownership: %+v %v", b, err)
+			}
+			v, err := repo.GetVersion(botCtx, id, 1)
+			if err != nil || v.Charter != "oldorg" || v.CreatedBy.String() != userID {
+				t.Fatalf("failed export changed reviewed content: %+v %v", v, err)
+			}
+		}
+		return
+	}
+	newUserID := uuid.NewString()
 
 	archivePath := filepath.Join(t.TempDir(), "mapped.astonish-backup")
 	if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); err != nil {
@@ -161,6 +364,7 @@ func TestRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T) {
 	result, err := target.RestorePlatformBackup(ctx, archivePath, PlatformRestoreOptions{
 		MapOrg:  map[string]string{"oldorg": "neworg"},
 		MapTeam: map[string]string{"oldorg/ops": "neworg/platform"},
+		MapUser: map[string]string{"oldorg/" + userID: "neworg/" + newUserID},
 	})
 	if err != nil {
 		t.Fatalf("RestorePlatformBackup(mapped) error = %v", err)
@@ -419,6 +623,366 @@ func restorePlanHasBlocker(plan *backup.RestorePlan, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestBotRestoreMappingPreservesContent(t *testing.T) {
+	oldUser, newUser := uuid.NewString(), uuid.NewString()
+	scope := backup.Scope{Kind: "personal", OrgSlug: "oldorg", UserID: oldUser}
+	target := backup.Scope{Kind: "personal", OrgSlug: "neworg", UserID: newUser}
+	opts := PlatformRestoreOptions{MapOrg: map[string]string{"oldorg": "neworg"}, MapTeam: map[string]string{"oldorg/ops": "neworg/platform"}, MapUser: map[string]string{"oldorg/" + oldUser: "neworg/" + newUser}}
+	for _, table := range []string{"bots", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_templates", "bot_skills", "bot_skill_revisions", "sessions"} {
+		t.Run(table, func(t *testing.T) {
+			row := map[string]any{"id": "stable-id", "owner_id": oldUser, "user_id": oldUser, "created_by": oldUser, "name": "ops", "title": "oldorg", "bot_id": "bot-id", "definition": map[string]any{"charter": "oldorg", "created_by": oldUser}, "data": map[string]any{"read_cursors": map[string]any{oldUser: "9007199254740993"}, "evidence": oldUser}}
+			got := remapRestoreRow(scope, target, table, row, opts)
+			if got["name"] != "ops" || got["title"] != "oldorg" || got["definition"].(map[string]any)["charter"] != "oldorg" || got["data"].(map[string]any)["evidence"] != oldUser {
+				t.Fatalf("rewrote content: %+v", got)
+			}
+			if got["created_by"] != oldUser {
+				t.Fatal("rewrote historical authorship")
+			}
+			if table == "bots" && (got["owner_id"] != newUser || got["data"].(map[string]any)["read_cursors"].(map[string]any)[newUser] != "9007199254740993") {
+				t.Fatalf("ownership/cursor not mapped: %+v", got)
+			}
+			if table == "sessions" && got["user_id"] != newUser {
+				t.Fatal("session owner not mapped")
+			}
+		})
+	}
+	// A mapping for another organization must never move this Bot's owner.
+	scope.Kind, scope.UserID, scope.TeamSlug = "team", "", "ops"
+	target.Kind, target.UserID, target.TeamSlug = "team", "", "platform"
+	opts.MapUser = map[string]string{"otherorg/" + oldUser: "neworg/" + newUser}
+	row := remapRestoreRow(scope, target, "bots", map[string]any{"owner_id": oldUser}, opts)
+	if row["owner_id"] != oldUser {
+		t.Fatal("cross-org owner mapping")
+	}
+}
+
+func TestBotSkillRestoreValidation(t *testing.T) {
+	r, owner, _, run, _, _ := botRunFixture(t, store.BotScopePersonal)
+	v := skillTestRevision(t, r, owner, run.BotID)
+	v.Digest = v.ContentDigest()
+	data, err := botJSONMap(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := map[string]any{"id": v.ID.String(), "bot_id": v.BotID.String(), "skill_id": v.SkillID.String(), "revision": 1, "digest": v.Digest, "data": data}
+	if err := validateRestoredBotSkillRow("bot_skill_revisions", row); err != nil {
+		t.Fatal(err)
+	}
+	row["digest"] = "tampered"
+	if err := validateRestoredBotSkillRow("bot_skill_revisions", row); err == nil {
+		t.Fatal("accepted changed immutable digest")
+	}
+	row["digest"] = v.Digest
+	row["bot_id"] = uuid.NewString()
+	if err := validateRestoredBotSkillRow("bot_skill_revisions", row); err == nil {
+		t.Fatal("accepted foreign Bot")
+	}
+}
+
+func TestBotSkillRestoreMalformedRevisionRollsBackScope(t *testing.T) {
+	r, owner, _, run, _, _ := botRunFixture(t, store.BotScopePersonal)
+	v := skillTestRevision(t, r, owner, run.BotID)
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "skills.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, ddl := range []string{`CREATE TABLE bot_skills (id TEXT PRIMARY KEY, bot_id TEXT, key TEXT, revision INTEGER, status TEXT, data TEXT)`, `CREATE TABLE bot_skill_revisions (id TEXT PRIMARY KEY, bot_id TEXT, skill_id TEXT REFERENCES bot_skills(id), revision INTEGER, digest TEXT, data TEXT)`} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := botJSONMap(botStoredSkill{Skill: store.BotSkill{ID: v.SkillID, BotID: v.BotID, Key: "restore", Revision: 1, Status: store.BotSkillDraft, HeadRevision: 1, HeadDigest: v.Digest}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, corrupt := range []string{"digest", "foreign-root"} {
+		t.Run(corrupt, func(t *testing.T) {
+			var roots, revisions strings.Builder
+			row := map[string]any{"id": v.SkillID.String(), "bot_id": v.BotID.String(), "key": "restore", "revision": 1, "status": "draft", "data": root}
+			if err := backup.NewRecordWriter(&roots, "bot_skills").Write(v.SkillID.String(), row); err != nil {
+				t.Fatal(err)
+			}
+			copy := *v.Clone()
+			if corrupt == "foreign-root" {
+				copy.BotID = uuid.New()
+				for i := range copy.Expectations {
+					copy.Expectations[i].Provenance.BotID = copy.BotID
+				}
+				for i := range copy.Provenance {
+					copy.Provenance[i].BotID = copy.BotID
+				}
+				copy.Digest = copy.ContentDigest()
+			}
+			data, err := botJSONMap(copy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row = map[string]any{"id": copy.ID.String(), "bot_id": copy.BotID.String(), "skill_id": copy.SkillID.String(), "revision": 1, "digest": copy.Digest, "data": data}
+			if corrupt == "digest" {
+				row["digest"] = "tampered"
+			}
+			if err := backup.NewRecordWriter(&revisions, "bot_skill_revisions").Write(copy.ID.String(), row); err != nil {
+				t.Fatal(err)
+			}
+			entries := []backup.Entry{{Entity: "bot_skill_revisions", Path: "revisions", Kind: "jsonl"}, {Entity: "bot_skills", Path: "roots", Kind: "jsonl"}}
+			err = restoreLogicalEntries(context.Background(), db, DialectSQLite, "", backup.Scope{Kind: "personal", OrgSlug: "org", UserID: uuid.NewString()}, map[string][]byte{"roots": []byte(roots.String()), "revisions": []byte(revisions.String())}, entries, PlatformRestoreOptions{}, &backup.RestoreResult{})
+			if err == nil {
+				t.Fatal("corrupt skill scope committed")
+			}
+			for _, table := range []string{"bot_skills", "bot_skill_revisions"} {
+				var n int
+				if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil || n != 0 {
+					t.Fatalf("partial import %s=%d: %v", table, n, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBotRestoreApprovalEnvelope(t *testing.T) {
+	for _, textJSON := range []bool{false, true} {
+		for _, wrapped := range []bool{false, true} {
+			for _, state := range []store.ApprovalStatus{store.ApprovalPending, store.ApprovalApproved, store.ApprovalConsumed, store.ApprovalDenied} {
+				doc := map[string]any{"status": string(state), "action": map[string]any{"arguments": map[string]any{"amount": json.Number("9007199254740993"), "recipient": "oldorg"}}, "action_digest": "unchanged"}
+				var value any = doc
+				if wrapped {
+					data, err := json.Marshal(doc)
+					if err != nil {
+						t.Fatal(err)
+					}
+					value = map[string]any{"bot_document": string(data)}
+				}
+				if textJSON {
+					data, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					value = string(data)
+				}
+				row := map[string]any{"status": string(state), "data": value}
+				if err := quiesceRestoredBotRow("bot_approvals", row); err != nil {
+					t.Fatal(err)
+				}
+				outer := row["data"].(map[string]any)
+				if _, ok := outer["bot_document"]; ok != wrapped {
+					t.Fatal("changed envelope representation")
+				}
+				var decoded struct {
+					Status store.ApprovalStatus `json:"status"`
+					Action struct {
+						Arguments struct {
+							Amount    int64  `json:"amount"`
+							Recipient string `json:"recipient"`
+						} `json:"arguments"`
+					} `json:"action"`
+					Digest string `json:"action_digest"`
+				}
+				if err := botDecode(outer, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				want := state
+				if state == store.ApprovalPending || state == store.ApprovalApproved {
+					want = store.ApprovalRevoked
+				}
+				if decoded.Status != want || decoded.Action.Arguments.Amount != 9007199254740993 || decoded.Action.Arguments.Recipient != "oldorg" || decoded.Digest != "unchanged" {
+					t.Fatalf("changed approval: %+v", decoded)
+				}
+			}
+		}
+	}
+	for _, invalid := range []any{nil, 42, "null", "[]", "broken"} {
+		row := map[string]any{"status": "approved", "data": map[string]any{"bot_document": invalid}}
+		if err := quiesceRestoredBotRow("bot_approvals", row); err == nil {
+			t.Fatalf("accepted malformed envelope %v", invalid)
+		}
+	}
+}
+
+func TestBotRestoreQuiescenceDocuments(t *testing.T) {
+	for _, textJSON := range []bool{false, true} {
+		for _, state := range []store.BotStatus{store.BotActive, store.BotActive, store.BotPaused, store.BotStopped, store.BotDeleted} {
+			doc := any(map[string]any{"create_hash": "keep", "read_cursors": map[string]any{"viewer": json.Number("9007199254740993")}})
+			if textJSON {
+				data, _ := json.Marshal(doc)
+				doc = string(data)
+			}
+			row := map[string]any{"status": string(state), "fence": json.Number("9007199254740993"), "revision": json.Number("7"), "data": doc, "active_run_id": "teardown-barrier", "purge_after": "original-deadline"}
+			if err := quiesceRestoredBotRow("bots", row); err != nil {
+				t.Fatal(err)
+			}
+			want := state
+			if want == store.BotActive {
+				want = store.BotPaused
+			}
+			if row["status"] != string(want) || row["fence"] != int64(9007199254740994) || row["active_run_id"] != "teardown-barrier" || row["purge_after"] != "original-deadline" {
+				t.Fatalf("restore lost state: %+v", row)
+			}
+			data := row["data"].(map[string]any)
+			if data["read_cursors"].(map[string]any)["viewer"] != json.Number("9007199254740993") {
+				t.Fatal("cursor precision lost")
+			}
+		}
+	}
+	for _, delivered := range []any{nil, "2026-01-01T00:00:00Z"} {
+		row := map[string]any{"fence": json.Number("2"), "delivered_at": delivered, "available_at": "original-time", "payload": "unchanged", "attempts": 3}
+		if err := quiesceRestoredBotRow("bot_outbox", row); err != nil {
+			t.Fatal(err)
+		}
+		if row["delivered_at"] != delivered || row["payload"] != "unchanged" || row["attempts"] != 3 {
+			t.Fatal("receipt/evidence changed")
+		}
+		if delivered != nil && row["available_at"] != "original-time" {
+			t.Fatal("delivered receipt rescheduled")
+		}
+	}
+	for _, entity := range []string{"bots", "bot_runs", "bot_approvals", "bot_outbox"} {
+		action, reason := restoreActionForEntry(backup.Entry{Entity: entity}, PlatformRestoreOptions{EnableScheduledJobs: true, IncludeTransient: true})
+		if action != "restore_quiesced" || reason == "" {
+			t.Fatalf("restore plan hides quiescence: %s", entity)
+		}
+	}
+	for _, counter := range []any{nil, -1, "invalid", json.Number("9223372036854775807")} {
+		if err := quiesceRestoredBotRow("bots", map[string]any{"fence": counter}); err == nil {
+			t.Fatalf("accepted invalid fence %v", counter)
+		}
+	}
+	for _, doc := range []any{nil, "null", "[]", "broken"} {
+		if _, err := restoredBotDocument(doc); err == nil {
+			t.Fatalf("accepted invalid document %v", doc)
+		}
+	}
+}
+
+func TestBotRestoreMalformedDocumentRollsBackScope(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "restore.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE bots (id TEXT PRIMARY KEY, status TEXT, fence INTEGER, revision INTEGER, data TEXT, lease_expires_at TEXT, cleanup_complete BOOLEAN)`); err != nil {
+		t.Fatal(err)
+	}
+	var payload strings.Builder
+	writer := backup.NewRecordWriter(&payload, "bots")
+	for _, row := range []map[string]any{
+		{"id": "valid", "status": "active", "fence": 1, "revision": 1, "data": map[string]any{}},
+		{"id": "broken", "status": "active", "fence": 1, "revision": 1, "data": "not-json"},
+	} {
+		if err := writer.Write(row["id"].(string), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := backup.Entry{Entity: "bots", Path: "bots.jsonl", Kind: "jsonl"}
+	err = restoreLogicalEntries(context.Background(), db, DialectSQLite, "", backup.Scope{Kind: "team", OrgSlug: "org", TeamSlug: "team"}, map[string][]byte{entry.Path: []byte(payload.String())}, []backup.Entry{entry}, PlatformRestoreOptions{}, &backup.RestoreResult{})
+	if err == nil {
+		t.Fatal("malformed archive accepted")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bots`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("partial scope restore committed")
+	}
+}
+
+// seedBotRecoveryRows models an archive taken while work and external effects
+// were outstanding. Raw rows deliberately cover every persisted execution state.
+func seedBotRecoveryRows(t *testing.T, path string, id uuid.UUID) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`UPDATE bots SET status='active', fence=8, active_run_id=?, lease_expires_at=?, cleanup_complete=true WHERE id=?`, uuid.NewString(), time.Now().Add(time.Hour), id.String())
+	for _, state := range []store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunInterrupted, store.RunSucceeded, store.RunPartial, store.RunFailed, store.RunSkipped, store.RunCancelled} {
+		run := store.BotRun{ID: uuid.New(), BotID: id, Version: 1, SessionID: uuid.New(), Status: state, Report: store.BotReport{Summary: "Retained evidence"}}
+		document, err := botJSONMap(botStoredRun{Run: run})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exec(`INSERT INTO bot_runs (id,bot_id,version,session_id,idempotency_key,request_hash,status,fence,worker_id,lease_expires_at,data) VALUES (?,?,1,?,?,?,?,8,'old-worker',?,?)`, run.ID.String(), id.String(), run.SessionID.String(), string(state), "hash", string(state), time.Now().Add(time.Hour), string(data))
+		if state == store.RunRunning {
+			for _, status := range []store.ApprovalStatus{store.ApprovalPending, store.ApprovalApproved, store.ApprovalConsumed, store.ApprovalDenied, store.ApprovalExpired, store.ApprovalRevoked} {
+				exec(`INSERT INTO bot_approvals (id,bot_id,run_id,version,action_digest,status,data,expires_at) VALUES (?,?,?,1,?,?,?,?)`, uuid.NewString(), id.String(), run.ID.String(), string(status), string(status), `{"status":"`+string(status)+`"}`, time.Now().Add(time.Hour))
+			}
+		}
+	}
+	exec(`INSERT INTO scheduled_jobs (id,name,schedule,mode,payload,status,next_run_at) VALUES (?,'bot-job','* * * * *','bot_trigger',?,'active',?)`, uuid.NewString(), `{"bot_id":"`+id.String()+`"}`, time.Now())
+}
+
+func assertBotRecoveryRows(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// Refused export must not quiesce, revoke, consume, or discard source state.
+	for _, q := range []string{
+		`SELECT COUNT(*) FROM bots WHERE status='active' AND (fence!=8 OR lease_expires_at IS NULL OR cleanup_complete!=true)`,
+		`SELECT COUNT(*) FROM bot_runs WHERE worker_id!='old-worker' OR lease_expires_at IS NULL OR fence!=8`,
+		`SELECT COUNT(*) FROM scheduled_jobs WHERE mode='bot_trigger' AND (status!='active' OR next_run_at IS NULL)`,
+	} {
+		var n int
+		if err := db.QueryRow(q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("unsafe restored rows (%d): %s", n, q)
+		}
+	}
+	for _, status := range []store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunInterrupted, store.RunSucceeded, store.RunPartial, store.RunFailed, store.RunSkipped, store.RunCancelled} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM bot_runs WHERE status=?`, string(status)).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("source run state %s changed: count=%d err=%v", status, count, err)
+		}
+	}
+	for _, status := range []store.ApprovalStatus{store.ApprovalPending, store.ApprovalApproved, store.ApprovalConsumed, store.ApprovalDenied, store.ApprovalExpired, store.ApprovalRevoked} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM bot_approvals WHERE status=?`, string(status)).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("source approval state %s changed: count=%d err=%v", status, count, err)
+		}
+	}
+	rows, err := db.Query(`SELECT status,data FROM bot_runs`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status, data string
+		if err := rows.Scan(&status, &data); err != nil {
+			t.Fatal(err)
+		}
+		var saved botStoredRun
+		var document map[string]any
+		if err := json.Unmarshal([]byte(data), &document); err != nil {
+			t.Fatal(err)
+		}
+		if err := botDecode(document, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if string(saved.Run.Status) != status || saved.Run.Lease.WorkerID != "" || saved.Run.Report.Summary != "Retained evidence" {
+			t.Fatalf("inconsistent run document: %+v", saved)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func seedSessionBackupRows(t *testing.T, dbPath string) {

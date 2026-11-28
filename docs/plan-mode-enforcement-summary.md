@@ -58,6 +58,14 @@ runtime path was forked.
 > `--yolo`. See **[Tool & folder authorization (code mode)](architecture/terminal-app.md#tool--folder-authorization-code-mode)**
 > and `pkg/agent/tool_authorization.go`.
 
+## Mode restrictions versus local Code consent
+
+Plan/Graph-Plan/Ask no-write gates are hard restrictions, not consent prompts: neither a plan lease nor broad session folders nor CLI auto-approval makes writes valid in these modes. Ordinary plan approval selects cadence, not full access. The Code card's **p** selector defaults to **Current approvals**; explicit **Full access for this plan** warns that tools run on the host without tool/folder prompts. It preserves required questions, disabled-tool policy, credentials and phase-review pauses; it is not OS privilege or sandbox isolation.
+
+The lease is invocation/session/plan-bound and process-local. Continuation, retry, correction, Normal-mode revision and same-process compact/resume retain it. Completion requires passing phase evidence **and Results**, then the plan is historical and unrelated Normal work has no old execution directives or delegate phase requirement. Replacement, fresh Plan-mode revision and revocation retire the lease; restart restores cadence but not consent. Independent grants are not cleared. Failed durable publication changes neither authority nor consent.
+
+Folder menu **3 Always allow any folder for this session** is separate durable folder consent; **4 Deny** follows it. Tool menus retain 3=Deny and legacy three-choice folder requests decode their own list. Broad folder consent is owner-validated, saved before retry, restored after restart/compaction and revoked through Code-only **Ctrl+P / /permissions** independently of tools. Rollback preserves latest consent rather than replaying old grants. Different sessions do not inherit it. Host authentication/OS failures remain possible. Remote Chat/Studio/Bot authorization is unchanged. See [permission lifetimes](architecture/terminal-app.md#code-permission-lifetimes-and-controls).
+
 ## Flag plumbing (end to end)
 
 ```
@@ -140,19 +148,16 @@ plan to a **per-session `PLAN.md`**.
   `<sessions-dir>/<app>/<userID>/<sessionID>.PLAN.md` (same folder as `<sessionID>.jsonl`).
   Resolved in `localAgentBackend.planFilePath` (`pkg/launcher/tui_code.go`) and set on the
   `ChatAgent` each turn via `SetPlanFilePath`.
-- **When:** written the moment `announce_plan` fires (`ChatAgent.SetActivePlan`), and rewritten
-  on **every phase transition** via a `PlanState.onChange` hook — no extra LLM round-trips.
-  `announce_plan` is in `agent.SafeTools`, so it is allowed in Plan mode (it performs no arbitrary
-  mutation) — the model records its finalized plan while planning, and persistence is a side effect
-  of a permitted tool rather than a new hole in the gate.
-- **Progress tracking (two mechanisms):**
-  - **Delegated work** — phases progress automatically from `delegate_tasks` sub-task lifecycle
-    events (`PlanState.StartStep` / `CompleteTask`), matched via each task's `plan_step`.
-  - **Main-thread work** — the model calls the **`update_plan`** tool (`{step, status}`) to mark a
-    phase `running` / `complete` / `failed` as it works. This drives `PlanState.SetStepStatus`,
-    which rewrites `PLAN.md` and marks the plan **manually tracked**. `update_plan` is also in
-    `agent.SafeTools` (allowed in Plan mode). This closes the previous gap where inline, non-
-    delegated sequential work never advanced the checklist.
+- **When:** initial announcement and committed runtime changes persist the session plan.
+  `PlanRuntime` uses `AtomicPlanSnapshotFile` for same-directory temporary-file replacement;
+  failed persistence does not publish a new runtime snapshot. Legacy `PlanState.onChange`
+  remains the progression adapter. Initial recording is permitted in Plan mode; Normal-mode
+  revisions use the separate definition-only protocol below.
+- **Progress tracking:** `delegate_tasks` lifecycle events track activity by `plan_step`, but
+  sub-agent finish does not complete a phase. Main-thread `{step,status}` calls to `update_plan`
+  (optional `action: "status"`) retain their interface. The session runtime verifies completion
+  and commits status/evidence. Plan-mode allow-list membership is not permission to revise:
+  `action: "revise"` is Normal-only.
 - **No fabricated completion:** `CompleteAll` is a no-op. End-of-turn no longer bulk-marks phases
   complete. A phase becomes `complete` only when `update_plan` runs its `verify` command and that
   command exits 0. Sub-agent `task_complete` leaves the phase `running`. Execution mode ends only
@@ -178,15 +183,54 @@ plan to a **per-session `PLAN.md`**.
   context summary (capped at 32KiB). Approved execution turns also inline the same document in
   the per-turn system context and restore per-phase status from disk (`RestoreApprovedPlan`
   preserves `[~]`/`[x]`). The compactor stays domain-agnostic — it reads the file as opaque text.
-- **Scope:** code mode only. Platform/Studio has no local session filesystem for this, so the
-  prompt guidance (`SystemPromptBuilder.PlanFilePersistence`) is enabled only when
-  `!PlatformMode`.
+- **Scope:** the PLAN.md sidecar and `PlanFilePersistence` prompt guidance are code-mode only.
+  Platform/Studio persists the complete `PlanSnapshot` in session state under
+  `astonish_plan_snapshot`, with state-delta events and accepted-result replay for legacy history.
+  Restore retains accepted status; absent legacy status defaults to pending. Neither model
+  arguments nor prose/turn-end imply approval, completion or evidence.
 - **Cleanup on delete:** the sidecar is removed when its session is deleted, so plan files never
   outlive their session on disk. `localAgentBackend.DeleteSession` (`pkg/launcher/tui_code.go`)
   removes the parent and any child-session sidecars via `removePlanFile`, and the CLI
   (`astonish sessions delete` / `sessions clear` in `cmd/astonish/sessions.go`) removes them via
   the shared `removeSessionFiles` helper (`sessionSidecarSuffixes = {".jsonl", ".PLAN.md"}`).
   All removals are best-effort — a missing file is not an error.
+
+## Normal-mode revisions are not initial planning
+
+`announce_plan` remains Plan-only. Normal mode refines an existing plan through
+`update_plan({action: "revise", revision: {plan_id, base_revision, reason, steps, ...}})`.
+The replacement steps are definition-only; optional goal/document live inside `revision`,
+and step/status cannot accompany it. The old `{step,status}` operation is preserved.
+Plan/Graph-Plan allow definition-only revisions, including via deferred tools and in every graph phase. Ask and bot contexts still cannot revise. Plan/Graph-Plan status changes and `announce_completion` return `blocked_plan_execution`; they cannot run verifiers, start phases, or grant execution approval. Users can request a revision without switching out of Plan mode. A changed planning definition withdraws execution approval atomically and is presented again with the normal plan approval choices; the local turn stops there. Normal-mode revisions remain immediate and quiet. No-op and failed revisions do not open a new approval.
+
+**All valid Normal-mode revisions apply immediately**, including changes to goal/document,
+phase membership/order, files/kinds, outcomes, verify kind and parallel groups. Identical
+revisions are noops. `requires_approval` is deprecated and ignored, even when true. There is
+no revision approval UI or approve/reject/request-changes decision. Initial Plan approval,
+execution consent and tool/folder authorization are unchanged. Lexical path checks do not
+resolve symlinks or authorize filesystem access; revising a definition executes no commands.
+
+Affected active phases/delegates/verifiers return `plan_busy`; mismatched plan/base returns
+`stale_revision`. Completed plans cannot be revised. Legacy persisted `pending_revision`
+candidates are retired on restore, never silently applied and never a reason to await a
+user decision. The current card remains in place and the next ordinary chat turn proceeds.
+
+Session-bound `PlanRuntime` snapshots use stable `plan_id`, definition `revision`, and runtime
+`sequence`. Scoped callbacks (including an explicit nil binding) never select another session's
+global plan. Persistence precedes publication; failure leaves authority unchanged. Studio
+verification requires the authenticated session sandbox transport with no host fallback.
+Implementation edits invalidate affected phase evidence and later dependent waves; independent
+same-wave siblings survive. Structure edits invalidate from the first changed position and
+changed goal/document invalidates all. Description/summary-only changes preserve evidence.
+This is conservative ordered-wave invalidation, not inferred source dependencies. Stale in-flight
+verify results cannot complete a changed phase.
+
+Completion requires initial execution approval, no unfinished verification/delegates, and every
+phase complete with a verify command and **current passing evidence**. `announce_completion`
+records Results, never new commands. Old complete checkboxes alone do not satisfy it.
+See [full protocol](architecture/code-agent-investigation.md#normal-mode-plan-revision),
+[terminal direct revisions](architecture/terminal-app.md#direct-revisions-normal-mode), and
+[Studio snapshot rendering](architecture/chat-rendering-pipeline.md#plan-snapshots-and-direct-normal-mode-revisions).
 
 ## Scope note
 

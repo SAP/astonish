@@ -330,6 +330,10 @@ func (b *K8sBackend) buildPodManifest(spec sandbox.SessionSpec) (*corev1.Pod, er
 		},
 	}
 
+	if err := b.validateBotHome(spec.BotHome); err != nil {
+		return nil, err
+	}
+	b.applyBotHome(pod, spec.BotHome)
 	b.applyPodSecurityHardening(pod)
 	return pod, nil
 }
@@ -415,7 +419,7 @@ func buildResourceRequirements(lim sandbox.ResourceLimits) corev1.ResourceRequir
 // it via the API server, and records the session in the registry.
 // Idempotent on SessionID: a second call with the same ID returns the
 // existing session without recreation.
-func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec) (*sandbox.Session, error) {
+func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec) (result *sandbox.Session, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -426,17 +430,40 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 		return nil, errors.New("CreateSession: SessionSpec.SessionID is required")
 	}
 
+	// Retained bindings are immutable across idempotent creates and recovery.
+	home, homeErr := b.sessionBotHome(ctx, spec.SessionID, spec.BotHome, false)
+	if homeErr != nil {
+		return nil, homeErr
+	}
+	spec.BotHome = home
+	token, fenceErr := b.reserveBotHome(ctx, home, podNameForSession(spec.SessionID))
+	if fenceErr != nil {
+		return nil, fenceErr
+	}
+	defer func() {
+		resultErr = b.finishSessionHomeReservation(ctx, home, token, resultErr)
+		if resultErr != nil {
+			result = nil
+		}
+	}()
+
 	// Idempotency: if the registry row exists and the pod still exists,
 	// return it. If the row represents an evicted session, preserve the row
 	// and resume instead of deleting the metadata that points to persisted
 	// upper data.
 	if existing, err := b.sessions.GetSession(spec.SessionID); err == nil && existing != nil {
+		if home != nil && existing.PodName != "" && existing.PodName != podNameForSession(spec.SessionID) {
+			return nil, fmt.Errorf("sandbox/k8s: retained session pod name conflict")
+		}
 		podName := existing.PodName
 		if podName == "" {
 			podName = podNameForSession(spec.SessionID)
 		}
-		_, getErr := b.client.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
+		pod, getErr := b.client.CoreV1().Pods(b.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
 		if getErr == nil {
+			if err := b.validatePodBotHome(pod, spec.BotHome); err != nil {
+				return nil, err
+			}
 			return sessionFromStore(existing, spec.Type), nil
 		}
 		if !apierrors.IsNotFound(getErr) {
@@ -455,13 +482,40 @@ func (b *K8sBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec
 	return b.createSessionPod(ctx, spec, nil)
 }
 
+// sessionPodPreflightError is proof that manifest construction rejected this
+// invocation before any pod Create call. Do not wrap API or post-create errors
+// with this type, even when the API reports cancellation or pod NotFound.
+type sessionPodPreflightError struct{ err error }
+
+func (e *sessionPodPreflightError) Error() string {
+	return "CreateSession: build manifest: " + e.err.Error()
+}
+func (e *sessionPodPreflightError) Unwrap() error { return e.err }
+
+func (b *K8sBackend) finishSessionHomeReservation(ctx context.Context, home *sandbox.BotHomeBinding, token string, resultErr error) error {
+	if resultErr == nil {
+		return b.settleBotHome(ctx, home, token)
+	}
+	var preflight *sessionPodPreflightError
+	if home != nil && errors.As(resultErr, &preflight) {
+		// The request may have been canceled during local validation. Withdrawal
+		// is safe only because the typed error proves no create was submitted.
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := b.cancelUnsubmittedBotHome(cleanup, home, token); err != nil {
+			return errors.Join(resultErr, fmt.Errorf("cancel unsubmitted home reservation: %w", err))
+		}
+	}
+	return resultErr
+}
+
 func (b *K8sBackend) createSessionPod(ctx context.Context, spec sandbox.SessionSpec, existing *store.SandboxSession) (*sandbox.Session, error) {
 	if spec.TemplateID == "" {
 		spec.TemplateID = sandbox.BaseTemplateID
 	}
 	pod, err := b.buildPodManifest(spec)
 	if err != nil {
-		return nil, fmt.Errorf("CreateSession: build manifest: %w", err)
+		return nil, &sessionPodPreflightError{err: err}
 	}
 
 	created, err := b.client.CoreV1().Pods(b.cfg.Namespace).Create(ctx, pod, metav1.CreateOptions{})
@@ -473,6 +527,9 @@ func (b *K8sBackend) createSessionPod(ctx context.Context, spec sandbox.SessionS
 		if err != nil {
 			return nil, fmt.Errorf("CreateSession: fetch existing pod: %w", err)
 		}
+	}
+	if err := b.validatePodBotHome(created, spec.BotHome); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().UTC()
@@ -538,7 +595,7 @@ func (b *K8sBackend) StartSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-func (b *K8sBackend) resumeSessionPod(ctx context.Context, rec *store.SandboxSession, override sandbox.SessionSpec) error {
+func (b *K8sBackend) resumeSessionPod(ctx context.Context, rec *store.SandboxSession, override sandbox.SessionSpec) (resultErr error) {
 	if rec == nil {
 		return errors.New("session record is required")
 	}
@@ -553,13 +610,36 @@ func (b *K8sBackend) resumeSessionPod(ctx context.Context, rec *store.SandboxSes
 		return fmt.Errorf("session ID mismatch: registry has %q, requested %q", rec.SessionID, override.SessionID)
 	}
 
+	home, err := b.sessionBotHome(ctx, override.SessionID, override.BotHome, true)
+	if err != nil {
+		return err
+	}
+	override.BotHome = home
+	if home != nil && rec.PodName != "" && rec.PodName != podNameForSession(rec.SessionID) {
+		return fmt.Errorf("sandbox/k8s: retained session pod name conflict")
+	}
+	token, fenceErr := b.reserveBotHome(ctx, home, podNameForSession(override.SessionID))
+	if fenceErr != nil {
+		return fenceErr
+	}
+	defer func() {
+		resultErr = b.finishSessionHomeReservation(ctx, home, token, resultErr)
+	}()
 	state, err := b.SessionState(ctx, override.SessionID)
 	if err != nil {
 		return fmt.Errorf("query state: %w", err)
 	}
 	switch state {
 	case sandbox.SessionStateRunning, sandbox.SessionStateCreating, sandbox.SessionStateResuming:
-		return nil
+		name := rec.PodName
+		if name == "" {
+			name = podNameForSession(override.SessionID)
+		}
+		pod, err := b.client.CoreV1().Pods(b.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		return b.validatePodBotHome(pod, home)
 	case sandbox.SessionStateStopped:
 		name := rec.PodName
 		if name == "" {
@@ -767,9 +847,19 @@ func (b *K8sBackend) DestroySession(ctx context.Context, sessionID string) error
 	if rec != nil && rec.PodName != "" {
 		name = rec.PodName
 	}
+	home, homeErr := b.sessionBotHome(ctx, sessionID, nil, true)
+	if homeErr != nil {
+		return homeErr
+	}
+	if home != nil && name != podNameForSession(sessionID) {
+		return fmt.Errorf("sandbox/k8s: retained session pod name conflict")
+	}
 	err = b.client.CoreV1().Pods(b.cfg.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("DestroySession: delete pod: %w", err)
+	}
+	if err := b.releaseBotHomePod(ctx, home, name); err != nil {
+		return fmt.Errorf("DestroySession: release home: %w", err)
 	}
 
 	// Reclaim evicted upper-layer tarball from the uppers PVC.
@@ -781,6 +871,11 @@ func (b *K8sBackend) DestroySession(ctx context.Context, sessionID string) error
 		}
 	}
 
+	// Only session metadata is removed. The retained claim and scoped data
+	// are never touched by session destruction or upper-layer GC.
+	if err := b.client.CoreV1().ConfigMaps(b.cfg.Namespace).Delete(ctx, botHomeSessionName(sessionID), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("DestroySession: delete home metadata: %w", err)
+	}
 	if err := b.sessions.Remove(sessionID); err != nil {
 		return fmt.Errorf("DestroySession: remove from registry: %w", err)
 	}

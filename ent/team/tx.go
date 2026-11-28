@@ -18,6 +18,36 @@ type Tx struct {
 	App *AppClient
 	// AppState is the client for interacting with the AppState builders.
 	AppState *AppStateClient
+	// Bot is the client for interacting with the Bot builders.
+	Bot *BotClient
+	// BotApproval is the client for interacting with the BotApproval builders.
+	BotApproval *BotApprovalClient
+	// BotGoal is the client for interacting with the BotGoal builders.
+	BotGoal *BotGoalClient
+	// BotIntake is the client for interacting with the BotIntake builders.
+	BotIntake *BotIntakeClient
+	// BotKnowledgeExtraction is the client for interacting with the BotKnowledgeExtraction builders.
+	BotKnowledgeExtraction *BotKnowledgeExtractionClient
+	// BotKnowledgeFileHead is the client for interacting with the BotKnowledgeFileHead builders.
+	BotKnowledgeFileHead *BotKnowledgeFileHeadClient
+	// BotOutbox is the client for interacting with the BotOutbox builders.
+	BotOutbox *BotOutboxClient
+	// BotRun is the client for interacting with the BotRun builders.
+	BotRun *BotRunClient
+	// BotSkill is the client for interacting with the BotSkill builders.
+	BotSkill *BotSkillClient
+	// BotSkillRevision is the client for interacting with the BotSkillRevision builders.
+	BotSkillRevision *BotSkillRevisionClient
+	// BotTask is the client for interacting with the BotTask builders.
+	BotTask *BotTaskClient
+	// BotTaskRevision is the client for interacting with the BotTaskRevision builders.
+	BotTaskRevision *BotTaskRevisionClient
+	// BotTemplate is the client for interacting with the BotTemplate builders.
+	BotTemplate *BotTemplateClient
+	// BotTrackedItem is the client for interacting with the BotTrackedItem builders.
+	BotTrackedItem *BotTrackedItemClient
+	// BotVersion is the client for interacting with the BotVersion builders.
+	BotVersion *BotVersionClient
 	// CacheDiagnostic is the client for interacting with the CacheDiagnostic builders.
 	CacheDiagnostic *CacheDiagnosticClient
 	// ChatSessionEvent is the client for interacting with the ChatSessionEvent builders.
@@ -206,6 +236,21 @@ func (tx *Tx) init() {
 	tx.A2aAgent = NewA2aAgentClient(tx.config)
 	tx.App = NewAppClient(tx.config)
 	tx.AppState = NewAppStateClient(tx.config)
+	tx.Bot = NewBotClient(tx.config)
+	tx.BotApproval = NewBotApprovalClient(tx.config)
+	tx.BotGoal = NewBotGoalClient(tx.config)
+	tx.BotIntake = NewBotIntakeClient(tx.config)
+	tx.BotKnowledgeExtraction = NewBotKnowledgeExtractionClient(tx.config)
+	tx.BotKnowledgeFileHead = NewBotKnowledgeFileHeadClient(tx.config)
+	tx.BotOutbox = NewBotOutboxClient(tx.config)
+	tx.BotRun = NewBotRunClient(tx.config)
+	tx.BotSkill = NewBotSkillClient(tx.config)
+	tx.BotSkillRevision = NewBotSkillRevisionClient(tx.config)
+	tx.BotTask = NewBotTaskClient(tx.config)
+	tx.BotTaskRevision = NewBotTaskRevisionClient(tx.config)
+	tx.BotTemplate = NewBotTemplateClient(tx.config)
+	tx.BotTrackedItem = NewBotTrackedItemClient(tx.config)
+	tx.BotVersion = NewBotVersionClient(tx.config)
 	tx.CacheDiagnostic = NewCacheDiagnosticClient(tx.config)
 	tx.ChatSessionEvent = NewChatSessionEventClient(tx.config)
 	tx.Credential = NewCredentialClient(tx.config)

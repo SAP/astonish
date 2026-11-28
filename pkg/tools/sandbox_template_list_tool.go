@@ -33,15 +33,10 @@ type ListSandboxTemplatesResult struct {
 	Message   string         `json:"message"`
 }
 
-// listSandboxTemplatesDeps holds the injected template registry.
-var listSandboxTemplatesDeps *sandbox.TemplateRegistry
-
 // NewListSandboxTemplatesTool creates the list_sandbox_templates tool.
 // This tool runs on the HOST (not inside the container) so it can access the
 // template registry. It is intentionally NOT listed in sandbox.containerTools.
 func NewListSandboxTemplatesTool(templateRegistry *sandbox.TemplateRegistry) (tool.Tool, error) {
-	listSandboxTemplatesDeps = templateRegistry
-
 	t, err := functiontool.New(functiontool.Config{
 		Name: "list_sandbox_templates",
 		Description: "List available sandbox templates. Returns all saved templates with their " +
@@ -49,7 +44,9 @@ func NewListSandboxTemplatesTool(templateRegistry *sandbox.TemplateRegistry) (to
 			"name to get details for a specific template. Use this tool instead of " +
 			"shell_command with 'astonish sandbox template list' — shell_command runs inside " +
 			"the container and cannot see host templates.",
-	}, listSandboxTemplates)
+	}, func(ctx tool.Context, args ListSandboxTemplatesArgs) (ListSandboxTemplatesResult, error) {
+		return listSandboxTemplates(ctx, args, templateRegistry)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -57,15 +54,13 @@ func NewListSandboxTemplatesTool(templateRegistry *sandbox.TemplateRegistry) (to
 	return t, nil
 }
 
-func listSandboxTemplates(_ tool.Context, args ListSandboxTemplatesArgs) (ListSandboxTemplatesResult, error) {
-	if listSandboxTemplatesDeps == nil {
+func listSandboxTemplates(_ tool.Context, args ListSandboxTemplatesArgs, registry *sandbox.TemplateRegistry) (ListSandboxTemplatesResult, error) {
+	if registry == nil {
 		return ListSandboxTemplatesResult{
 			Status:  "error",
 			Message: "Sandbox template system is not initialized. Ensure sandbox mode is enabled.",
 		}, nil
 	}
-
-	registry := listSandboxTemplatesDeps
 
 	// Reload from disk to get latest state
 	if err := registry.Load(); err != nil {

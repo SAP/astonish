@@ -14,8 +14,13 @@ import (
 	"github.com/SAP/astonish/pkg/backup"
 )
 
+type backupSQLQuery interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 type logicalDB struct {
-	DB          *sql.DB
+	DB          backupSQLQuery
 	Dialect     Dialect
 	Schema      string
 	ArchiveDir  string
@@ -25,6 +30,20 @@ type logicalDB struct {
 }
 
 func exportLogicalDBRows(ctx context.Context, writer *backup.Writer, manifest *backup.Manifest, dbInfo logicalDB, opts PlatformBackupExportOptions) error {
+	if opts.WorkspaceBackend != nil && (dbInfo.Scope.Kind == "personal" || dbInfo.Scope.Kind == "team") {
+		if opts.WorkspaceFence == nil {
+			return fmt.Errorf("workspace backup requires scoped writer fence")
+		}
+		plain := opts
+		plain.WorkspaceBackend = nil
+		plain.WorkspaceFence = nil
+		return opts.WorkspaceFence(ctx, dbInfo.Scope, func() error {
+			if err := exportLogicalDBRows(ctx, writer, manifest, dbInfo, plain); err != nil {
+				return err
+			}
+			return exportBotWorkspaceSnapshots(ctx, writer, manifest, dbInfo, opts)
+		})
+	}
 	if dbInfo.Dialect == DialectSQLite {
 		if _, err := dbInfo.DB.ExecContext(ctx, "PRAGMA query_only=ON"); err != nil {
 			return fmt.Errorf("set %s query_only: %w", dbInfo.Description, err)
@@ -64,10 +83,18 @@ func exportLogicalDBRows(ctx context.Context, writer *backup.Writer, manifest *b
 			Redacted: redacted,
 		})
 	}
+	if opts.fileInventory != nil {
+		if err := opts.fileInventory.finish(); err != nil {
+			return err
+		}
+		if opts.fileInventory.inventory != nil {
+			return exportFileFirstScope(ctx, writer, manifest, dbInfo, opts)
+		}
+	}
 	return nil
 }
 
-func userTables(ctx context.Context, db *sql.DB, dialect Dialect, schema string) ([]string, error) {
+func userTables(ctx context.Context, db backupSQLQuery, dialect Dialect, schema string) ([]string, error) {
 	switch dialect {
 	case DialectSQLite:
 		return sqliteUserTables(ctx, db)
@@ -105,7 +132,7 @@ func shouldSkipLogicalTable(table string) bool {
 	return table == "schema_migrations" || table == "atlas_schema_revisions"
 }
 
-func exportLogicalTable(ctx context.Context, db *sql.DB, dialect Dialect, schema, table string, redactSecrets bool) ([]byte, int64, bool, error) {
+func exportLogicalTable(ctx context.Context, db backupSQLQuery, dialect Dialect, schema, table string, redactSecrets bool) ([]byte, int64, bool, error) {
 	columns, err := tableColumns(ctx, db, dialect, schema, table)
 	if err != nil {
 		return nil, 0, false, err
@@ -148,6 +175,9 @@ func exportLogicalTable(ctx context.Context, db *sql.DB, dialect Dialect, schema
 			}
 			record[col] = value
 		}
+		if err := validateBotExportRow(ctx, table, record); err != nil {
+			return nil, 0, false, err
+		}
 		id := backupRecordID(record)
 		if err := writer.Write(id, record); err != nil {
 			return nil, 0, false, err
@@ -159,7 +189,7 @@ func exportLogicalTable(ctx context.Context, db *sql.DB, dialect Dialect, schema
 	return buf.Bytes(), writer.Records(), redactedAny, nil
 }
 
-func tableColumns(ctx context.Context, db *sql.DB, dialect Dialect, schema, table string) ([]string, error) {
+func tableColumns(ctx context.Context, db backupSQLQuery, dialect Dialect, schema, table string) ([]string, error) {
 	switch dialect {
 	case DialectSQLite:
 		return sqliteTableColumns(ctx, db, table)

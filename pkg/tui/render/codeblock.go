@@ -4,17 +4,18 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
-	"charm.land/lipgloss/v2"
 )
 
 // CodeBlock renders a fenced code body with optional language, line numbers,
 // and syntax highlighting. If streaming is true, a small indicator is shown.
 func CodeBlock(body, lang string, width int, st Styles, streaming bool) string {
+	st = st.Effective()
 	if width < 20 {
 		width = 20
 	}
@@ -34,7 +35,7 @@ func CodeBlock(body, lang string, width int, st Styles, streaming bool) string {
 	}
 
 	// Highlight whole block, then split — preserves token colors across lines.
-	highlighted := highlightCode(body, lang, st.NoColor)
+	highlighted := highlightCode(body, lang, st.NoColor, st.SyntaxStyle)
 	hlLines := splitKeepEmpty(highlighted)
 	// Align lengths if highlighter dropped a trailing newline.
 	for len(hlLines) < len(lines) {
@@ -79,7 +80,7 @@ func CodeBlock(body, lang string, width int, st Styles, streaming bool) string {
 	return b.String()
 }
 
-func highlightCode(src, lang string, noColor bool) string {
+func highlightCode(src, lang string, noColor bool, syntaxStyle *chroma.Style) string {
 	if noColor || strings.TrimSpace(src) == "" {
 		return src
 	}
@@ -91,7 +92,10 @@ func highlightCode(src, lang string, noColor bool) string {
 		lexer = lexers.Fallback
 	}
 	lexer = chroma.Coalesce(lexer)
-	style := styles.Get("monokai")
+	style := syntaxStyle
+	if style == nil {
+		style = styles.Get("monokai")
+	}
 	if style == nil {
 		style = styles.Fallback
 	}

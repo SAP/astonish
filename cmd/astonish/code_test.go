@@ -1,8 +1,25 @@
 package astonish
 
 import (
+	"github.com/SAP/astonish/pkg/tui"
+	"io"
+	"os"
+	"strings"
 	"testing"
 )
+
+func TestParseCodeFlagsWorkspace(t *testing.T) {
+	for _, args := range [][]string{{"--workspace", "independent"}, {"--workspace", "ask", "--workspace-copy", "current-work", "--workspace-base", "HEAD"}, {"--workspace", "current"}} {
+		if _, e := parseCodeFlags(args); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for _, args := range [][]string{{"--workspace", "bad"}, {"--workspace-base", "HEAD"}, {"--workspace-copy", "committed"}, {"--workspace", "independent", "--workspace-copy", "bad"}} {
+		if _, e := parseCodeFlags(args); e == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
 
 func TestParseCodeFlags_Defaults(t *testing.T) {
 	flags, err := parseCodeFlags(nil)
@@ -14,6 +31,21 @@ func TestParseCodeFlags_Defaults(t *testing.T) {
 	}
 	if flags.AutoApprove || flags.Debug {
 		t.Errorf("expected false bool defaults, got %+v", flags)
+	}
+}
+
+func TestParseCodeFlags_Theme(t *testing.T) {
+	for _, name := range []string{"", "blue-gray", "dark-orange", "default"} {
+		flags, err := parseCodeFlags([]string{"--theme", name})
+		if err != nil || flags.ThemeID != tui.CodeThemeID(name) {
+			t.Fatalf("theme %q: %+v %v", name, flags, err)
+		}
+	}
+	for _, name := range []string{"unknown"} {
+		_, err := parseCodeFlags([]string{"--theme", name})
+		if err == nil || !strings.Contains(err.Error(), "available: blue-gray") {
+			t.Fatalf("invalid theme %q: %v", name, err)
+		}
 	}
 }
 
@@ -78,6 +110,25 @@ func TestParseCodeFlags_DirAndResume(t *testing.T) {
 }
 
 func TestHandleCodeCommand_Help(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old; r.Close(); w.Close() }()
+	if err := handleCodeCommand([]string{"--help"}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "--theme") || !strings.Contains(string(out), "astonish code --theme blue-gray") || strings.Contains(string(out), "orange=code") {
+		t.Fatalf("theme help missing or obsolete: %s", out)
+	}
+	os.Stdout = old
 	if err := handleCodeCommand([]string{"--help"}); err != nil {
 		t.Fatalf("--help should succeed: %v", err)
 	}

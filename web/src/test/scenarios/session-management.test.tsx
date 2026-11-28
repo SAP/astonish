@@ -84,10 +84,10 @@ describe('Session Management Scenarios', () => {
         scenarioEvents: simpleQa.events as FixtureEvent[],
       })
 
-      // Initially, "Conversations" header should be visible
+      // Initially, both sidebar section headings should be visible.
       await waitFor(() => {
-        const text = result.container.textContent || ''
-        expect(text).toContain('Conversations')
+        expect(screen.getByText('Bots', { exact: true })).toBeVisible()
+        expect(screen.getByText('Chats', { exact: true })).toBeVisible()
       }, { timeout: 10000 })
 
       // Find and click the hide sidebar button (title="Hide sidebar")
@@ -95,10 +95,20 @@ describe('Session Management Scenarios', () => {
       const user = userEvent.setup()
       await user.click(collapseButton)
 
-      // "Conversations" text should disappear after collapse
+      // Both headings disappear and only the expand control remains.
       await waitFor(() => {
-        const text = result.container.textContent || ''
-        expect(text).not.toContain('Conversations')
+        expect(screen.queryByText('Bots', { exact: true })).not.toBeInTheDocument()
+        expect(screen.queryByText('Chats', { exact: true })).not.toBeInTheDocument()
+        expect(screen.queryByTitle('Hide sidebar')).not.toBeInTheDocument()
+        expect(screen.getByTitle('Show sidebar')).toBeVisible()
+      }, { timeout: 10000 })
+
+      await user.click(screen.getByTitle('Show sidebar'))
+      await waitFor(() => {
+        expect(screen.getByText('Bots', { exact: true })).toBeVisible()
+        expect(screen.getByText('Chats', { exact: true })).toBeVisible()
+        expect(screen.getByTitle('Hide sidebar')).toBeVisible()
+        expect(screen.queryByTitle('Show sidebar')).not.toBeInTheDocument()
       }, { timeout: 10000 })
     })
   })

@@ -10,6 +10,8 @@ import {
   fetchSessionHistory,
   deleteSession,
   connectChat,
+  connectChatStream,
+  readSSEStream,
   fetchCacheDiagnostics,
   fetchKnowledgeDebug,
   stopChat,
@@ -29,6 +31,69 @@ describe('studioChat API', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch
+  })
+
+  describe('shared SSE framing', () => {
+    it('cancels blocked reads and releases the stream without emitting late frames', async () => {
+      const cancel = vi.fn(), emit = vi.fn(), controller = new AbortController()
+      const stream = new ReadableStream<Uint8Array>({ cancel })
+      const result = readSSEStream(stream, controller.signal, emit)
+      controller.abort()
+      await result
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(emit).not.toHaveBeenCalled()
+      expect(stream.locked).toBe(false)
+    })
+    it('drops unterminated EOF data and propagates consumer failure after cleanup', async () => {
+      const emit = vi.fn()
+      await readSSEStream(new Response('data: {"text":"incomplete"}\n').body!, new AbortController().signal, emit)
+      expect(emit).not.toHaveBeenCalled()
+      const stream = new Response('data: {}\n\n').body!
+      await expect(readSSEStream(stream, new AbortController().signal, () => { throw new Error('consumer failed') })).rejects.toThrow('consumer failed')
+      expect(stream.locked).toBe(false)
+    })
+    it.each([connectChat, connectChatStream])('continues after malformed JSON without exposing payload bytes', async connect => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        globalThis.fetch = vi.fn().mockResolvedValue(new Response('data: private-invalid\n\nevent: text\ndata: {"text":"valid"}\n\n'))
+        const events = vi.fn()
+        await new Promise<void>((resolve, reject) => connect({ sessionId: 's', onEvent: events, onDone: resolve, onError: reject }))
+        expect(events.mock.calls).toEqual([['text', { text: 'valid' }]])
+        expect(spy.mock.calls.flat().join(' ')).not.toContain('private-invalid')
+      } finally { spy.mockRestore() }
+    })
+    it.each([connectChat, connectChatStream])('handles byte-split UTF8, CRLF, multiline data and optional spaces', async connect => {
+      const bytes = new TextEncoder().encode(': heartbeat\r\nevent:text\r\ndata:{"text":\r\ndata: "雪🌍"}\r\n\r\nevent: done\ndata: {}\n\n')
+      const stream = new ReadableStream<Uint8Array>({ start(c) {
+        for (const byte of bytes) c.enqueue(new Uint8Array([byte]))
+        c.close()
+      } })
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(stream))
+      const events = vi.fn()
+      await new Promise<void>((resolve, reject) => connect({ sessionId: 's', onEvent: events, onDone: resolve, onError: reject }))
+      expect(events.mock.calls).toEqual([['text', { text: '雪🌍' }], ['done', {}]])
+      expect(stream.locked).toBe(false)
+    })
+  })
+
+  describe('trusted plan actions', () => {
+    it('does not send obsolete revision decisions from legacy callers', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response('', { status: 200 }))
+      const legacy = { sessionId: 's', message: 'continue', planRevisionDecision: { decision: 'approve' } }
+      await new Promise<void>((resolve, reject) => connectChat({ ...legacy, onEvent: vi.fn(), onDone: resolve, onError: reject }))
+      const body = JSON.parse(vi.mocked(globalThis.fetch).mock.calls[0][1]!.body as string)
+      expect(body).toEqual({ sessionId: 's', message: 'continue', autoApprove: false })
+    })
+    it('posts initial approval separately from model and tool approval', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response('', { status: 200 }))
+      await new Promise<void>((resolve, reject) => connectChat({ sessionId: 's', approvedPlanExecution: true, onEvent: vi.fn(), onDone: resolve, onError: reject }))
+      const body = JSON.parse(vi.mocked(globalThis.fetch).mock.calls[0][1]!.body as string)
+      expect(body).toEqual({ sessionId: 's', message: '', autoApprove: false, approvedPlanExecution: true })
+    })
+    it('exposes HTTP initial approval failures to the caller for retry', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response('stale_revision', { status: 409 }))
+      await expect(new Promise<void>((resolve, reject) => connectChat({ sessionId: 's', approvedPlanExecution: true, onEvent: vi.fn(), onDone: resolve, onError: reject }))).rejects.toThrow('stale_revision')
+    })
   })
 
   describe('subtask details', () => {

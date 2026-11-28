@@ -95,6 +95,10 @@ func RunBackendContract(t *testing.T, factory BackendContractFactory) {
 		}
 
 		_, err := b.CreateSession(ctx, SessionSpec{SessionID: "s", TemplateID: "t"})
+		if homes, ok := b.(BotHomeBackend); ok {
+			_, homeErr := homes.EnsureBotHome(ctx, BotHomeScope{UserID: "u", BotID: "b"})
+			check("EnsureBotHome", homeErr)
+		}
 		check("CreateSession", err)
 		check("StartSession", b.StartSession(ctx, "s"))
 		check("StopSession", b.StopSession(ctx, "s"))

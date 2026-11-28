@@ -4,7 +4,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
+import BotSidebar from '../bots/BotSidebar'
 import type { ChatSession } from '../../api/studioChat'
+import type { BotScope } from '../../api/bots'
+import { formatTimeAgo, sidebarHeaderClass, sidebarHeadingClass, sidebarActionClass, sidebarRowClass, sidebarRowPaddingClass, sidebarTitleClass, sidebarMetadataClass, sidebarSeparatorClass, sidebarTrashClass } from './sidebarPresentation'
 
 // Extended ChatSession with optional fleet fields
 interface SidebarSession extends ChatSession {
@@ -15,6 +18,8 @@ interface SidebarSession extends ChatSession {
 interface SessionSidebarProps {
   sessions: SidebarSession[]
   activeSessionId: string | null
+  activeBotId?: string
+  activeBotScope?: BotScope
   sessionFilter: string
   onSessionFilterChange: (filter: string) => void
   isLoadingSessions: boolean
@@ -27,23 +32,11 @@ interface SessionSidebarProps {
   theme: string
 }
 
-function formatTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
-  const mins = Math.floor(diffMs / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return date.toLocaleDateString()
-}
-
 export default function SessionSidebar({
   sessions,
   activeSessionId,
+  activeBotId,
+  activeBotScope,
   sessionFilter,
   onSessionFilterChange,
   isLoadingSessions,
@@ -60,26 +53,21 @@ export default function SessionSidebar({
         <Button type="button" variant="ghost" size="icon" onClick={onToggleSidebar} title="Show sidebar" aria-label="Show sidebar">
           <ChevronRight />
         </Button>
-        <Button type="button" variant="ghost" size="icon" onClick={onNewSession} title="New conversation" aria-label="New conversation">
-          <Plus />
-        </Button>
       </div>
     )
   }
 
   return (
     <div className="flex w-[260px] min-w-[260px] flex-shrink-0 flex-col border-r border-border bg-[color:var(--sidebar-background)]">
-      <div className="flex items-center justify-between px-[18px] pt-4 pb-3">
-        <span className="text-[13px] font-semibold text-foreground">Conversations</span>
+      <BotSidebar activeId={activeBotId} activeScope={activeBotScope} onToggleSidebar={onToggleSidebar} />
+      <div className={sidebarHeaderClass}>
+        <span className={sidebarHeadingClass}>Chats</span>
         <div className="flex items-center gap-0.5">
-          <Button type="button" variant="ghost" size="icon" onClick={onStartFleet} title="Start fleet session" aria-label="Start fleet session" className="size-7 text-muted-foreground">
+          <Button type="button" variant="ghost" size="icon" onClick={onStartFleet} title="Start fleet session" aria-label="Start fleet session" className={sidebarActionClass}>
             <Users className="size-4" />
           </Button>
-          <Button type="button" variant="ghost" size="icon" onClick={onNewSession} title="New conversation" aria-label="New conversation" className="size-7 text-muted-foreground">
+          <Button type="button" variant="ghost" size="icon" onClick={onNewSession} title="New conversation" aria-label="New conversation" className={sidebarActionClass}>
             <Plus className="size-4" />
-          </Button>
-          <Button type="button" variant="ghost" size="icon" onClick={onToggleSidebar} title="Hide sidebar" aria-label="Hide sidebar" className="size-7 text-muted-foreground">
-            <ChevronRight className="size-4 rotate-180" />
           </Button>
         </div>
       </div>
@@ -116,7 +104,7 @@ export default function SessionSidebar({
               type="button"
               onClick={() => onSelectSession(session)}
               className={cn(
-                'group w-full rounded-[var(--radius-md)] px-3 py-2.5 text-left transition-colors',
+                sidebarRowClass, sidebarRowPaddingClass,
                 activeSessionId === session.id
                   ? 'bg-[color:var(--item-active)]'
                   : 'hover:bg-[color:var(--item-hover)]'
@@ -128,14 +116,14 @@ export default function SessionSidebar({
                     {session.fleetKey && (
                       <Users size={12} className="shrink-0 text-primary" />
                     )}
-                    <p className="truncate text-[13px] font-medium text-foreground">
+                    <p className={sidebarTitleClass}>
                       {session.title || 'Untitled'}
                     </p>
                   </div>
-                  <div className="mt-1 flex items-center gap-1.5 text-[11px] text-[color:var(--text-faint)] tabular-nums">
+                  <div className={sidebarMetadataClass}>
                     <Clock size={10} />
                     <span>{formatTimeAgo(session.updatedAt)}</span>
-                    <span className="size-0.5 rounded-full bg-[color:var(--text-faint)] opacity-60" />
+                    <span className={sidebarSeparatorClass} />
                     <span>
                       {session.messageCount} msg{session.messageCount !== 1 ? 's' : ''}
                     </span>
@@ -151,7 +139,7 @@ export default function SessionSidebar({
                       onDeleteSession(e as unknown as React.MouseEvent, session.id)
                     }
                   }}
-                  className="cursor-pointer rounded p-1 opacity-0 transition-all group-hover:opacity-100 hover:bg-destructive/20"
+                  className={sidebarTrashClass}
                   title="Delete conversation"
                   aria-label={`Delete ${session.title || 'conversation'}`}
                 >

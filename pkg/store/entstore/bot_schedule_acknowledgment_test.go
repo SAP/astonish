@@ -1,0 +1,334 @@
+package entstore
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	botdomain "github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
+)
+
+func acceptedScheduleAcknowledgment(t *testing.T, r *botRepository, worker context.Context, q store.BotAuthorizedOperationRequest, op *store.BotOperation, mutate func(*store.BotWorkCandidate)) store.BotReport {
+	t.Helper()
+	pinLegacyWorkFixture(t, r, worker, q.Lease)
+	return completedScheduleAcknowledgment(t, r, worker, q, op, mutate)
+}
+
+func completedScheduleAcknowledgment(t *testing.T, r *botRepository, worker context.Context, q store.BotAuthorizedOperationRequest, op *store.BotOperation, mutate func(*store.BotWorkCandidate)) store.BotReport {
+	t.Helper()
+	payload, _ := json.Marshal(op.Payload)
+	capture := botdomain.ScheduleCapture{OperationID: op.ID, BotID: q.Lease.BotID, SourceRunID: q.Lease.RunID, OwnerID: uuid.MustParse(q.MandateRef.OwnerID), Operation: op.Payload.Operation, ObservedAt: time.Now().UTC()}
+	body, _ := json.Marshal(map[string]any{"operation_id": op.ID, "operation": op.Payload.Operation, "acknowledgment": capture.Acknowledgment(), "payload": json.RawMessage(payload)})
+	work, err := r.LoadWork(worker, q.Lease)
+	if err != nil || work == nil {
+		t.Fatalf("load work: %v", err)
+	}
+	save := func(next *store.BotWorkState) {
+		t.Helper()
+		work, err = r.SaveWork(worker, store.BotWorkUpdate{Lease: q.Lease, ExpectedRevision: work.Revision, State: *next})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := work.Clone()
+	if work.Protocol == store.BotWorkProtocolLegacyAssessment {
+		next.Phase = store.BotWorkProducing
+		sources := []string{"assignment", "charter"}
+		for _, g := range work.Contract.Goals {
+			sources = append(sources, "goal:"+g.ID.String())
+		}
+		next.Criteria = []store.BotWorkCriterion{{ID: "enqueue", SourceIDs: sources, Text: "Queue the requested schedule"}}
+		save(next)
+		next = work.Clone()
+		next.Phase = store.BotWorkCandidateReady
+	} else {
+		next.Phase = store.BotWorkFinished
+		next.AgentWork.Disposition = store.AgentWorkAnswered
+	}
+	next.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: capture.Acknowledgment(), Bodies: map[string]string{"pending-control:0": string(body), "producer-final-draft": capture.Acknowledgment()}, Observations: []store.BotEvidence{capture.Observation()}}
+	response, _ := json.Marshal(map[string]any{"operation_id": op.ID, "status": store.BotOperationPending, "message": capture.Acknowledgment()})
+	next.Candidate.Bodies["tool-response:enqueue"] = string(response)
+	next.Candidate.Bodies["observed-current-controls"] = `{}`
+	rec, _ := r.db.GetBot(worker, q.Lease.BotID)
+	next.Candidate.Observations = append(next.Candidate.Observations, store.BotEvidence{Kind: store.BotEvidenceObservation, ActorID: rec.Bot.OwnerID, ObservedAt: time.Now().UTC(), Source: "bot-assessment-state://" + string(rec.Bot.Scope) + "/" + rec.Bot.ID.String() + "/" + q.Lease.RunID.String()})
+	if mutate != nil {
+		mutate(next.Candidate)
+	}
+	next.Candidate.Digest = next.Candidate.ContentDigest()
+	if work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		acceptEmployeeReviewFixture(next)
+	}
+	save(next)
+	if work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		return store.BotReport{Summary: work.Candidate.Text, Unchanged: work.Candidate.Observations[:1], Work: store.BuildBotWorkProjection(work)}
+	}
+	next = work.Clone()
+	next.Phase = store.BotWorkReviewing
+	save(next)
+	next = work.Clone()
+	next.Phase = store.BotWorkAccepted
+	next.Review = &store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "enqueue", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Controlled pending enqueue assessment"}}}
+	save(next)
+	return store.BotReport{Summary: work.Candidate.Text, Unchanged: work.Candidate.Observations[:1], Quality: &store.BotQualityReport{SchemaVersion: work.SchemaVersion, WorkRevision: work.Revision, RequirementsDigest: work.RequirementsDigest, CandidateDigest: work.Candidate.Digest, Outcome: work.Phase, Criteria: work.Review.Criteria, Repairs: work.Repairs}}
+}
+
+func TestBotAgentScheduleAcknowledgmentAuthority(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, name := range []string{"pending", "mixed", "mixed-draft", "independent-draft", "payload", "foreign", "observation", "tool-error", "extra-body"} {
+			t.Run(string(scope)+"/"+name, func(t *testing.T) {
+				r, runtime, owner, worker, q := authorizedScheduleFixture(t, scope)
+				op, err := runtime.EnqueueAuthorizedOperation(worker, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report := completedScheduleAcknowledgment(t, r, worker, q, op, func(c *store.BotWorkCandidate) {
+					switch name {
+					case "mixed":
+						c.Text += "\nAn independent useful result."
+					case "mixed-draft":
+						c.Bodies["producer-final-draft"] = c.Text + "\nAn independent useful result."
+					case "independent-draft":
+						c.Bodies["producer-final-draft"] = "An independent useful result."
+					case "payload":
+						c.Bodies["pending-control:0"] = strings.Replace(c.Bodies["pending-control:0"], "read the report", "different instructions", 1)
+					case "foreign":
+						c.Bodies["pending-control:0"] = strings.ReplaceAll(c.Bodies["pending-control:0"], op.ID.String(), uuid.NewString())
+					case "observation":
+						c.Observations[0].Source = "forged"
+					case "tool-error":
+						c.Bodies["tool-response:enqueue"] = `{"status":"error"}`
+					case "extra-body":
+						c.Bodies["independent-work"] = "result"
+					}
+				})
+				work, err := r.LoadWork(worker, q.Lease)
+				if err != nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || report.Quality != nil {
+					t.Fatalf("not agent-led: %+v %v", work, err)
+				}
+				report.FinalizeEmployeeMessage(store.RunSucceeded, work)
+				if err := validateBotWorkCommit(work, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}); err != nil {
+					t.Fatalf("work binding: %v", err)
+				}
+				if err := report.ValidateEmployeeMessage(store.RunSucceeded, work); err != nil {
+					t.Fatalf("message binding: %+v %v", report.EmployeeMessage, err)
+				}
+				commit := store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}
+				if err := r.CommitRun(worker, commit); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.CommitRun(worker, commit); err != nil {
+					t.Fatalf("exact agent retry: %v", err)
+				}
+				bad := commit
+				projection := *commit.Report.Work
+				projection.WorkRevision++
+				bad.Report.Work = &projection
+				if err := r.CommitRun(worker, bad); !errors.Is(err, store.ErrBotConflict) {
+					t.Fatalf("tampered agent projection retry: %v", err)
+				}
+				saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (saved.Report.Acknowledgment != nil) != (name == "pending") {
+					t.Fatalf("authority classification %s: %+v", name, saved.Report.Acknowledgment)
+				}
+				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
+				if err != nil || pub.Suppressed || !pub.EmployeeSpeech || pub.Text != saved.Report.EmployeeMessage.Text {
+					t.Fatalf("publication: %+v %v", pub, err)
+				}
+			})
+		}
+	}
+}
+
+func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, applyFirst := range []bool{false, true} {
+			name := string(scope) + "/publish-first"
+			if applyFirst {
+				name = string(scope) + "/apply-first"
+			}
+			t.Run(name, func(t *testing.T) {
+				r, runtime, owner, worker, q := authorizedScheduleFixture(t, scope)
+				op, err := runtime.EnqueueAuthorizedOperation(worker, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report := acceptedScheduleAcknowledgment(t, r, worker, q, op, nil)
+				work, err := r.LoadWork(worker, q.Lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report.FinalizeEmployeeMessage(store.RunSucceeded, work)
+				original := *report.EmployeeMessage
+				commit := store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}
+				if err := r.CommitRun(worker, commit); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.CommitRun(worker, commit); err != nil {
+					t.Fatalf("commit retry: %v", err)
+				}
+				saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
+				if err != nil || saved.Report.Acknowledgment == nil || saved.Report.Acknowledgment.Kind != store.BotReportAcknowledgmentSchedulePending {
+					t.Fatalf("missing server marker: %+v %v", saved, err)
+				}
+				if *report.EmployeeMessage != original || saved.Report.EmployeeMessage == nil || saved.Report.ValidateEmployeeMessage(store.RunSucceeded, work) != nil || saved.Report.EmployeeMessage.SourceDigest == original.SourceDigest {
+					t.Fatal("acknowledgment did not copy/rebind validated envelope")
+				}
+				if ids := saved.Report.Acknowledgment.OperationIDs; len(ids) != 1 || ids[0] != op.ID {
+					t.Fatalf("acknowledgment lost scoped operation reference: %v", ids)
+				}
+				rec, _ := r.db.GetBot(owner, q.Lease.BotID)
+				sequence := rec.LastSequence
+				var applied *store.BotOperation
+				apply := func() {
+					t.Helper()
+					applied, err = runtime.ApplyAuthorizedOperation(context.Background(), q.MandateRef, op.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if applyFirst {
+					apply()
+				}
+				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: sequence})
+				if err != nil || pub.Suppressed || pub.EmployeeSpeech || pub.Text != "" || len(pub.Notifications) != 0 {
+					t.Fatalf("ack publication: %+v %v", pub, err)
+				}
+				if !applyFirst {
+					apply()
+				}
+				again, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: sequence})
+				if err != nil || again.Suppressed || again.EmployeeSpeech || again.Text != "" || again.EventID != pub.EventID {
+					t.Fatalf("retry: %+v %v", again, err)
+				}
+				final, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				outcome, _, err := committedPublicationReport(owner, r.db, q.Lease.BotID, q.Lease.RunID, final.ReportSequence)
+				if err != nil || outcome.Report.EmployeeMessage == nil || outcome.Report.EmployeeMessage.Origin != store.BotEmployeeMessageOperation || outcome.Report.ValidateEmployeeMessageIntegrity(outcome.Status) != nil || final.EmployeeSpeech || final.Text != "" || final.ReportDigest == "" {
+					t.Fatal("missing receipt-bound employee outcome", err)
+				}
+				retried, err := runtime.ApplyAuthorizedOperation(context.Background(), q.MandateRef, op.ID)
+				if err != nil || retried.Revision != applied.Revision {
+					t.Fatal("operation retry changed receipt", err)
+				}
+				finalAgain, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: final.ReportSequence})
+				if err != nil || finalAgain.EventID != final.EventID || finalAgain.Text != final.Text {
+					t.Fatal("operation publication retry changed outcome", err)
+				}
+				view, err := store.ProjectBotOperation(rec.Bot, *applied, sequence+1)
+				if err != nil || view.Presentation != store.BotOperationPresentationInternal || view.VerifiedSchedule == nil {
+					t.Fatalf("final view: %+v %v", view, err)
+				}
+				canonical, _ := store.NewBotOperationEvent(view, time.Now())
+				if final.EventID == pub.EventID || final.ReportSequence <= pub.ReportSequence || applied.Receipt == nil || applied.Receipt.Schedule == nil {
+					t.Fatalf("missing stable neutral schedule receipt: %+v", final)
+				}
+				var reader store.BotTranscriptReader
+				switch d := r.db.(type) {
+				case personalBotDB:
+					reader = &personalSessionStore{client: d.client, content: d.content}
+				case teamBotDB:
+					reader = &teamSessionStore{client: d.client, content: d.content}
+				}
+				rows, err := reader.ReadBotTranscript(owner, rec.Bot.HomeSessionID, 0, 200)
+				if err != nil {
+					t.Fatal(err)
+				}
+				finals := 0
+				for _, row := range rows {
+					if row.Event.ID == pub.EventID {
+						t.Fatal("ack leaked into Home")
+					}
+					if row.Event.ID == canonical.ID || row.Event.ID == final.EventID {
+						if row.Event.Author == "assistant" || row.Event.Content != nil {
+							t.Fatal("internal schedule bookkeeping emitted speech")
+						}
+						finals++
+					}
+					if row.Event.Content != nil {
+						for _, part := range row.Event.Content.Parts {
+							if part != nil && strings.Contains(part.Text, "durably queued") {
+								t.Fatal("queued prose leaked")
+							}
+						}
+					}
+				}
+				if finals != 1 || final.EmployeeSpeech || final.Text != "" {
+					t.Fatalf("final event count %d", finals)
+				}
+			})
+		}
+	}
+}
+
+func TestBotScheduleAcknowledgmentRejectsMixedForgedAndFailures(t *testing.T) {
+	for _, name := range []string{"mixed", "mixed-draft", "independent-draft", "payload", "foreign-operation", "observation", "tool-error", "extra-body", "assessment-scope", "failed", "marker"} {
+		t.Run(name, func(t *testing.T) {
+			r, runtime, owner, worker, q := authorizedScheduleFixture(t, store.BotScopePersonal)
+			op, err := runtime.EnqueueAuthorizedOperation(worker, q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := acceptedScheduleAcknowledgment(t, r, worker, q, op, func(c *store.BotWorkCandidate) {
+				switch name {
+				case "mixed":
+					c.Text += "\nToday's requested report is here."
+				case "mixed-draft":
+					c.Bodies["producer-final-draft"] = c.Text + "\nAn independent useful result."
+				case "independent-draft":
+					c.Bodies["producer-final-draft"] = "An independent useful result."
+				case "payload":
+					c.Bodies["pending-control:0"] = strings.Replace(c.Bodies["pending-control:0"], "read the report", "different instructions", 1)
+				case "foreign-operation":
+					c.Bodies["pending-control:0"] = strings.ReplaceAll(c.Bodies["pending-control:0"], op.ID.String(), uuid.NewString())
+				case "tool-error":
+					c.Bodies["tool-response:enqueue"] = `{"status":"error","message":"failed"}`
+				case "extra-body":
+					c.Bodies["mixed-deliverable"] = "report"
+				case "assessment-scope":
+					c.Observations[1].Source = "bot-assessment-state://foreign"
+				case "observation":
+					c.Observations[0].Source = "forged"
+				}
+			})
+			status := store.RunSucceeded
+			if name == "failed" {
+				status = store.RunFailed
+				report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureExecutionFormat}
+			}
+			if name == "marker" {
+				report.Acknowledgment = &store.BotReportAcknowledgment{Kind: store.BotReportAcknowledgmentSchedulePending, OperationIDs: []uuid.UUID{op.ID}}
+			}
+			err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: status, Report: report})
+			if name == "marker" {
+				if !errors.Is(err, store.ErrBotInvalid) {
+					t.Fatalf("forged marker: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
+			if err != nil || pub.Suppressed || pub.EmployeeSpeech || pub.Text != "" || pub.ReportDigest == "" {
+				t.Fatalf("untrusted legacy acknowledgment became speech: %+v %v", pub, err)
+			}
+			saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
+			if err != nil || saved.Report.Acknowledgment != nil || saved.Status != status {
+				t.Fatalf("forged acknowledgment authority persisted: %+v %v", saved, err)
+			}
+			if name == "failed" && (saved.Report.Failure == nil || saved.Report.Failure.Kind != store.BotReportFailureExecutionFormat) {
+				t.Fatal("independent failure diagnostics lost")
+			}
+		})
+	}
+}

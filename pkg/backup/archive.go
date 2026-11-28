@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,8 @@ import (
 const (
 	ManifestPath  = "manifest.json"
 	ChecksumsPath = "checksums.json"
+	// MaxMetadataBytes bounds each reserved JSON metadata entry, not payload files.
+	MaxMetadataBytes = 16 << 20
 )
 
 type Compression string
@@ -52,6 +55,7 @@ type Writer struct {
 	compression Compression
 	entries     []Checksum
 	closed      bool
+	streamErr   error
 }
 
 func Create(path string, opts ...WriterOptions) (*Writer, error) {
@@ -82,26 +86,11 @@ func ParseCompression(value string) (Compression, error) {
 	return normalizeCompression(Compression(value))
 }
 
+// AddFile spools an unknown-size payload to a private temporary file. Tar needs
+// the size before its header; payload memory stays bounded independent of size.
+// Call AddFileSized when a fenced source already provides an exact size.
 func (w *Writer) AddFile(path string, r io.Reader) (Checksum, error) {
-	if w.closed {
-		return Checksum{}, errors.New("backup archive writer is closed")
-	}
-	if err := validateArchivePath(path); err != nil {
-		return Checksum{}, err
-	}
-	if path == ManifestPath || path == ChecksumsPath {
-		return Checksum{}, fmt.Errorf("%s is reserved", path)
-	}
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return Checksum{}, err
-	}
-	checksum := checksumFor(path, data)
-	if err := w.writeTarFile(path, data); err != nil {
-		return Checksum{}, err
-	}
-	w.entries = append(w.entries, checksum)
-	return checksum, nil
+	return w.AddFileContext(context.Background(), path, r)
 }
 
 func (w *Writer) Close() error {
@@ -115,6 +104,9 @@ func (w *Writer) Close() error {
 func (w *Writer) CloseWithManifest(manifest Manifest) error {
 	if w.closed {
 		return errors.New("backup archive writer is closed")
+	}
+	if w.streamErr != nil {
+		return errors.Join(w.streamErr, w.Close())
 	}
 	w.closed = true
 	defer w.file.Close()
@@ -250,6 +242,9 @@ func (c Checksum) Validate() error {
 }
 
 func (w *Writer) writeTarFile(path string, data []byte) error {
+	if len(data) > MaxMetadataBytes {
+		return fmt.Errorf("backup metadata size limit exceeded for %q", path)
+	}
 	hdr := &tar.Header{
 		Name:    path,
 		Mode:    0o600,
@@ -313,9 +308,12 @@ func (r *Reader) Summary() (Summary, error) {
 		if path != ManifestPath && path != ChecksumsPath {
 			return nil
 		}
-		data, err := io.ReadAll(file)
+		data, err := io.ReadAll(io.LimitReader(file, MaxMetadataBytes+1))
 		if err != nil {
 			return err
+		}
+		if len(data) > MaxMetadataBytes {
+			return fmt.Errorf("backup metadata size limit exceeded for %q", path)
 		}
 		files[path] = data
 		return nil
@@ -469,11 +467,6 @@ func normalizeCompression(compression Compression) (Compression, error) {
 	default:
 		return "", fmt.Errorf("unsupported backup compression %q", compression)
 	}
-}
-
-func checksumFor(path string, data []byte) Checksum {
-	sum := sha256.Sum256(data)
-	return Checksum{Path: path, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))}
 }
 
 func validateArchivePath(path string) error {

@@ -28,6 +28,7 @@ help:
 	@echo "  make build-ui        - Build the React UI (web/dist)"
 	@echo "  make build-extension - Build the Chrome MV3 extension (extension/dist)"
 	@echo "  make build-all       - Build UI first, then Go binary"
+	@echo "  make dev-reinstall   - Rebuild, refresh Docker sandbox, reinstall and start daemon"
 	@echo "  make run             - Run the Go application"
 	@echo "  make daemon          - Run Astonish (serves Studio UI)"
 	@echo "  make daemon-dev      - Run with live UI reload"
@@ -114,6 +115,17 @@ build-extension:
 # Build everything: UI first, then Go binary
 build-all: setup-hooks ent-generate build-ui build-extension build
 	@echo "Full build complete!"
+
+# Explicitly serial even with make -j; stop at the first failed stage.
+.PHONY: dev-reinstall
+dev-reinstall:
+	$(MAKE) -j1 build-all
+	$(MAKE) -j1 docker-sandbox-base
+	./$(BINARY_NAME) sandbox refresh
+	./$(BINARY_NAME) daemon stop
+	./$(BINARY_NAME) daemon uninstall
+	./$(BINARY_NAME) daemon install
+	./$(BINARY_NAME) daemon start
 
 # Setup git hooks (runs automatically on first build). Uses core.hooksPath so
 # updates to .githooks/pre-commit apply without re-copying into .git/hooks.

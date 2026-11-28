@@ -15,6 +15,51 @@ type App func(*sql.Selector)
 // AppState is the predicate function for appstate builders.
 type AppState func(*sql.Selector)
 
+// Bot is the predicate function for bot builders.
+type Bot func(*sql.Selector)
+
+// BotApproval is the predicate function for botapproval builders.
+type BotApproval func(*sql.Selector)
+
+// BotGoal is the predicate function for botgoal builders.
+type BotGoal func(*sql.Selector)
+
+// BotIntake is the predicate function for botintake builders.
+type BotIntake func(*sql.Selector)
+
+// BotKnowledgeExtraction is the predicate function for botknowledgeextraction builders.
+type BotKnowledgeExtraction func(*sql.Selector)
+
+// BotKnowledgeFileHead is the predicate function for botknowledgefilehead builders.
+type BotKnowledgeFileHead func(*sql.Selector)
+
+// BotOutbox is the predicate function for botoutbox builders.
+type BotOutbox func(*sql.Selector)
+
+// BotRun is the predicate function for botrun builders.
+type BotRun func(*sql.Selector)
+
+// BotSkill is the predicate function for botskill builders.
+type BotSkill func(*sql.Selector)
+
+// BotSkillRevision is the predicate function for botskillrevision builders.
+type BotSkillRevision func(*sql.Selector)
+
+// BotTask is the predicate function for bottask builders.
+type BotTask func(*sql.Selector)
+
+// BotTaskRevision is the predicate function for bottaskrevision builders.
+type BotTaskRevision func(*sql.Selector)
+
+// BotTemplate is the predicate function for bottemplate builders.
+type BotTemplate func(*sql.Selector)
+
+// BotTrackedItem is the predicate function for bottrackeditem builders.
+type BotTrackedItem func(*sql.Selector)
+
+// BotVersion is the predicate function for botversion builders.
+type BotVersion func(*sql.Selector)
+
 // CacheDiagnostic is the predicate function for cachediagnostic builders.
 type CacheDiagnostic func(*sql.Selector)
 

@@ -3,6 +3,7 @@
 package session
 
 import (
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -16,6 +17,14 @@ const (
 	FieldID = "id"
 	// FieldUserID holds the string denoting the user_id field in the database.
 	FieldUserID = "user_id"
+	// FieldBotID holds the string denoting the bot_id field in the database.
+	FieldBotID = "bot_id"
+	// FieldBotRunID holds the string denoting the bot_run_id field in the database.
+	FieldBotRunID = "bot_run_id"
+	// FieldPurpose holds the string denoting the purpose field in the database.
+	FieldPurpose = "purpose"
+	// FieldRetention holds the string denoting the retention field in the database.
+	FieldRetention = "retention"
 	// FieldTitle holds the string denoting the title field in the database.
 	FieldTitle = "title"
 	// FieldMessageCount holds the string denoting the message_count field in the database.
@@ -68,6 +77,10 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldUserID,
+	FieldBotID,
+	FieldBotRunID,
+	FieldPurpose,
+	FieldRetention,
 	FieldTitle,
 	FieldMessageCount,
 	FieldParentID,
@@ -118,6 +131,59 @@ var (
 	IDValidator func(string) error
 )
 
+// Purpose defines the type for the "purpose" enum field.
+type Purpose string
+
+// PurposeChat is the default value of the Purpose enum.
+const DefaultPurpose = PurposeChat
+
+// Purpose values.
+const (
+	PurposeChat    Purpose = "chat"
+	PurposeBotHome Purpose = "bot_home"
+	PurposeBotRun  Purpose = "bot_run"
+)
+
+func (pu Purpose) String() string {
+	return string(pu)
+}
+
+// PurposeValidator is a validator for the "purpose" field enum values. It is called by the builders before save.
+func PurposeValidator(pu Purpose) error {
+	switch pu {
+	case PurposeChat, PurposeBotHome, PurposeBotRun:
+		return nil
+	default:
+		return fmt.Errorf("session: invalid enum value for purpose field: %q", pu)
+	}
+}
+
+// Retention defines the type for the "retention" enum field.
+type Retention string
+
+// RetentionStandard is the default value of the Retention enum.
+const DefaultRetention = RetentionStandard
+
+// Retention values.
+const (
+	RetentionStandard Retention = "standard"
+	RetentionBot      Retention = "bot"
+)
+
+func (r Retention) String() string {
+	return string(r)
+}
+
+// RetentionValidator is a validator for the "retention" field enum values. It is called by the builders before save.
+func RetentionValidator(r Retention) error {
+	switch r {
+	case RetentionStandard, RetentionBot:
+		return nil
+	default:
+		return fmt.Errorf("session: invalid enum value for retention field: %q", r)
+	}
+}
+
 // OrderOption defines the ordering options for the Session queries.
 type OrderOption func(*sql.Selector)
 
@@ -129,6 +195,26 @@ func ByID(opts ...sql.OrderTermOption) OrderOption {
 // ByUserID orders the results by the user_id field.
 func ByUserID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUserID, opts...).ToFunc()
+}
+
+// ByBotID orders the results by the bot_id field.
+func ByBotID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBotID, opts...).ToFunc()
+}
+
+// ByBotRunID orders the results by the bot_run_id field.
+func ByBotRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBotRunID, opts...).ToFunc()
+}
+
+// ByPurpose orders the results by the purpose field.
+func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
+}
+
+// ByRetention orders the results by the retention field.
+func ByRetention(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRetention, opts...).ToFunc()
 }
 
 // ByTitle orders the results by the title field.

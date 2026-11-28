@@ -9,6 +9,18 @@ type ToolDeclaration struct {
 	Category    string // source/group category: "internal", "browser", "credentials", etc.
 }
 
+// BotToolDeclarations describes Chat-only deferred controls. Deliberately not
+// included in GetAllFlowToolDeclarations: flows must not acquire Bot management.
+func BotToolDeclarations() []ToolDeclaration {
+	return []ToolDeclaration{
+		{Name: "list_bots", Description: "List authorized Bots", Category: BotToolGroup},
+		{Name: "get_bot", Description: "Read Bot status and revision", Category: BotToolGroup},
+		{Name: "pause_bot", Description: "Pause a Bot with revision checks", Category: BotToolGroup},
+		{Name: "stop_bot", Description: "Stop a Bot with revision checks", Category: BotToolGroup},
+		{Name: "run_bot", Description: "Request an idempotent manual Bot run", Category: BotToolGroup},
+	}
+}
+
 // GetAllFlowToolDeclarations returns declarations for all tools that can be used
 // in flow tools_selection. This excludes chat-only tools (delegate_tasks,
 // announce_plan, read_task_result, run_flow, search_flows, search_tools).

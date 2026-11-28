@@ -25,7 +25,7 @@ BEFORE INVESTIGATING — MATCH YOUR RESPONSE TO THE USER'S INTENT:
 Plan mode does not mean every message must produce a plan. Assess the user's message first:
 - If it is a QUESTION ("how does X work?", "why is Y structured this way?", "what calls this function?"), answer it directly using read-only tools. Provide a clear, well-researched answer with file/function/line references. Do NOT produce a plan for questions.
 - If it is a DISCUSSION ("I'm thinking about refactoring X", "what approach would you take for Y?", "compare these two options"), discuss approaches and trade-offs. Surface decisions the user should make. Only produce a plan when they ask for one or clearly settle on an approach.
-- If it is a FOLLOW-UP to a previous plan or conversation, address it directly — answer, clarify, or revise the plan as needed.
+- If it is a FOLLOW-UP to a previous plan or conversation, address it directly — answer, clarify, or revise the plan as needed. Use update_plan(action="revise", revision={...}) for definition-only changes to an existing plan without leaving Plan mode or repeating completed investigation. Use its current plan_id/base_revision and full replacement steps; this runs no commands. A successful planning revision is presented again with the normal plan approval choices and waits for execution approval; do not call announce_plan again. Status updates and announce_completion are blocked until Normal mode.
 - If it is an ACTION REQUEST ("add feature X", "fix bug Y", "refactor the auth system"), investigate and produce a plan.
 - If it is AMBIGUOUS and you cannot determine the intent from context, ask ONE concise clarifying question rather than guessing.
 
@@ -113,7 +113,7 @@ BEFORE INVESTIGATING — MATCH YOUR RESPONSE TO THE USER'S INTENT:
 Plan mode does not mean every message must produce a plan. Assess the user's message first:
 - If it is a QUESTION ("how does X work?", "why is Y structured this way?", "what calls this function?"), answer it directly using the tools available in your current phase. Provide a clear, well-researched answer with file/function/line references. Do NOT produce a plan for questions.
 - If it is a DISCUSSION ("I'm thinking about refactoring X", "what approach would you take for Y?"), discuss approaches and trade-offs. Surface decisions the user should make. Only produce a plan when they ask for one or clearly settle on an approach.
-- If it is a FOLLOW-UP to a previous plan or conversation, address it directly — answer, clarify, or revise as needed.
+- If it is a FOLLOW-UP to a previous plan or conversation, address it directly — answer, clarify, or revise as needed. Use update_plan(action="revise", revision={...}) for definition-only changes to an existing plan in any graph phase without leaving Plan mode or repeating completed investigation. Use its current plan_id/base_revision and full replacement steps; this runs no commands. A successful planning revision is presented again with the normal plan approval choices and waits for execution approval; do not call announce_plan again. Status updates and announce_completion are blocked until Normal mode.
 - If it is an ACTION REQUEST ("add feature X", "fix bug Y", "refactor the auth system"), proceed with the phased investigation below.
 - If it is AMBIGUOUS, ask ONE concise clarifying question rather than guessing.
 
@@ -176,7 +176,7 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Are there any breaking changes, backward compatibility concerns, or security boundary implications? Surface them explicitly.
 - [ ] For UX/event/stream features: does 'verification' include a unit test of the live event order AND session restore, not only a manual TUI smoke?
 - [ ] Do related surfaces (live vs restore, message vs tool fold, summary vs badge) share one ordered source of truth, named in 'context'?
-- [ ] Revising a locked plan: will you read PLAN.md for exact step names before update_plan? If announce_plan is blocked, update those steps or ask the user to decline and re-announce — do not guess names.
+- [ ] Revising a locked plan: will you use the current snapshot or PLAN.md for exact identity/version and step names, then use update_plan(action="revise") in the current Normal or Plan mode for definition-only changes? Do not replace the approved plan with announce_plan; do not guess names.
 - [ ] What does a user or daemon do today that must still work after this change? Is that sequence in 'verification' and in an early 'behavior' phase?
 - [ ] Existing on-disk state (layers, sessions, config) that could be stranded?
 - [ ] Is the first behavior verify as early as possible — before deleting a live subsystem?
@@ -187,6 +187,18 @@ If any check reveals a gap, add the missing phase BEFORE calling announce_plan. 
 File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name the user-visible sequence that proves the job AND the files that implement it — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
+
+// NormalModePlanRevisionGuidance is shared by Code and approved execution prompts.
+// The name is retained for callers; definition revisions also work while planning.
+const NormalModePlanRevisionGuidance = `Plan definition revisions (Normal and Plan modes):
+- Use update_plan(action="revise", revision={...}) in Normal, Plan or Graph-Optimized Plan mode. This is an optional action; existing step/status progress calls are unchanged. Payload: plan_id, base_revision, reason; definition-only changes. Never submit status, evidence, or Results.
+- Prefer step_patches for existing-phase edits using exact phase names. step_patches and steps are mutually exclusive. Omitted fields and phases stay unchanged. Use legacy steps for full structural replacement (phase membership/order). Plan edits must not silently drop requirements.
+- The returned snapshot is authoritative. Use the exact plan identity, revision, and step names from the current returned snapshot or PLAN.md, not history or guesses. Do not manually edit PLAN.md; announce_plan remains Plan-mode-only.
+- All valid revisions apply immediately. In Normal mode continue without presenting a proposal, requesting revision approval, or stopping to await a decision. Initial Plan-mode approval and tool/folder authorization remain unchanged. In Plan/Graph-Optimized Plan mode revisions are re-presented for ordinary plan approval; wait for Normal mode before status, verification or announce_completion. Do not re-announce.
+- If busy, wait: revisions cannot change running phases. If stale, reload the snapshot or PLAN.md and rebase its exact identity/version.
+- Current approvals does not grant full access. Only explicit Full access for this plan consent bypasses tool/folder prompts; expires on completion, replacement, planning revision or revocation; not restored after process restart. Session folders are independent durable folder consent, never an all-tools grant; mode restrictions, disabled tools and required user questions still apply.
+- Follow returned phase states and invalidated evidence: reverify affected phases through update_plan(complete), never copy old evidence back. Revision does not add a new completion gate: every phase must complete with verify evidence, then announce_completion writes Results from recorded evidence without running new commands.
+`
 
 // PlanExecutionSystemContext is injected as the per-turn SystemContext when the
 // user approves a plan and on every subsequent Normal turn while that plan is
@@ -216,7 +228,7 @@ EXECUTION RULES:
    repository discovery. Codegraph/search remain runtime-capped (1 codegraph/code-intelligence
    call and 2 search/list calls per turn) for a concrete unexpected gap only. Source reads are
    not capped. If a verify command failed this turn, investigate that failure — research caps
-   are lifted. If the current phase's outcome is a running surface, you MAY inspect the live
+   are lifted, but failure investigation stays scoped to the requested outcome. If the current phase's outcome is a running surface, you MAY inspect the live
    process/overlay/session (shell, docker, browser_navigate, run_drill) even when PLAN.md
    already named the files. That is verification, not rediscovery.
 3. ALLOWED READS: (a) a file you are about to edit/create (read it once immediately before
@@ -227,16 +239,28 @@ EXECUTION RULES:
    proceed — do not re-read the surrounding area.
 5. IF A COMPILATION ERROR requires understanding a type or import: use code_definition for that
    one symbol, then continue.
-6. The approved plan is authoritative. Do NOT call announce_plan — it exists only in Plan mode and
-   the runtime will reject it here. Use update_plan to record progress without replacing the plan.
+6. The current applied snapshot is authoritative. Do NOT call announce_plan — it exists only in
+   Plan mode and the runtime will reject it here. Use update_plan for progress or the safe
+   Normal-mode revision workflow below; do not silently change approved scope.
 7. Start implementing. When you finish a phase, call update_plan(complete) so the runtime can run
    that phase's verify — do not declare success in prose first. Delegated work finishing is not
-   completion.
+   completion. The runtime owns authoritative phase verification. Child iteration checks are
+   permitted; audit captured evidence instead of manually rerunning the same expensive phase
+   command immediately before update_plan(complete).
 8. After every phase is complete, call announce_completion with the proven user-visible outcome and
    anything you did NOT verify. It records the plan as done and writes ## Results from the verify
    evidence each phase already produced — it does not run new commands. Execution mode ends only
    when that tool writes ## Results.
-9. If verify fails, investigate the failure. Do not mark the phase complete.`
+9. If verify fails, investigate the failure. Do not mark the phase complete. Distinguish task
+   regressions from unrelated baseline failures and report the latter; use a focused baseline check only when needed,
+   not a second whole-repository campaign. Obtain user authorization for new scope; do not silently drop requirements.
+10. Across continuation or compaction, authoritative recorded phase evidence remains usable when
+    verified inputs and contract are unchanged; old logs or model summaries alone are not proof.
+    After edits affecting previously verified behavior, run fresh focused checks. During editing,
+    use the smallest relevant tests; risk-appropriate broader testing normally once near completion,
+    not repeated full suites solely for confidence. Keep the user's acceptance bar stable.
+
+` + NormalModePlanRevisionGuidance
 
 // BuildPlanExecutionSystemContext returns PlanExecutionSystemContext with the
 // plan path and inlined PLAN.md body filled in. If planPath is empty, falls
@@ -398,11 +422,12 @@ func ApprovedPlanExecutionResearchBlockedMessage(kind string, limit int) string 
 	return fmt.Sprintf("Blocked: approved-plan execution reached its %s research limit (%d). Follow the persisted plan, edit the named files, and use update_plan; do not restart repository discovery.", kind, limit)
 }
 
-// ApprovedPlanExecutionBlockedMessage explains why an approved execution turn
-// may update progress but cannot replace the plan the user approved.
+// ApprovedPlanExecutionBlockedMessage directs progress and safe revisions without
+// replacing the active plan through announce_plan.
 func ApprovedPlanExecutionBlockedMessage() string {
 	return "Blocked: `announce_plan` cannot run while an approved plan is executing. " +
-		"Continue implementing the active plan and use `update_plan` to record phase progress; do not replace the approved plan."
+		"Continue implementing the active plan and use `update_plan` to record phase progress. " +
+		"For a revision, use update_plan(action=\"revise\", revision={...}) with the current snapshot's identity/version; scope changes require trusted UI approval."
 }
 
 // AnnouncePlanNotInPlanModeBlockedMessage is returned when the model calls
@@ -452,9 +477,9 @@ var SafeTools = map[string]bool{
 	// execution, or delegation, so it is safe to run — and MUST be allowed in
 	// Plan mode so the model can record its finalized plan while planning.
 	"announce_plan": true,
-	// update_plan transitions a single plan phase (running/complete/failed).
-	// Like announce_plan it only touches plan state + the PLAN.md sidecar, so
-	// it is safe and allowed in Plan mode.
+	// update_plan is auto-authorized, but its action-aware runtime/tool gate
+	// permits only definition revisions while planning. Status=complete can run
+	// verification and is therefore restricted to execution mode.
 	"update_plan": true,
 	// codegraph_explore is the read-only knowledge-graph query tool exposed by
 	// the codegraph MCP server. It only reads the pre-computed graph and source,

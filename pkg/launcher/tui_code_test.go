@@ -500,7 +500,7 @@ func TestDelegationLocalOwnedDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: child.Session.ID()})
-	if err != nil || len(rows) != 1 || rows[0].CallID != "c" {
+	if err != nil || len(rows) != 2 || rows[0].Type != "handoff" || rows[0].Text != "" || rows[1].CallID != "c" {
 		t.Fatalf("%+v %v", rows, err)
 	}
 	if _, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: b.sessionID}); err == nil {
@@ -509,6 +509,31 @@ func TestDelegationLocalOwnedDetail(t *testing.T) {
 	b.userID = "other"
 	if _, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: child.Session.ID()}); err == nil {
 		t.Fatal("accepted foreign parent")
+	}
+}
+
+func TestLocalPlanSystemContextUsesSnapshot(t *testing.T) {
+	s := agent.PlanSnapshot{Goal: "Accepted session plan", Steps: []agent.PlanStepInfo{{Name: "current-phase", Details: "Use the accepted definition"}}}
+	for _, completed := range []bool{false, true} {
+		text := localPlanSystemContext(s, "", completed)
+		if !strings.Contains(text, s.Goal) || !strings.Contains(text, "PLAN.md") {
+			t.Fatalf("missing authoritative identity/location: %s", text)
+		}
+		if strings.Contains(text, s.Steps[0].Details) == completed {
+			t.Fatalf("active instructions must exist only before completion: %s", text)
+		}
+		if strings.Contains(text, "Ordinary Normal mode is active") != completed {
+			t.Fatalf("incorrect completion context: %s", text)
+		}
+		if completed && text != agent.CompletedCodePlanReference(s, "PLAN.md") {
+			t.Fatalf("completion must use the shared historical-only reference: %s", text)
+		}
+		if !isLocalPlanSystemContext(text) || !isLocalPlanSystemContext(agent.EscapeCurlyPlaceholders(text)) {
+			t.Fatal("generated plan context not recognized")
+		}
+	}
+	if isLocalPlanSystemContext("Preserve this custom task context") {
+		t.Fatal("custom task context must not be replaced")
 	}
 }
 

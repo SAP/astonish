@@ -1,0 +1,725 @@
+import * as filesApi from '@/api/botFiles'
+vi.mock('@/api/botFiles', async original => ({ ...await original<typeof filesApi>(), listBotFiles: vi.fn().mockResolvedValue({ entries: [] }) }))
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import BotWorkspace, { BotQualityDetails, BotWorkDetails, BotRunWorkDetails } from '../BotWorkspace'
+import BotCreateDialog from '../BotCreateDialog'
+import BotSidebar from '../BotSidebar'
+import { BotGoals, BotSchedule } from '../BotPanels'
+import { BotDecisionInbox } from '../BotControls'
+import { botPath } from '../botRoute'
+import { parseHash } from '@/hooks/useHashRouter'
+import * as skillsApi from '@/api/botSkills'
+vi.mock('@/api/botSkills', async original => ({ ...await original<typeof skillsApi>(), listBotSkills: vi.fn() }))
+import * as reviewsApi from '@/api/botReviews'
+const continuationStates = vi.hoisted(() => ({ value: [] as import('@/api/botRunState').BotRunState[] }))
+vi.mock('@/api/botReviews', async original => ({ ...await original<typeof reviewsApi>(), listControlProposals: vi.fn(), sendBotMessage: vi.fn(), approveAndContinue: vi.fn(), continueInteractive: vi.fn() }))
+import * as api from '@/api/bots'
+import * as goalsApi from '@/api/botGoals'
+vi.mock('@/api/botGoals', async original => ({ ...await original<typeof goalsApi>(), createGoal: vi.fn() }))
+import * as memoryApi from '@/api/botMemory'
+import * as policyApi from '@/api/botConfiguration'
+vi.mock('@/api/botConfiguration', async original => ({ ...await original<typeof policyApi>(), configureBot: vi.fn(), getBotConfigurationVersion: vi.fn() }))
+import { cancelBotRun } from '@/api/botRunControls'
+vi.mock('@/api/botRunControls', async original => ({ ...await original<typeof import('@/api/botRunControls')>(), cancelBotRun: vi.fn() }))
+
+it('separates Files, safe Configuration and Activity for a team viewer', async () => {
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope: 'team', status: 'stopped' })
+  render(<BotWorkspace route={{ botId: bot.id, scope: 'team' }} theme="light" userId="viewer" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+  expect(await screen.findByRole('region', { name: 'Bot files' })).toBeVisible()
+  expect(screen.getByRole('region', { name: 'Database-backed Configuration' })).toBeVisible()
+  expect(screen.getByRole('region', { name: 'Activity' })).toBeVisible()
+  expect(screen.getByRole('textbox', { name: 'Shared composer' })).toBeDisabled()
+  expect(screen.getByRole('dialog')).not.toHaveTextContent('retained-volume')
+})
+it('shows agent work, partial obligations and feedback without certifying success', () => {
+  const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 2, phase: 'finished', disposition: 'partial', items: [], remaining: [{ id: 'o', source_run_id: 'r', summary: 'Compare missing source', reason: 'Source unavailable', continuation: 'owner_request' }], checks: [{ id: 'c', call_id: 'call', kind: 'model_feedback', status: 'returned', judgment: 'needs_work', summary: 'Narrow the conclusion', draft_digest: 'digest', observed_at: 'now' }] }
+  const view = render(<BotWorkDetails work={work} />)
+  expect(screen.getByText('Partial answer')).toBeTruthy()
+  expect(screen.getByText(/Requires a new owner request; no automatic continuation/)).toBeTruthy()
+  expect(screen.getByText('Feedback received: Narrow the conclusion')).toBeTruthy()
+  view.rerender(<BotWorkDetails work={{ ...work, schema_version: 99 }} />)
+  expect(screen.getByText('Work details unavailable')).toBeTruthy()
+  expect(screen.queryByText(/Compare missing source/)).toBeNull()
+  view.rerender(<BotWorkDetails work={{ ...work, disposition: 'answered', remaining: [], checks: [] }} unavailable />)
+  expect(screen.getByText('Last known work · Answer provided')).toBeTruthy()
+  expect(screen.queryByText('Remaining work')).toBeNull()
+  view.rerender(<BotWorkDetails loading />)
+  expect(screen.getByText('Loading work details…')).toBeTruthy()
+  view.rerender(<BotWorkDetails />)
+  expect(screen.getByText('No work result yet')).toBeTruthy()
+})
+
+it('only presents scoped work and committed learning, and keeps legacy assessment separate', () => {
+  const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 1, phase: 'blocked' }
+  const run = { id: 'r', bot_id: 'b', work, report: { skill: { schema_version: 1, bot_id: 'b', run_id: 'r', skill_id: 'skill', kind: 'updated', used_revision: 1, committed_revision: 2 } } } as api.BotRun
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText('Blocked')).toBeInTheDocument()
+  expect(screen.getByText('Learning: updated · used revision 1 · committed revision 2')).toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: { ...work, run_id: 'other' }, report: { ...run.report, skill: { ...run.report.skill!, run_id: 'other' } } }} />)
+  expect(screen.getByText('Work details unavailable')).toBeInTheDocument()
+  expect(screen.queryByText(/Learning:/)).not.toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: undefined, report: { ...run.report, quality: { schema_version: 1, work_revision: 1, requirements_digest: 'digest', repairs: 0, outcome: 'blocked' } } }} />)
+  expect(screen.getByText(/Quality assessment:/)).toBeInTheDocument()
+  expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
+})
+
+it.each(['checked', 'limitations', 'absent', 'unknown'] as const)('selects legacy %s assessment with and without a legacy work projection', mode => {
+  const q: api.BotQualityReport = { schema_version: mode === 'unknown' ? 99 : 1, work_revision: 2, requirements_digest: 'digest', outcome: api.BotQualityOutcome.Accepted, repairs: 1, criteria: [{ criterion_id: 'receipt', verdict: api.BotCriterionVerdict.Satisfied, method: api.BotAssessmentMethod.Model, evidence_refs: ['candidate:digest'], explanation: 'Checked receipt' }], limitations: mode === 'limitations' ? ['Missing source'] : [] }
+  const run = { id: 'r', bot_id: 'b', report: { employee_message: { origin: 'assessed' }, quality: mode === 'absent' ? undefined : q } } as unknown as api.BotRun
+  const want = mode === 'checked' ? /Requirements checked/ : mode === 'limitations' ? /Requirements remain unmet or unverified/ : mode === 'absent' ? /Not assessed/ : /Assessment unavailable/
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText(want)).toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: { schema_version: 1, protocol: '', bot_id: 'b', run_id: 'r', work_revision: 2, phase: 'blocked' } }} />)
+  expect(screen.getByText(want)).toBeInTheDocument()
+  expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
+})
+
+it('recognizes only the typed unverified-result fallback as a legacy assessment', () => {
+  const run = { id: 'r', bot_id: 'b', report: { employee_message: { origin: api.BotEmployeeMessageOrigin.Fallback, reason: api.BotEmployeeMessageReason.ResultNotVerified } } } as api.BotRun
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText(/Not assessed/)).toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, report: { ...run.report, employee_message: { origin: api.BotEmployeeMessageOrigin.Fallback, reason: 'transport_unavailable' } } }} />)
+  expect(screen.getByText('No work result yet')).toBeInTheDocument()
+})
+
+it('does not let quality mask agent work or untrusted work projections', () => {
+  const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 1, phase: 'blocked' }
+  const run = { id: 'r', bot_id: 'b', work, report: { quality: { schema_version: 1, outcome: 'accepted' } } } as api.BotRun
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText('Blocked')).toBeInTheDocument()
+  for (const invalid of [{ ...work, protocol: 'future' }, { ...work, schema_version: 99 }, { ...work, run_id: 'other', protocol: '' }]) {
+    view.rerender(<BotRunWorkDetails run={{ ...run, work: invalid }} />)
+    expect(screen.getByText('Work details unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/Quality assessment:/)).not.toBeInTheDocument()
+  }
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: undefined, report: {} as api.BotReport }} />)
+  expect(screen.getByText('No work result yet')).toBeInTheDocument()
+})
+
+const reconciledBot = vi.hoisted(() => ({ current: null as api.Bot | null }))
+// Panel tests retain resource fixtures; the real shared snapshot hook has its own suite.
+vi.mock('../useBotSnapshot', async () => {
+  const { useWorkspaceResource } = await import('../workspaceResource')
+  const { useState, useEffect } = await import('react')
+  return { useBotSnapshot: (id: string, scope: api.BotScope, viewer?: string) => {
+    const [revision, setRevision] = useState(0)
+    useEffect(() => { const refresh = () => setRevision(v => v+1); window.addEventListener('astonish:bots-updated', refresh); return () => window.removeEventListener('astonish:bots-updated', refresh) }, [])
+    const root = useWorkspaceResource(async signal => {
+      const bot = await api.getBot(id, scope, signal)
+      const approvals = await api.listBotApprovals(id, scope, signal)
+      return { bot, read_cursor: { bot_id: id, viewer_id: viewer || '', sequence: 0 }, latest_sequence: 0, unread_count: 0, pending_approvals: approvals.approvals, run_states: continuationStates.value }
+    }, `${viewer}/${scope}/${id}`, revision)
+    return { ...root, activity: [], markRead: async () => {}, syncOperations: async () => reconciledBot.current || root.data!.bot }
+  } }
+})
+
+vi.mock('@/api/botMemory', () => ({ getBotDocuments: vi.fn(), getBotMemoryHealth: vi.fn(), saveBotDocument: vi.fn() }))
+
+vi.mock('@/api/bots', async original => ({ ...await original<typeof api>(),
+  setupBotHome: vi.fn(), getBot: vi.fn(), getBotVersion: vi.fn(), listBotRuns: vi.fn(), listBotGoals: vi.fn(),
+  listBotMemories: vi.fn(), listBotActivity: vi.fn(), listBotApprovals: vi.fn(), getBotRun: vi.fn(),
+  createBot: vi.fn(), listBots: vi.fn(), botLifecycle: vi.fn(), requestBotRun: vi.fn(), requestBotConversation: vi.fn(), requestBotTestRun: vi.fn(),
+  saveBotGoal: vi.fn(), saveBotTrigger: vi.fn(), decideBotApproval: vi.fn(),
+}))
+vi.mock('../BotHomeModel', () => ({ default: ({ sessionId }: { sessionId: string }) => <p>Home model: {sessionId}</p> }))
+// Real StudioChat reuse/transport is covered separately and by the built-SPA test.
+const chatProps = vi.hoisted(() => ({ current: null as null | { readOnly: boolean; toolFree?: boolean; pendingApprovalIds?: string[]; questionApprovalIds?: string[]; questionApprovalAnchors?: { reviewId: string; questionId: string }[]; renderReview: (kind: 'proposal' | 'approval', id: string) => import('react').ReactNode; onSend: (text: string, attachments?: import('@/api/studioChat').AttachmentPayload[]) => Promise<void> } }))
+vi.mock('../../StudioChat', () => ({ default: ({ botThread }: { botThread: NonNullable<typeof chatProps.current> }) => { chatProps.current = botThread; return <textarea aria-label="Shared composer" disabled={botThread.readOnly} /> } }))
+const bot: api.Bot = { id: 'bot', owner_id: 'owner', scope: 'personal', name: 'Watcher', status: 'active', revision: 1, version: 1, home_session_id: 'home', home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: 'bot', scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 }, created_at: '', updated_at: '' }
+const version: api.BotVersion = { bot_id: 'bot', version: 1, charter: 'Observe', persona: { language: '', timezone: 'UTC', soul: '', identity: '', user: '' }, autonomy: { level: 'supervised', can_contact_people: false, can_publish: false, max_spend_per_run_minor: 0, max_spend_per_month_minor: 0 }, budget: { max_runtime_seconds: 60 }, delivery: { notify: 'important', preferences: '', bindings: [] }, triggers: [] }
+beforeEach(() => {
+  vi.clearAllMocks()
+  reconciledBot.current = null
+  vi.mocked(skillsApi.listBotSkills).mockResolvedValue({ skills: [] })
+  continuationStates.value = []
+  vi.mocked(reviewsApi.listControlProposals).mockResolvedValue({ proposals: [] })
+  vi.mocked(reviewsApi.sendBotMessage).mockResolvedValue({ run: { id: 'conversation' } as api.BotRun, home_session_id: 'home', user_event_id: 'u', history_cursor: 1 })
+  vi.mocked(policyApi.getBotConfigurationVersion).mockResolvedValue({ ...version, autonomy: { ...version.autonomy, level: 'supervised', allowed_tools: [], denied_tools: [], allowed_paths: [], allowed_hosts: [] }, delivery: { ...version.delivery, notify: 'on_change' } })
+  vi.mocked(memoryApi.getBotDocuments).mockResolvedValue({ bot_id: bot.id, revision: 1, version: 1, documents: [{ name: 'CHARTER.md', content: 'Observe' }] })
+  vi.mocked(memoryApi.getBotMemoryHealth).mockResolvedValue({ bot_id: bot.id, scope: 'personal', review_only: true, apply_supported: false, snapshot: { records: [], fingerprints: {}, fingerprint: 'hash', truncated: false, evaluated_at: 'today' }, health: { recommendation_count: 0, recommendations: [], evaluated_at: 'today' } })
+  vi.mocked(api.getBot).mockResolvedValue(bot)
+  vi.mocked(api.getBotVersion).mockResolvedValue(version)
+  vi.mocked(api.listBotRuns).mockResolvedValue({ runs: [] })
+  vi.mocked(api.listBotGoals).mockResolvedValue({ goals: [] })
+  vi.mocked(api.listBotMemories).mockResolvedValue({ memories: [] })
+  vi.mocked(api.listBotActivity).mockResolvedValue({ activity: [] })
+  vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [] })
+  vi.mocked(api.listBots).mockResolvedValue({ bots: [bot] })
+})
+it.each(['personal', 'team'] as const)('keeps consumed %s questions in the display list, not the pending-action list', async scope => {
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope })
+  vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [...Array.from({ length: 200 }, (_, i) => ({ id: `old-${i}`, run_id: 'r', version: 1, action_digest: 'digest', action: {}, status: 'denied' as const, expires_at: '2099-01-01' })), { id: 'answered', run_id: 'r', version: 1, action_digest: 'digest', action: {}, status: 'consumed', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q', payload: { kind: 'text', prompt: 'Which markets?' } }, response: { question_id: 'q', answer: 'U.S. markets' } }] })
+  for (const mode of ['initial', 'reload']) {
+    const view = render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId="owner" />)
+    await waitFor(() => expect(chatProps.current?.questionApprovalIds, mode).toEqual(['answered']))
+    expect(chatProps.current?.questionApprovalAnchors).toEqual([{ reviewId: 'answered', questionId: 'q' }])
+    expect(chatProps.current?.pendingApprovalIds).toEqual([])
+    const review = render(<>{chatProps.current!.renderReview('approval', 'answered')}</>)
+    expect(await screen.findByRole('article', { name: 'Answered question' })).toHaveTextContent('Your answer: U.S. markets')
+    expect(screen.getByRole('article', { name: 'Answered question' })).toHaveTextContent('Which markets?')
+    review.unmount()
+    view.unmount()
+  }
+})
+
+it.each((['personal', 'team'] as const).flatMap(scope => ['transcript', 'details'].map(surface => ({ scope, surface }))))('submits a continuation_required question once in $scope / $surface', async ({ scope, surface }) => {
+  const question: api.BotApproval = { id: 'clarification', run_id: 'same-run', version: 1, action_digest: 'exact', action: {}, status: 'pending', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'timezone', payload: { kind: 'text', prompt: 'Which timezone?' } } }
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope })
+  vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [question] })
+  continuationStates.value = [{ schema_version: 1, bot_id: bot.id, run_id: 'same-run', home_session_id: 'home', session_id: 'trace', presentation: 'home_interactive', status: 'waiting_approval', reason: 'continuation_required', state_sequence: 3 }]
+  vi.mocked(reviewsApi.approveAndContinue).mockResolvedValue({ approval: { ...question, status: 'consumed', response: { question_id: 'timezone', answer: 'America/New_York' } }, run_id: 'same-run', continuation: 'queued' })
+  render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId="owner" />)
+  await waitFor(() => expect(chatProps.current?.pendingApprovalIds).toEqual(['clarification']))
+  if (surface === 'transcript') render(<>{chatProps.current!.renderReview('approval', 'clarification')}</>)
+  else await openDetails('Review inbox')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Which timezone?' }), { target: { value: 'America/New_York' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Submit answer' }))
+  expect(await screen.findByRole('article', { name: 'Answered question' })).toHaveTextContent('Your answer: America/New_York')
+  expect(reviewsApi.approveAndContinue).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ scope }), question, 'America/New_York')
+  expect(reviewsApi.continueInteractive).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: 'Continue interactive' })).not.toBeInTheDocument()
+})
+
+it.each(['empty', 'waiting_approval', 'queued', 'running', 'failed', 'partial', 'succeeded'] as const)('keeps database runtime %s projection scoped and read-only on reload', async state => {
+  // The persisted format version is deliberately absent from public DTOs.
+  // Work schema_version stays 1 even when its storage envelope is format 3.
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: api.BotStatus.Active })
+  const run = { id: 'saved', bot_id: bot.id, session_id: 'trace', status: state === 'partial' ? 'succeeded' : state, trigger: 'manual', report: {}, usage: {} } as api.BotRun
+  if (state === 'partial' || state === 'succeeded') run.work = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: bot.id, run_id: run.id, work_revision: 3, phase: 'finished', disposition: state === 'partial' ? 'partial' : 'answered', remaining: state === 'partial' ? [{ id: 'missing-source', source_run_id: run.id, summary: 'Missing market source', reason: 'Source unavailable', continuation: 'owner_request' }] : [] }
+  vi.mocked(api.listBotRuns).mockResolvedValue({ runs: state === 'empty' ? [] : [run] })
+  if (state === 'waiting_approval') vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [{ id: 'saved-question', run_id: run.id, version: 1, status: 'pending', action_digest: 'digest', action: {}, expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q', payload: { kind: 'text', prompt: 'Which markets?' } } }] })
+  for (const mode of ['initial', 'reload']) {
+    const view = render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="dark" userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    expect(chatProps.current?.pendingApprovalIds).toEqual(state === 'waiting_approval' ? ['saved-question'] : [])
+    await openDetails('Runs')
+    if (state !== 'empty') expect(await screen.findByRole('link', { name: `${run.status} · manual` })).toHaveAttribute('href', '#/chat/bots/personal/bot/runs/saved')
+    if (state === 'empty') expect(await screen.findByText('No runs yet.')).toBeInTheDocument()
+    if (state === 'partial') expect(await screen.findByText('Partial answer')).toBeInTheDocument()
+    if (state === 'succeeded') expect(await screen.findByText('Answer provided')).toBeInTheDocument()
+    expect(reviewsApi.sendBotMessage, mode).not.toHaveBeenCalled()
+    expect(reviewsApi.continueInteractive, mode).not.toHaveBeenCalled()
+    expect(api.requestBotRun, mode).not.toHaveBeenCalled()
+    expect(cancelBotRun, mode).not.toHaveBeenCalled()
+    view.unmount()
+  }
+})
+
+async function openDetails(panel: string) {
+  if (!screen.queryByRole('dialog')) fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+  await screen.findByRole('dialog')
+  for (const section of document.querySelectorAll('dialog details, [role="dialog"] details')) (section as HTMLDetailsElement).open = false
+  const names = panel === 'Memory & charter' ? ['Memory & charter', 'Configuration'] : panel === 'Runs' ? ['Runs & activity'] : panel === 'Thread' ? [] : [panel]
+  for (const name of names) { const summary = screen.getByText(name, { selector: 'summary' }); (summary.parentElement as HTMLDetailsElement).open = true }
+}
+describe('Bot quality assessment', () => {
+  it('keeps legacy, unknown, blocked and unavailable assessment distinct from pass', () => {
+    const q: api.BotQualityReport = { schema_version: 1, work_revision: 5, requirements_digest: 'sources', candidate_digest: 'output', outcome: api.BotQualityOutcome.Accepted, repairs: 1, criteria: [{ criterion_id: 'sources', verdict: api.BotCriterionVerdict.Satisfied, method: api.BotAssessmentMethod.Model, evidence_refs: ['observation:0'], explanation: 'Checked the original source' }] }
+    const view = render(<BotQualityDetails />)
+    expect(screen.getByText(/Not assessed/)).toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={q} />)
+    expect(screen.getByText(/Requirements checked/)).toBeInTheDocument()
+    expect(screen.getByText('Model assessment')).toBeInTheDocument()
+    expect(screen.getByText(/Evidence: observation:0/)).toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={{ ...q, limitations: ['Missing current source'] }} />)
+    expect(screen.getByText(/Requirements remain unmet or unverified/)).toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={{ ...q, schema_version: 99 }} />)
+    expect(screen.getByText(/Assessment unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText('Model assessment')).not.toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={q} unavailable />)
+    expect(screen.queryByText(/Requirements checked/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+})
+
+describe('Bot workspace', () => {
+  it.each(['light', 'dark'])('unmounts content on permanent deletion without claiming cleanup completed (%s)', async theme => {
+    render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme={theme} userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: api.BotStatus.Deleted, permanent_delete: true })
+    act(() => window.dispatchEvent(new Event('astonish:bots-updated')))
+    expect(await screen.findByRole('status')).toHaveTextContent('backend cleanup is pending')
+    expect(screen.queryByLabelText('Shared composer')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument()
+  })
+  it.each((['personal', 'team'] as const).flatMap(scope =>
+    (['active', 'paused', 'stopped', 'deleted'] as const).flatMap(status =>
+      ['owner', 'other'].map(userId => ({ scope, status, userId })))))('keeps Files separate from control panels in $scope / $status / $userId Details', async ({ scope, status, userId }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
+    render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId={userId} />)
+    await openDetails('Runs')
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.querySelector('[aria-label="Bot skills"]')).toBeNull()
+    expect(within(dialog).queryByText(/Skills & history|File browser|Tasks/, { selector: 'summary' })).not.toBeInTheDocument()
+    for (const name of ['Goals', 'Memory & charter', 'Schedule & triggers', 'Runs & activity', 'Review inbox']) {
+      expect(within(dialog).getByText(name, { selector: 'summary' })).toBeInTheDocument()
+    }
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Refresh Bot' }))
+    await waitFor(() => expect(api.getBot).toHaveBeenCalledTimes(2))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(screen.getByLabelText('Shared composer')).toBeInTheDocument()
+    await openDetails('Runs')
+    // Schedule & triggers retains its independent limit=100 selection read.
+    expect(vi.mocked(skillsApi.listBotSkills).mock.calls.every(([, , options]) => options?.limit === 100)).toBe(true)
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    expect(cancelBotRun).not.toHaveBeenCalled()
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+    expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+  })
+  it('never fetches the removed Skills inspector in loading, failed or empty workspace states', async () => {
+    vi.mocked(api.getBot).mockImplementationOnce(() => new Promise(() => {}))
+    const view = render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="dark" userId="owner" />)
+    expect(screen.getByText('Loading Bot…')).toBeInTheDocument()
+    vi.mocked(api.getBot).mockRejectedValueOnce(new Error('Workspace unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry workspace' }))
+    await screen.findByRole('alert')
+    vi.mocked(api.getBot).mockResolvedValue(bot)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry workspace' }))
+    await openDetails('Runs')
+    expect(await screen.findByText('No runs yet.')).toBeInTheDocument()
+    expect(screen.queryByText('Skills & history')).not.toBeInTheDocument()
+    // Schedule & triggers retains its independent limit=100 selection read.
+    expect(vi.mocked(skillsApi.listBotSkills).mock.calls.every(([, , options]) => options?.limit === 100)).toBe(true)
+    view.unmount()
+  })
+  it.each(['dark', 'light'])('keeps saved work accessible only in Details when closed and reopened (%s)', async theme => {
+    const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: bot.id, run_id: 'saved-run', work_revision: 2, phase: 'finished', disposition: 'answered', items: [{ id: 'source', status: api.WorkItemStatus.Complete, summary: 'Compared original sources' }] }
+    vi.mocked(api.listBotRuns).mockResolvedValue({ runs: [{ id: 'saved-run', bot_id: bot.id, status: 'succeeded', trigger: 'manual', work, report: { summary: 'The actual answer' }, usage: { tool_calls: 2 } } as api.BotRun] })
+    render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme={theme} userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    expect(screen.queryByText('Answer provided')).not.toBeVisible()
+    await openDetails('Runs')
+    const dialog = screen.getByRole('dialog')
+    const summary = await within(dialog).findByText('Answer provided')
+    expect(summary).toBeVisible()
+    fireEvent.click(summary)
+    expect(within(dialog).getByText('Completed by agent: Compared original sources')).toBeVisible()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(summary).not.toBeVisible()
+    await openDetails('Runs')
+    expect(within(screen.getByRole('dialog')).getByText('Answer provided')).toBe(summary)
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+  })
+  it('prepares an Active Bot with an existing conversation but no physical home and retains the acknowledged revision', async () => {
+    const empty = { ...bot, home_session_id: '82c09d23-63e1-42d8-8baa-5f540fabc645', home: null }
+    vi.mocked(api.getBot).mockResolvedValue(empty)
+    vi.mocked(api.setupBotHome).mockResolvedValue({ ...empty, revision: 2, home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: bot.id, scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 } })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Execution setup')
+    expect(await screen.findByText(`Home model: ${empty.home_session_id}`)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review resume' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Test once' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Test once' }))
+    expect(screen.queryByLabelText('Test instructions')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare retained home' }))
+    await openDetails('Execution setup')
+    expect(await screen.findByText(`Home model: ${empty.home_session_id}`)).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Prepare retained home' })).not.toBeInTheDocument())
+    expect(screen.getByText(/revision 2/)).toBeInTheDocument()
+    expect(api.setupBotHome).toHaveBeenCalledWith(empty)
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+    expect(api.requestBotTestRun).not.toHaveBeenCalled()
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Test once' })).toBeEnabled())
+  })
+  it('routes a reviewed Active test to the normal read-only run trace without lifecycle changes', async () => {
+    vi.mocked(api.requestBotTestRun).mockResolvedValue({ id: 'test' } as api.BotRun)
+    const view = render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Execution setup')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Test once' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Test once' }))
+    await waitFor(() => expect(screen.getByLabelText('Test instructions')).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Test instructions'), { target: { value: 'One test' } })
+    fireEvent.click(screen.getByLabelText('I authorize this one test under the displayed policy'))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm test once' }))
+    await waitFor(() => expect(window.location.hash).toBe(`#${botPath('bot', 'personal', 'test')}`))
+    vi.mocked(api.getBotRun).mockResolvedValue({ id: 'test', session_id: 'test-session', status: 'succeeded' } as api.BotRun)
+    view.rerender(<BotWorkspace route={{ botId: 'bot', scope: 'personal', runId: 'test' }} theme="dark" userId="owner" />)
+    expect(await within(await screen.findByRole('region', { name: 'Selected run' })).findByLabelText('Shared composer')).toBeDisabled()
+    expect(within(screen.getByRole('region', { name: 'Bot workspace' })).getByLabelText('Shared composer')).toBeEnabled()
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+  })
+  it.each(['personal', 'team'] as const)('keeps paused %s owner conversation on home with stable retries', async scope => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status: 'paused' })
+    vi.mocked(reviewsApi.sendBotMessage).mockRejectedValueOnce(new Error('Unknown'))
+    window.location.hash = botPath('bot', scope)
+    render(<BotWorkspace route={{ botId: 'bot', scope }} theme="dark" userId="owner" />)
+    expect(await screen.findByLabelText('Shared composer')).toBeEnabled()
+    expect(chatProps.current?.toolFree).toBe(true)
+    await act(async () => { await expect(chatProps.current!.onSend('Hello')).rejects.toThrow('Unknown') })
+    await act(async () => { await chatProps.current!.onSend('Hello') })
+    expect(vi.mocked(reviewsApi.sendBotMessage).mock.calls[0]).toEqual(vi.mocked(reviewsApi.sendBotMessage).mock.calls[1])
+    expect(window.location.hash).toBe(`#${botPath('bot', scope)}`)
+    await openDetails('Runs')
+    expect(screen.queryByRole('button', { name: 'Run now' })).not.toBeInTheDocument()
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+  })
+  it.each(['member', undefined])('does not grant paused team conversation to %s', async userId => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope: 'team', status: 'paused' })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'team' }} theme="dark" userId={userId} />)
+    expect(await screen.findByLabelText('Shared composer')).toBeDisabled()
+    await expect(chatProps.current!.onSend('Hello')).rejects.toThrow('read-only')
+    expect(api.requestBotConversation).not.toHaveBeenCalled()
+  })
+  it.each((['personal', 'team'] as const).flatMap(scope =>
+    ([api.BotStatus.Active, api.BotStatus.Paused, api.BotStatus.Stopped, api.BotStatus.Deleted] as const).flatMap(status =>
+      ['owner', 'other', undefined].map(userId => ({ scope, status, userId })))))('derives attachment and conversation permissions independently for $scope / $status / $userId', async ({ scope, status, userId }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
+    render(<BotWorkspace route={{ botId: 'bot', scope }} theme="dark" userId={userId} />)
+    const composer = await screen.findByLabelText('Shared composer')
+    const unavailable = status === api.BotStatus.Stopped || status === api.BotStatus.Deleted || !userId ||
+      ((status === api.BotStatus.Paused || scope === 'personal') && userId !== 'owner')
+    expect(composer).toHaveProperty('disabled', unavailable)
+    expect(chatProps.current?.toolFree).toBe(status === api.BotStatus.Paused)
+    const attachments = [{ filename: 'notes.txt', mimeType: 'text/plain', data: 'bm90ZXM=' }]
+    if (unavailable || status === api.BotStatus.Paused) {
+      await expect(chatProps.current!.onSend('Discuss setup', attachments)).rejects.toThrow(unavailable ? 'read-only' : 'Attachments are unavailable')
+      expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+    } else {
+      await act(async () => { await chatProps.current!.onSend('Work', attachments) })
+      expect(reviewsApi.sendBotMessage).toHaveBeenCalledWith(expect.objectContaining({ scope, status }), 'Work', expect.any(String), attachments)
+    }
+  })
+  it('rejects attachments when authoritative reconciliation changes active to paused without disabling owner control text', async () => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: api.BotStatus.Active })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    reconciledBot.current = { ...bot, status: api.BotStatus.Paused }
+    await act(async () => { await expect(chatProps.current!.onSend('Work', [{ filename: 'notes.txt', mimeType: 'text/plain', data: 'bm90ZXM=' }])).rejects.toThrow('Attachments are unavailable') })
+    expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+    await act(async () => { await chatProps.current!.onSend('Discuss setup') })
+    expect(reviewsApi.sendBotMessage).toHaveBeenCalledWith(expect.objectContaining({ status: api.BotStatus.Paused }), 'Discuss setup', expect.any(String), undefined)
+  })
+  it('keeps ordinary active send on runs', async () => {
+    window.location.hash = botPath('bot', 'personal')
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: 'active' })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    await act(async () => { await chatProps.current!.onSend('Work') })
+    expect(reviewsApi.sendBotMessage).toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }), 'Work', expect.any(String), undefined)
+    expect(api.requestBotConversation).not.toHaveBeenCalled()
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    expect(window.location.hash).toBe(`#${botPath('bot', 'personal')}`)
+  })
+  it('exposes runtime configuration and keeps its reviewed draft mounted across tabs and refresh', async () => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: 'paused' })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Memory & charter')
+    expect(screen.getByRole('region', { name: 'Runtime configuration' })).toBeVisible()
+    const editor = await screen.findByLabelText('Allowed hosts (one per line)')
+    fireEvent.change(editor, { target: { value: 'example.org' } })
+    fireEvent.change(screen.getByLabelText('Review reason'), { target: { value: 'Reviewed hosts' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review configuration' }))
+    fireEvent.click(screen.getByLabelText('I reviewed this exact configuration and reason'))
+    await openDetails('Thread')
+    expect(editor).toBeInTheDocument()
+    expect(editor).not.toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+    await waitFor(() => expect(api.getBot).toHaveBeenCalledTimes(2))
+    await openDetails('Memory & charter')
+    expect(screen.getByLabelText('Allowed hosts (one per line)')).toBe(editor)
+    expect(editor).toHaveValue('example.org')
+    expect(screen.getByLabelText('Review reason')).toHaveValue('Reviewed hosts')
+    expect(screen.getByLabelText('I reviewed this exact configuration and reason')).toBeChecked()
+    expect(policyApi.getBotConfigurationVersion).toHaveBeenCalledTimes(1)
+    expect(policyApi.configureBot).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText('I explicitly authorize the rights, spending and delivery destinations shown above'))
+    vi.mocked(policyApi.configureBot).mockResolvedValue({ ...bot, revision: 2, version: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Save reviewed configuration' }))
+    await screen.findByText('Configuration saved. Resuming and requesting runs are separate actions.')
+    await waitFor(() => expect(api.getBot).toHaveBeenCalledTimes(3))
+    expect(policyApi.configureBot).toHaveBeenCalledWith('bot', 'personal', expect.objectContaining({ expected_revision: 1, expected_version: 1, reason: 'Reviewed hosts' }))
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+  })
+  it.each([{ userId: 'other', status: 'active' }, { userId: undefined, status: 'active' }, { userId: 'owner', status: 'deleted' }] as const)('keeps runtime configuration read-only for $userId / $status', async ({ userId, status }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId={userId} />)
+    await openDetails('Memory & charter')
+    expect(await screen.findByLabelText('Autonomy level')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Review configuration' })).toBeDisabled()
+  })
+  const targetRun = { id: 'exact', bot_id: 'bot', status: 'running', session_id: 'transcript', trigger: 'manual', created_at: '', report: { summary: '' }, usage: { tool_calls: 0, input_tokens: 0, output_tokens: 0 } } as api.BotRun
+  it.each(['header', 'list'] as const)('stops the reviewed exact run from the %s without lifecycle mutation', async surface => {
+    vi.mocked(api.getBotRun).mockResolvedValue(targetRun)
+    vi.mocked(api.listBotRuns).mockResolvedValue({ runs: [targetRun, { ...targetRun, id: 'finished', status: 'succeeded' }] })
+    vi.mocked(cancelBotRun).mockResolvedValue({ ...targetRun, status: 'interrupted' })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal', ...(surface === 'header' ? { runId: 'exact' } : {}) }} theme="dark" userId="owner" />)
+    expect(screen.queryByText(/Individual run cancellation is not available/)).not.toBeInTheDocument()
+    if (surface === 'list') await openDetails('Runs')
+    expect(screen.queryByText(/Use Stop run on a queued/)).not.toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop run' }))
+    expect(cancelBotRun).not.toHaveBeenCalled()
+    expect(screen.getByRole('region', { name: 'Review stop run exact' })).toHaveTextContent('exact')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm stop run' }))
+    await waitFor(() => expect(cancelBotRun).toHaveBeenCalledWith(bot, 'exact'))
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+    await screen.findByText(/Stop request accepted for run exact/)
+  })
+  it.each([{ userId: 'other', status: 'active' }, { userId: undefined, status: 'active' }, { userId: 'owner', status: 'deleted' }] as const)('disables exact-run cancellation for $userId / $status', async ({ userId, status }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
+    vi.mocked(api.getBotRun).mockResolvedValue(targetRun)
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal', runId: 'exact' }} theme="dark" userId={userId} />)
+    expect(await screen.findByRole('button', { name: 'Stop run' })).toBeDisabled()
+    expect(cancelBotRun).not.toHaveBeenCalled()
+  })
+  it('preserves a failed exact-run review across panel navigation and refresh', async () => {
+    vi.mocked(api.listBotRuns).mockResolvedValue({ runs: [targetRun] })
+    vi.mocked(cancelBotRun).mockRejectedValueOnce(new Error('Cancellation unavailable'))
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Runs')
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop run' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm stop run' }))
+    await screen.findByText('Cancellation unavailable')
+    await openDetails('Thread')
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+    await waitFor(() => expect(api.listBotRuns).toHaveBeenCalledTimes(2))
+    await openDetails('Runs')
+    expect(screen.getByRole('region', { name: 'Review stop run exact' })).toHaveTextContent('Cancellation unavailable')
+    expect(screen.getByRole('button', { name: 'Confirm stop run' })).toBeEnabled()
+    expect(cancelBotRun).toHaveBeenCalledTimes(1)
+  })
+  it('clears selected-run review when navigating to another run', async () => {
+    vi.mocked(api.getBotRun).mockResolvedValue(targetRun)
+    const view = render(<BotWorkspace route={{ botId: 'bot', scope: 'personal', runId: 'exact' }} theme="dark" userId="owner" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop run' }))
+    vi.mocked(api.getBotRun).mockResolvedValue({ ...targetRun, id: 'next' })
+    view.rerender(<BotWorkspace route={{ botId: 'bot', scope: 'personal', runId: 'next' }} theme="dark" userId="owner" />)
+    expect(screen.queryByRole('region', { name: 'Review stop run exact' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Stop run' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Confirm stop run' })).not.toBeInTheDocument()
+  })
+  it('uses the same ordered persisted decisions in the header and inbox', async () => {
+    const approval = { run_id: 'r', version: 1, action_digest: 'digest', action: {}, status: 'pending' as const }
+    vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [
+      { ...approval, id: 'later', expires_at: '2099-02-01', interaction: { kind: 'chat_question', question_id: 'q2', payload: { kind: 'yesno', prompt: 'Later decision' } } },
+      { ...approval, id: 'first', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q1', payload: { kind: 'yesno', prompt: 'First decision' } } },
+    ] })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await waitFor(() => expect(chatProps.current?.pendingApprovalIds).toEqual(['first', 'later']))
+    await openDetails('Review inbox')
+    const inbox = screen.getByText('Review inbox', { selector: 'summary' }).parentElement!
+    expect(inbox.textContent!.indexOf('First decision')).toBeLessThan(inbox.textContent!.indexOf('Later decision'))
+    expect(screen.queryByLabelText('Decision summary')).not.toBeInTheDocument()
+  })
+  it('hides old Bot immediately on route/scope switch and keeps five keyboard tabs', async () => {
+    const view = render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await screen.findByRole('heading', { name: 'Watcher' })
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+    const composer = screen.getByLabelText('Shared composer')
+    fireEvent.change(composer, { target: { value: 'Unsent message' } })
+    await openDetails('Memory & charter')
+    const memoryEditor = await screen.findByLabelText('Content CHARTER.md')
+    fireEvent.change(memoryEditor, { target: { value: 'Private unsaved charter' } })
+    vi.mocked(api.getBot).mockImplementation(() => new Promise(() => {}))
+    view.rerender(<BotWorkspace route={{ botId: 'other', scope: 'team' }} theme="dark" userId="owner" />)
+    expect(screen.queryByRole('heading', { name: 'Watcher' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Shared composer')).not.toBeInTheDocument()
+    expect(memoryEditor).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('Private unsaved charter')).not.toBeInTheDocument()
+  })
+  it('preserves unfinished goals, configuration and charter when Details closes and reopens', async () => {
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Goals')
+    fireEvent.change(await screen.findByLabelText('Goal title'), { target: { value: 'Unfinished goal' } })
+    await openDetails('Memory & charter')
+    fireEvent.change(await screen.findByLabelText('Content CHARTER.md'), { target: { value: 'Unfinished charter' } })
+    fireEvent.change(await screen.findByLabelText('Review reason'), { target: { value: 'Unfinished configuration reason' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Shared composer')).toBeEnabled()
+    await openDetails('Goals')
+    expect(screen.getByLabelText('Goal title')).toHaveValue('Unfinished goal')
+    await openDetails('Memory & charter')
+    expect(screen.getByLabelText('Content CHARTER.md')).toHaveValue('Unfinished charter')
+    expect(screen.getByLabelText('Review reason')).toHaveValue('Unfinished configuration reason')
+    expect(memoryApi.saveBotDocument).not.toHaveBeenCalled()
+    expect(policyApi.configureBot).not.toHaveBeenCalled()
+  })
+  it('keeps same-Bot edits mounted across failed refresh and tab navigation', async () => {
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Goals')
+    fireEvent.change(await screen.findByLabelText('Goal title'), { target: { value: 'Unsaved goal' } })
+    await openDetails('Runs')
+    await openDetails('Goals')
+    vi.mocked(api.getBot).mockRejectedValueOnce(new Error('Workspace unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+    await screen.findByText(/may still be running/)
+    expect(screen.getByLabelText('Goal title')).toHaveValue('Unsaved goal')
+    expect(screen.getByRole('heading', { name: 'Watcher' })).toBeInTheDocument()
+  })
+  it('keeps reviewed memory drafts and CAS baseline mounted across tabs and workspace refreshes', async () => {
+    vi.mocked(memoryApi.saveBotDocument).mockRejectedValueOnce(new api.BotAPIError(409, 'Review latest revision'))
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await openDetails('Memory & charter')
+    const editor = await screen.findByLabelText('Content CHARTER.md')
+    fireEvent.change(editor, { target: { value: 'Local changes' } })
+    fireEvent.change(screen.getByLabelText('Reason CHARTER.md'), { target: { value: 'Reviewed reason' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review CHARTER.md' }))
+    expect(memoryApi.saveBotDocument).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm save CHARTER.md' }))
+    await screen.findByText('Review latest revision')
+    await openDetails('Thread')
+    expect(editor).toBeInTheDocument()
+    expect(editor).not.toBeVisible()
+    vi.mocked(api.getBot).mockRejectedValueOnce(new Error('Workspace unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+    await screen.findByText(/may still be running/)
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, revision: 2, version: 2 })
+    vi.mocked(api.getBotVersion).mockResolvedValue({ ...version, version: 2, charter: 'Server changed' })
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+    await screen.findByText(/Version 2 · revision 2/)
+    await openDetails('Memory & charter')
+    expect(screen.getByLabelText('Content CHARTER.md')).toBe(editor)
+    expect(editor).toHaveValue('Local changes')
+    expect(screen.getByLabelText('Reason CHARTER.md')).toHaveValue('Reviewed reason')
+    expect(screen.getByRole('button', { name: 'Review CHARTER.md' })).toBeDisabled()
+    expect(memoryApi.getBotDocuments).toHaveBeenCalledTimes(1)
+    expect(memoryApi.saveBotDocument).toHaveBeenCalledWith(bot, 'CHARTER.md', { expected_revision: 1, content: 'Local changes', reason: 'Reviewed reason', confirmed: true })
+    vi.mocked(memoryApi.getBotDocuments).mockResolvedValue({ bot_id: bot.id, revision: 2, version: 2, documents: [{ name: 'CHARTER.md', content: 'Server changed' }] })
+    fireEvent.click(screen.getByRole('button', { name: 'Reload and compare CHARTER.md' }))
+    await screen.findByText('Server changed')
+    fireEvent.click(screen.getByRole('button', { name: 'Use latest revision; keep my edits CHARTER.md' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Review CHARTER.md' }))
+    vi.mocked(memoryApi.saveBotDocument).mockResolvedValue({ ...bot, revision: 3, version: 3 })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm save CHARTER.md' }))
+    await screen.findByText('Saved. Reload and compare before editing again.')
+    expect(memoryApi.saveBotDocument).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 2 }), 'CHARTER.md', { expected_revision: 2, content: 'Local changes', reason: 'Reviewed reason', confirmed: true })
+    await waitFor(() => expect(api.getBot).toHaveBeenCalledTimes(4))
+    expect(api.listBotMemories).not.toHaveBeenCalled()
+  })
+  it.each([{ userId: 'other', status: 'active' }, { userId: 'owner', status: 'deleted' }, { userId: undefined, status: 'active' }] as const)('makes memory documents read-only for $userId / $status', async ({ userId, status }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId={userId} />)
+    await openDetails('Memory & charter')
+    expect(await screen.findByLabelText('Content CHARTER.md')).toBeDisabled()
+    expect(screen.getByText(/Read-only access/)).toBeInTheDocument()
+  })
+  it('lets team members converse while the server authorizes admission', async () => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope: 'team', status: 'active' })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'team' }} theme="dark" userId="member" />)
+    expect(await screen.findByLabelText('Shared composer')).not.toBeDisabled()
+  })
+  it('keeps personal sidebar inventory on team route navigation without selecting the wrong Bot', async () => {
+    const { rerender } = render(<BotSidebar activeId="bot" activeScope="personal" />)
+    await screen.findByRole('link', { name: /Watcher/ })
+    rerender(<BotSidebar activeId="bot" activeScope="team" />)
+    expect(screen.getByRole('link', { name: /Watcher/ })).toHaveAttribute('href', '#/chat/bots/personal/bot')
+    expect(screen.getByRole('link', { name: /Watcher/ })).not.toHaveAttribute('aria-current')
+    expect(vi.mocked(api.listBots).mock.calls.every(([scope]) => scope === 'personal')).toBe(true)
+  })
+  it('round trips explicit Bot/run routes without treating them as Chat sessions', () => {
+    expect(parseHash(`#${botPath('a b', 'team', 'run')}`)).toEqual({ view: 'chat', params: { botId: 'a b', botScope: 'team', runId: 'run' } })
+  })
+  it('keeps panel errors independent and requires explicit resume review', async () => {
+    const paused = { ...bot, status: 'paused' as const }
+    vi.mocked(api.getBot).mockResolvedValue(paused)
+    vi.mocked(memoryApi.getBotMemoryHealth).mockRejectedValue(new Error('Memory unavailable'))
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    expect(await screen.findByRole('heading', { name: 'Watcher' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Shared composer')).toBeEnabled()
+    await openDetails('Memory & charter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Review resume' }))
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Confirm resume' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Lifecycle reason'), { target: { value: 'Reviewed' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm resume' }))
+    await waitFor(() => expect(api.botLifecycle).toHaveBeenCalledWith(paused, 'resume', 'Reviewed'))
+    await openDetails('Memory & charter')
+    expect(await screen.findByText('Memory unavailable')).toBeInTheDocument()
+    await openDetails('Runs')
+    expect(screen.getByText(/No runs yet/)).toBeInTheDocument()
+  })
+  it.each(['paused', 'stopped', 'deleted'] as const)('enforces %s composer availability', async status => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="owner" />)
+    const composer = await screen.findByLabelText('Shared composer')
+    if (status === 'paused') { expect(composer).toBeEnabled(); expect(chatProps.current?.toolFree).toBe(true) }
+    else expect(composer).toBeDisabled()
+  })
+  it('does not grant nonowner controls', async () => {
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="other" />)
+    expect(await screen.findByLabelText('Shared composer')).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Review resume' })).not.toBeInTheDocument()
+  })
+  it('saves only after content review, without lifecycle changes', async () => {
+    vi.mocked(api.createBot).mockResolvedValue(bot)
+    render(<BotCreateDialog open onClose={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Watcher' } })
+    fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review Bot' }))
+    expect(screen.getByRole('button', { name: 'Create reviewed Bot' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Create reviewed Bot' }))
+    await waitFor(() => expect(api.createBot).toHaveBeenCalledWith({ name: 'Watcher', definition: { charter: 'Observe' }, idempotency_key: expect.any(String) }))
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+  })
+  it('shows Bot list failure and retries without requiring Chat success', async () => {
+    vi.mocked(api.listBots).mockRejectedValueOnce(new Error('Bots unavailable'))
+    render(<BotSidebar />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry Bots' }))
+    expect(await screen.findByRole('link', { name: /Watcher/ })).toHaveAttribute('href', '#/chat/bots/personal/bot')
+  })
+  it('creates a disabled cron schedule only with a reason', async () => {
+    render(<BotSchedule bot={bot} version={version} readOnly={false} onChange={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Use legacy instructions (no skill import)'))
+    for (const [label, value] of [['Cron expression', '0 9 * * *'], ['Schedule instructions', 'Observe'], ['Trigger change reason', 'Reviewed']]) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save disabled schedule' }))
+    await waitFor(() => expect(api.saveBotTrigger).toHaveBeenCalledWith(bot, expect.objectContaining({ enabled: false, kind: 'cron', timezone: 'UTC' }), 'Reviewed'))
+  })
+  it('requires goal completion criteria and keeps permission decisions digest bound', async () => {
+    const { unmount } = render(<BotGoals bot={bot} goals={[]} readOnly={false} onChange={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Save goal' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Goal title'), { target: { value: 'Verify source' } })
+    fireEvent.change(screen.getByLabelText('Completion criteria'), { target: { value: 'Official evidence' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save goal' }))
+    await waitFor(() => expect(goalsApi.createGoal).toHaveBeenCalled())
+    unmount()
+    const approval: api.BotApproval = { id: 'approval', run_id: 'run', version: 1, action_digest: 'exact', action: { tool: 'email' }, status: 'pending', expires_at: '2099-01-01' }
+    render(<BotDecisionInbox bot={bot} approvals={[approval]} readOnly={false} onChange={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Deny' }))
+    await waitFor(() => expect(api.decideBotApproval).toHaveBeenCalledWith(bot, approval, 'denied', undefined))
+  })
+})
+
+it('retains checkpoint continuation acceptance across higher enclosing sequences', async () => {
+  const paused: import('@/api/botRunState').BotRunState = { schema_version: 1, bot_id: 'bot', run_id: 'saved', session_id: 'trace', home_session_id: 'home', presentation: '', status: 'interrupted', state_sequence: 9, progress: { schema_version: 1, bot_id: 'bot', run_id: 'saved', session_id: 'trace', revision: 4, phase: 'suspended', reason: 'paused', active_duration_nanos: 21600000000000 } }
+  continuationStates.value = [paused]
+  vi.mocked(reviewsApi.continueInteractive).mockResolvedValue({} as api.BotRun)
+  render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="owner" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Continue saved progress' }))
+  expect(await screen.findByRole('button', { name: 'Continuation requested' })).toBeDisabled()
+  continuationStates.value = [{ ...paused, state_sequence: 10 }]
+  fireEvent.click(screen.getByRole('button', { name: 'Details' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+  await waitFor(() => expect(reviewsApi.continueInteractive).toHaveBeenCalledOnce())
+  fireEvent.click(screen.getByRole('button', { name: /^Close$/ }))
+  expect(screen.getByRole('button', { name: 'Continuation requested' })).toBeDisabled()
+  expect(reviewsApi.continueInteractive).toHaveBeenCalledWith(bot, 'saved', expect.any(String), { kind: 'progress_v1', checkpoint_revision: 4 })
+  expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+})
+
+it('offers standalone continuation from interrupted snapshot without fabricating an answer or resending', async () => {
+  continuationStates.value = [{schema_version:1,bot_id:'bot',run_id:'interrupted',session_id:'trace',home_session_id:'home',presentation:'home_interactive',status:'interrupted',state_sequence:9,reason:'continuation_required'}]
+  vi.mocked(reviewsApi.continueInteractive).mockResolvedValue({} as api.BotRun)
+  render(<BotWorkspace route={{botId:'bot',scope:'personal'}} theme="dark" userId="owner" />)
+  fireEvent.click(await screen.findByRole('button',{name:'Continue interactive'}))
+  await waitFor(() => expect(reviewsApi.continueInteractive).toHaveBeenCalledWith(bot,'interrupted',expect.any(String)))
+  expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+})
+
+it('loads Home files only after opening force-mounted Details', async () => {
+  render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="light" userId="owner" />)
+  await screen.findByLabelText('Shared composer')
+  expect(filesApi.listBotFiles).not.toHaveBeenCalled()
+  await openDetails('Runs')
+  await waitFor(() => expect(filesApi.listBotFiles).toHaveBeenCalledTimes(1))
+  expect(screen.getByRole('heading', { name: 'Database-backed Configuration' })).toBeVisible()
+  const signal = vi.mocked(filesApi.listBotFiles).mock.calls[0][1]!
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(signal.aborted).toBe(true)
+})

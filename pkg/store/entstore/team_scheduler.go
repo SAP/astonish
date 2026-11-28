@@ -175,6 +175,15 @@ func entScheduledJobToStore(j *teament.ScheduledJob) *store.ScheduledJob {
 
 func jobToPayloadMap(job *store.ScheduledJob) map[string]any {
 	payload := make(map[string]any)
+	if job.Payload.BotID != "" {
+		payload["bot_id"] = job.Payload.BotID
+	}
+	if job.Payload.BotVersion != 0 {
+		payload["bot_version"] = job.Payload.BotVersion
+	}
+	if job.Payload.BotTriggerID != "" {
+		payload["bot_trigger_id"] = job.Payload.BotTriggerID
+	}
 
 	// Store schedule timezone in payload.
 	if job.Schedule.Timezone != "" {
@@ -225,6 +234,16 @@ func jobToPayloadMap(job *store.ScheduledJob) map[string]any {
 
 func payloadMapToJobPayload(m map[string]any) store.JobPayload {
 	var p store.JobPayload
+	p.BotID, _ = m["bot_id"].(string)
+	p.BotTriggerID, _ = m["bot_trigger_id"].(string)
+	switch v := m["bot_version"].(type) {
+	case int64:
+		p.BotVersion = v
+	case float64:
+		if v == float64(int64(v)) {
+			p.BotVersion = int64(v)
+		}
+	}
 	if flow, ok := m["flow"].(string); ok {
 		p.Flow = flow
 	}

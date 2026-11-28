@@ -13,15 +13,473 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	adrill "github.com/SAP/astonish/pkg/drill"
+	"github.com/SAP/astonish/pkg/question"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+// SessionEventProjector is the request-owned presentation boundary. It never
+// acquires credentials, starts execution, or treats transcript metadata as authority.
+// Bot callers must authorize the session before every read and delivery.
+// The zero value retains ordinary Chat history conversion unchanged.
+type SessionEventProjector struct {
+	BotID, HomeSessionID, SessionID uuid.UUID
+	Repository                      store.BotStore
+	Redactor                        *credentials.Redactor
+	seenPublications                map[string]bool
+	adkTools                        *uiToolTracker
+	adkFileCalls                    map[string]projectedFileCall
+	adkDelegations                  map[string]*pendingDelegation
+}
+
+type projectedFileCall struct {
+	path, toolName string
+}
+
+// SessionEventProjection separates durable transport position from display identity
+// and runtime turn sequence. Transcript is the existing ADK compatibility wire;
+// Events is the normalized public representation for the coordinated consumer switch.
+type SessionEventProjection struct {
+	Cursor     int64           `json:"cursor"`
+	EventID    string          `json:"event_id"`
+	SessionID  uuid.UUID       `json:"session_id"`
+	RunID      uuid.UUID       `json:"run_id"`
+	TurnID     string          `json:"turn_id,omitempty"`
+	Sequence   int64           `json:"sequence,omitempty"`
+	Events     []ChatEvent     `json:"events"`
+	Transcript json.RawMessage `json:"-"`
+}
+
+// BotProjectionMetadata is presentation provenance, never execution authority.
+// Cursor is the last fully delivered row, not this event's display identity.
+type BotProjectionMetadata struct {
+	EventID   string    `json:"event_id,omitempty"`
+	SessionID uuid.UUID `json:"session_id"`
+	RunID     uuid.UUID `json:"run_id"`
+	TurnID    string    `json:"turn_id,omitempty"`
+	Sequence  int64     `json:"sequence,omitempty"`
+	Cursor    string    `json:"cursor"`
+}
+
+// BotPresentationFrame carries the ordinary Chat event name and payload plus
+// reserved _projection metadata. Cursor is safe to place in the SSE id field.
+type BotPresentationFrame struct {
+	Type   string
+	Data   json.RawMessage
+	Cursor int64
+}
+
+const botCursorEvent = "cursor"
+
+// BotFrames encodes a whole durable row before delivery. Only its last frame
+// advances the transport cursor; interrupted rows replay with stable event IDs.
+// Callers must authorize before each write and commit their local cursor only
+// after all frames have been flushed. No API handler switches wire implicitly.
+func (p SessionEventProjection) BotFrames(previous int64) ([]BotPresentationFrame, error) {
+	if p.SessionID == uuid.Nil || previous < 0 || p.Cursor <= previous {
+		return nil, store.ErrBotInvalid
+	}
+	frames := make([]BotPresentationFrame, 0, len(p.Events))
+	encode := func(event ChatEvent, cursor int64) error {
+		data := make(map[string]any, len(event.Data)+1)
+		for key, value := range event.Data {
+			data[key] = value
+		}
+		// Delivery time belongs to the committed event, not its model/tool payload.
+		// Unknown historical times remain absent rather than gaining a viewer clock.
+		delete(data, "timestamp")
+		if !event.Timestamp.IsZero() {
+			data["timestamp"] = event.Timestamp
+		}
+		data["_projection"] = BotProjectionMetadata{EventID: event.ID, SessionID: p.SessionID, RunID: p.RunID, TurnID: p.TurnID, Sequence: p.Sequence, Cursor: botEventCursor(p.SessionID, cursor)}
+		payload, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		frames = append(frames, BotPresentationFrame{Type: event.Type, Data: payload, Cursor: cursor})
+		return nil
+	}
+	if len(p.Events) == 0 {
+		if err := encode(ChatEvent{Type: botCursorEvent}, p.Cursor); err != nil {
+			return nil, err
+		}
+	} else {
+		for i, event := range p.Events {
+			if event.ID == "" || event.Type == "" {
+				return nil, store.ErrBotInvalid
+			}
+			cursor := previous
+			if i == len(p.Events)-1 {
+				cursor = p.Cursor
+			}
+			if err := encode(event, cursor); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return frames, nil
+}
+
+func (p *SessionEventProjector) Messages(events session.Events) []StudioMessage {
+	return projectSessionMessages(events, p.Redactor)
+}
+
+// ProjectBot normalizes one committed row without using text equality for identity.
+// Hidden rows retain an empty compatibility envelope so existing clients advance
+// their cursor; they produce zero normalized presentation events.
+func (p *SessionEventProjector) ProjectBot(ctx context.Context, row store.BotTranscriptEvent, approvals []store.BotApproval) (SessionEventProjection, error) {
+	out := SessionEventProjection{Cursor: row.Cursor, SessionID: p.SessionID, Events: []ChatEvent{}}
+	if row.Event == nil || p.BotID == uuid.Nil || p.SessionID == uuid.Nil || row.Event.ID == "" {
+		return out, store.ErrBotInvalid
+	}
+	out.EventID, out.TurnID = row.Event.ID, row.Event.InvocationID
+	// Check provenance before Home narration removes the runtime envelope.
+	// ID-less historical envelopes remain readable but never gain new authority.
+	if row.Event.Author == "bot_runtime" && row.Event.Content == nil {
+		if runtime, ok := publicBotRuntime(row.Event.Actions.StateDelta["bot_runtime_event"]); ok {
+			if runtime.SessionID != uuid.Nil && runtime.SessionID != p.SessionID {
+				// Public Home narration retains its source run session. Only the
+				// scoped repository can establish that cross-session relationship;
+				// the stored envelope itself cannot grant access to another run.
+				if p.SessionID != p.HomeSessionID || p.Repository == nil || runtime.RunID == uuid.Nil {
+					return out, store.ErrBotInvalid
+				}
+				run, err := p.Repository.GetRun(ctx, p.BotID, runtime.RunID)
+				if err != nil {
+					return out, err
+				}
+				if run == nil || run.BotID != p.BotID || run.ID != runtime.RunID || run.SessionID != runtime.SessionID {
+					return out, store.ErrBotInvalid
+				}
+			}
+			// A completed ADK response is persisted before its runtime text.
+			// Its source row owns run presentation even when replay starts later;
+			// Home copies retain narration because they have no ADK source row.
+			var source struct {
+				EventID string `json:"sourceEventId"`
+			}
+			if runtime.Type == "text" && p.SessionID != p.HomeSessionID && json.Unmarshal(runtime.Payload, &source) == nil && source.EventID != "" {
+				return out, nil
+			}
+		}
+	}
+	verified, err := verifyBotHomePublication(ctx, p.Repository, row.Event, p.BotID, p.HomeSessionID, p.SessionID)
+	if err != nil {
+		return out, err
+	}
+	e := projectBotQuestionTranscript(verified, approvals)
+	// Stored review payloads are references, not authority. Discard embedded
+	// questions before enriching from this request's scoped approval records.
+	e = botReviewReferenceOnly(e)
+	e = projectBotReviewQuestion(e, approvals, p.BotID, p.SessionID)
+	e = p.ProjectHomeNarrative(ctx, e)
+	wire, err := marshalCommittedBotTranscriptEvent(ctx, p.Repository, e, p.BotID, p.SessionID)
+	if err != nil {
+		return out, err
+	}
+	if p.seenPublications == nil {
+		p.seenPublications = make(map[string]bool)
+	}
+	if duplicateBotFilePublication(row.Event, p.seenPublications) {
+		return out, nil
+	}
+	var clean session.Event
+	if err := json.Unmarshal(wire, &clean); err != nil {
+		return out, err
+	}
+	out.EventID, out.TurnID, out.Transcript = clean.ID, clean.InvocationID, wire
+	// Home narration changes only presentation, not its runtime provenance.
+	if row.Event.Author == "bot_runtime" && row.Event.Content == nil {
+		if runtime, ok := publicBotRuntime(row.Event.Actions.StateDelta["bot_runtime_event"]); ok && runtime.SessionID != uuid.Nil && runtime.RunID != uuid.Nil && runtime.TurnID != uuid.Nil && runtime.Sequence > 0 {
+			out.RunID, out.TurnID, out.Sequence = runtime.RunID, runtime.TurnID.String(), runtime.Sequence
+		}
+	}
+	appendEvent := func(kind string, data map[string]any) {
+		// Match ordinary Chat history: redact all model/tool payload strings,
+		// but leave user-authored text unchanged. RedactMap never mutates input.
+		if p.Redactor != nil && kind != "user_message" {
+			data = p.Redactor.RedactMap(data)
+		}
+		out.Events = append(out.Events, ChatEvent{ID: fmt.Sprintf("%s/%s/%d", p.SessionID, clean.ID, len(out.Events)), Type: kind, Data: data, Timestamp: clean.Timestamp})
+	}
+	if value, ok := clean.Actions.StateDelta["bot_runtime_event"]; ok {
+		raw, _ := json.Marshal(value)
+		var runtime bot.RuntimeEvent
+		if json.Unmarshal(raw, &runtime) == nil {
+			out.RunID, out.TurnID, out.Sequence = runtime.RunID, runtime.TurnID.String(), runtime.Sequence
+			var data map[string]any
+			if json.Unmarshal(runtime.Payload, &data) == nil {
+				if runtime.Type == "bot_review" {
+					data["reviewId"] = data["review_id"]
+					delete(data, "review_id")
+					data["eventId"] = clean.ID
+					data["invocationId"] = clean.InvocationID
+				}
+				appendEvent(runtime.Type, data)
+			}
+		}
+	}
+	for _, key := range []string{store.BotRunStateKey, store.BotOperationKey, store.BotFilePublicationKey, agent.PlanSnapshotStateKey} {
+		if value, ok := clean.Actions.StateDelta[key]; ok {
+			if key == agent.PlanSnapshotStateKey {
+				if snapshot, valid := decodePlanSnapshot(value); valid {
+					appendEvent("subtask_progress", planSnapshotData(snapshot))
+				}
+				continue
+			}
+			raw, _ := json.Marshal(value)
+			var data map[string]any
+			if json.Unmarshal(raw, &data) == nil {
+				appendEvent(key, data)
+				if key == store.BotFilePublicationKey {
+					// The reviewed publication owns its summary and artifacts as one
+					// display object; do not emit its ADK summary a second time.
+					return out, nil
+				}
+			}
+		}
+	}
+	if clean.Content != nil {
+		if p.adkTools == nil {
+			p.adkTools = newUIToolTracker()
+			p.adkFileCalls = make(map[string]projectedFileCall)
+			p.adkDelegations = make(map[string]*pendingDelegation)
+		}
+		for _, part := range clean.Content.Parts {
+			if part == nil || part.Thought {
+				continue
+			}
+			if part.Text != "" {
+				kind, text := "text", part.Text
+				if clean.Content.Role == "user" {
+					kind = "user_message"
+					text = agent.CleanUserText(text)
+					var answer struct {
+						Type    string `json:"type"`
+						Display struct {
+							Answer string `json:"answer"`
+						} `json:"display"`
+					}
+					if json.Unmarshal([]byte(text), &answer) == nil && answer.Type == "bot_owner_answer" && answer.Display.Answer != "" {
+						text = answer.Display.Answer
+					}
+				}
+				appendEvent(kind, map[string]any{"text": text, "invocationId": clean.InvocationID})
+			}
+			if call := part.FunctionCall; call != nil {
+				identity := p.adkTools.call(call)
+				if identity.name == "delegate_tasks" {
+					pd := extractDelegationPlan(identity.args)
+					pd.batchID = call.ID
+					p.adkDelegations[call.ID] = pd
+					msg := buildSubTaskExecutionMessage(pd, nil)
+					appendEvent("subtask_progress", map[string]any{"event_type": "delegation_start", "batch_id": call.ID, "tasks": msg.Tasks})
+				} else {
+					appendEvent("tool_call", map[string]any{"name": identity.name, "id": call.ID, "args": identity.args})
+					if identity.name == "write_file" || identity.name == "edit_file" || identity.name == "load_file" {
+						if path := extractFilePath(identity.name, identity.args); path != "" {
+							p.adkFileCalls[call.ID] = projectedFileCall{path, identity.name}
+						}
+					}
+				}
+			}
+			if result := part.FunctionResponse; result != nil {
+				name := p.adkTools.response(result)
+				if name == "delegate_tasks" {
+					msg := buildSubTaskExecutionMessage(p.adkDelegations[result.ID], result.Response)
+					delete(p.adkDelegations, result.ID)
+					for _, event := range msg.Events {
+						raw, _ := json.Marshal(event)
+						var data map[string]any
+						_ = json.Unmarshal(raw, &data)
+						data["event_type"] = event.Type
+						if event.Type == "delegation_start" {
+							data["tasks"] = msg.Tasks
+						}
+						appendEvent("subtask_progress", data)
+					}
+				} else {
+					appendEvent("tool_result", map[string]any{"name": name, "id": result.ID, "result": summarizeToolResult(result.Response)})
+					if file, ok := p.adkFileCalls[result.ID]; ok {
+						delete(p.adkFileCalls, result.ID)
+						if common.ToolResultSucceeded(result.Response, nil) {
+							// A successful ordinary file tool is a compact artifact, never
+							// an authoritative reviewed Bot publication or report marker.
+							appendEvent("artifact", map[string]any{"path": file.path, "tool_name": file.toolName})
+						}
+					}
+				}
+			}
+			if image := part.InlineData; image != nil {
+				appendEvent("image", map[string]any{"data": base64.StdEncoding.EncodeToString(image.Data), "mimeType": image.MIMEType})
+			}
+		}
+		if clean.Content.Role == "model" && clean.TurnComplete && !clean.Partial {
+			appendEvent("turn_complete", map[string]any{"invocationId": clean.InvocationID})
+		}
+	}
+	return out, nil
+}
+
+// botReviewReferenceOnly removes untrusted embedded presentation before the
+// authoritative enrichment step. Work on copies; never rewrite durable storage.
+func botReviewReferenceOnly(event *session.Event) *session.Event {
+	if event.Author != "bot_runtime" || event.Content != nil {
+		return event
+	}
+	raw, err := json.Marshal(event.Actions.StateDelta["bot_runtime_event"])
+	var runtime bot.RuntimeEvent
+	if err != nil || json.Unmarshal(raw, &runtime) != nil || runtime.Type != "bot_review" {
+		return event
+	}
+	var ref struct {
+		Kind     string    `json:"kind"`
+		ReviewID uuid.UUID `json:"review_id"`
+	}
+	if json.Unmarshal(runtime.Payload, &ref) != nil {
+		runtime.Payload = json.RawMessage(`{}`)
+	} else {
+		runtime.Payload, _ = json.Marshal(ref)
+	}
+	clean := *event
+	clean.Actions.StateDelta = make(map[string]any, len(event.Actions.StateDelta))
+	for k, v := range event.Actions.StateDelta {
+		clean.Actions.StateDelta[k] = v
+	}
+	clean.Actions.StateDelta["bot_runtime_event"] = runtime
+	return &clean
+}
+
+// publicBotTranscript strips ADK execution metadata, unknown state and opaque
+// controller envelopes. Known Bot state/publication schemas are validated by the
+// caller before reaching this function. It never mutates the saved row.
+func publicBotTranscript(event *session.Event) *session.Event {
+	clean := &session.Event{ID: event.ID, InvocationID: event.InvocationID, Author: event.Author, Timestamp: event.Timestamp,
+		LLMResponse: model.LLMResponse{Partial: event.Partial, TurnComplete: event.TurnComplete, Interrupted: event.Interrupted}}
+	if agent.IsTurnContextEvent(event) || isSyntheticRunError(event) {
+		return clean
+	}
+	if event.Content != nil {
+		clean.Content = &genai.Content{Role: event.Content.Role}
+		for _, part := range event.Content.Parts {
+			if part == nil || part.Thought {
+				continue
+			}
+			clean.Content.Parts = append(clean.Content.Parts, &genai.Part{Text: part.Text, FunctionCall: part.FunctionCall, FunctionResponse: part.FunctionResponse, InlineData: part.InlineData, FileData: part.FileData})
+		}
+	}
+	state := make(map[string]any)
+	if snapshot, ok := decodePlanSnapshot(event.Actions.StateDelta[agent.PlanSnapshotStateKey]); ok {
+		state[agent.PlanSnapshotStateKey] = snapshot
+	}
+	if event.Author == "bot_runtime" && event.Content == nil {
+		if runtime, ok := publicBotRuntime(event.Actions.StateDelta["bot_runtime_event"]); ok {
+			state["bot_runtime_event"] = runtime
+		}
+	}
+	if len(state) > 0 {
+		clean.Actions.StateDelta = state
+	}
+	return clean
+}
+
+// The runtime payload allowlist is intentionally independent of arbitrary ADK
+// state. Unknown envelope types cannot turn a future private checkpoint into UI.
+func publicBotRuntime(value any) (bot.RuntimeEvent, bool) {
+	raw, err := json.Marshal(value)
+	var runtime bot.RuntimeEvent
+	if err != nil || json.Unmarshal(raw, &runtime) != nil {
+		return runtime, false
+	}
+	var data map[string]json.RawMessage
+	if json.Unmarshal(runtime.Payload, &data) != nil {
+		return runtime, false
+	}
+	var fields []string
+	switch runtime.Type {
+	case "text", "thinking":
+		fields = []string{"text", "invocationId", "sourceEventId"}
+	case "tool_call":
+		fields = []string{"id", "name", "args"}
+	case "tool_result":
+		fields = []string{"id", "name", "result"}
+	case "error":
+		fields = []string{"error"}
+	case "error_info":
+		fields = []string{"title", "reason", "suggestion"}
+	case "artifact":
+		fields = []string{"path", "name", "fileName", "fileType", "mimeType", "toolName", "isReport", "reportTitle"}
+	case "report_marker":
+		fields = []string{"path", "title"}
+	case "image":
+		fields = []string{"data", "mimeType"}
+	case "done":
+		fields = []string{"done", "usage", "routingSummary"}
+	case "session":
+		fields = []string{"sessionId", "isNew"}
+	case "session_title":
+		fields = []string{"sessionId", "title"}
+	case "bot_review":
+		fields = []string{"kind", "review_id"}
+		if qraw, ok := data["question"]; ok {
+			var q question.Question
+			if json.Unmarshal(qraw, &q) == nil && q.Validate() == nil {
+				data["question"], _ = json.Marshal(q)
+				fields = append(fields, "question")
+			}
+		}
+	case "chat_question":
+		var q question.Question
+		if json.Unmarshal(runtime.Payload, &q) != nil || q.Validate() != nil {
+			return runtime, false
+		}
+		runtime.Payload, _ = json.Marshal(q)
+		return runtime, true
+	case "subtask_progress":
+		var eventType string
+		_ = json.Unmarshal(data["event_type"], &eventType)
+		if eventType == "plan_snapshot" {
+			var value any
+			if json.Unmarshal(data["snapshot"], &value) != nil {
+				return runtime, false
+			}
+			snapshot, valid := decodePlanSnapshot(value)
+			if !valid {
+				return runtime, false
+			}
+			runtime.Payload, err = json.Marshal(planSnapshotData(snapshot))
+			return runtime, err == nil
+		}
+		fields = []string{"type", "event_type", "batch_id", "task_id", "task_name", "child_session_id", "attempt", "sequence", "text", "tool_name", "tool_args", "tool_result", "status", "duration", "error", "tasks"}
+	case "plan":
+		fields = []string{"goal", "steps", "context", "what_not_to_do", "verification"}
+	case "plan_update":
+		fields = []string{"step", "status"}
+	case "retry":
+		fields = []string{"attempt", "maxRetries", "reason"}
+	default:
+		return runtime, false
+	}
+	clean := make(map[string]json.RawMessage, len(fields))
+	for _, field := range fields {
+		if v, ok := data[field]; ok {
+			clean[field] = v
+		}
+	}
+	runtime.Payload, err = json.Marshal(clean)
+	if runtime.Type == "error" || runtime.Type == "error_info" {
+		runtime.Payload, err = json.Marshal(publicChatErrorData(runtime.Type, rawMessageMap(clean)))
+	}
+	return runtime, err == nil
+}
 
 // SessionTitleSetter is a minimal interface for setting a session's title.
 // Both *persistentsession.FileStore and store.SessionStore (pgSessionStore)
@@ -64,6 +522,16 @@ type pendingDelegation struct {
 // subtask_execution messages that render as TaskPlanPanel in the frontend,
 // preserving the task plan visualization for completed sessions.
 func eventsToMessages(events session.Events, redactor *credentials.Redactor) []StudioMessage {
+	return (&SessionEventProjector{Redactor: redactor}).Messages(events)
+}
+
+func projectSessionMessages(events session.Events, redactor *credentials.Redactor) []StudioMessage {
+	type pendingPlanCall struct {
+		name  string
+		args  map[string]any
+		index int
+	}
+	pendingPlans := make(map[string]pendingPlanCall)
 	var messages []StudioMessage
 	var lastInvocationID string // track invocation boundary for coalescing
 
@@ -83,6 +551,9 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 
 	for i := range events.Len() {
 		event := events.At(i)
+		if snapshot, ok := decodePlanSnapshot(event.Actions.StateDelta[agent.PlanSnapshotStateKey]); ok {
+			messages = overlayPlanSnapshot(messages, snapshot)
+		}
 		if agent.IsTurnContextEvent(event) || event.LLMResponse.Content == nil {
 			continue
 		}
@@ -95,6 +566,9 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 			if part.Text != "" {
 				msgType := "agent"
 				text := part.Text
+				if isSyntheticRunError(event) {
+					text = publicChatSyntheticErrorText(event)
+				}
 				if role == "user" {
 					msgType = "user"
 					// Strip the timestamp prefix injected by NewTimestampedUserContent.
@@ -227,16 +701,11 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					continue
 				}
 
-				// Intercept announce_plan: emit a plan message immediately.
-				if toolName == "announce_plan" {
-					msg := buildPlanMessage(toolArgs)
-					messages = append(messages, msg)
-					continue
-				}
-
-				// Intercept update_plan: update the most recent plan message's step.
-				if toolName == "update_plan" {
-					applyPlanStepUpdate(messages, toolArgs)
+				// Reserve the call position, but only accepted responses can
+				// create a plan or mutate its execution state.
+				if agent.IsPlanManagementTool(toolName) {
+					pendingPlans[part.FunctionCall.ID] = pendingPlanCall{toolName, toolArgs, len(messages)}
+					messages = append(messages, StudioMessage{Type: "plan_pending", ToolID: part.FunctionCall.ID})
 					continue
 				}
 
@@ -281,8 +750,32 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					continue
 				}
 
-				// Suppress plan tool responses — no useful display info.
-				if toolName == "announce_plan" || toolName == "update_plan" {
+				if agent.IsPlanManagementTool(toolName) {
+					call, pending := pendingPlans[part.FunctionResponse.ID]
+					resp := part.FunctionResponse.Response
+					if s, ok := decodePlanSnapshot(resp["snapshot"]); ok {
+						messages = overlayPlanSnapshot(messages, s)
+					} else if resp["status"] == "ok" || resp["status"] == "announced" {
+						if toolName == "announce_plan" && pending {
+							messages[call.index] = buildPlanMessage(call.args)
+						} else if toolName == "update_plan" {
+							applyPlanStepUpdate(messages, map[string]any{"step": resp["step"], "status": resp["applied"]})
+						}
+					} else if pending {
+						messages[call.index] = StudioMessage{Type: "tool_result", ToolName: toolName, ToolID: part.FunctionResponse.ID, ToolResult: resp}
+					}
+					status, _ := resp["status"].(string)
+					accepted := status == "ok" || status == "announced" || status == "completed" || status == string(agent.PlanRevisionResultApplied) || status == string(agent.PlanRevisionResultProposed) || status == string(agent.PlanRevisionResultNoop)
+					if !accepted {
+						if pending && messages[call.index].Type != "plan" {
+							messages[call.index] = StudioMessage{Type: "tool_result", ToolName: toolName, ToolID: part.FunctionResponse.ID, ToolResult: resp}
+						} else {
+							messages = append(messages, StudioMessage{Type: "tool_result", ToolName: toolName, ToolID: part.FunctionResponse.ID, ToolResult: resp})
+						}
+					} else if pending && messages[call.index].Type == "plan_pending" {
+						messages[call.index].Type = "plan_hidden"
+					}
+					delete(pendingPlans, part.FunctionResponse.ID)
 					continue
 				}
 
@@ -318,10 +811,29 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 		}
 	}
 
-	// Post-process: for completed sessions, promote any remaining "pending" or
-	// "running" plan steps to "complete". The session is done, so all steps
-	// should reflect their final state. Only "failed" steps stay as-is.
-	finalizePlanSteps(messages)
+	filtered := messages[:0]
+	for _, msg := range messages {
+		if redactor != nil {
+			if msg.Snapshot != nil {
+				clean := redactPlanSnapshot(*msg.Snapshot, redactor)
+				msg.Snapshot = &clean
+			}
+			if msg.Type == "plan" {
+				msg.Goal = redactor.RedactNonUser(msg.Goal, false)
+				for i := range msg.Steps {
+					msg.Steps[i].Description = redactor.RedactNonUser(msg.Steps[i].Description, false)
+					msg.Steps[i].Name = redactor.RedactNonUser(msg.Steps[i].Name, false)
+				}
+			}
+			if result, ok := msg.ToolResult.(map[string]any); ok {
+				msg.ToolResult = redactor.RedactMap(result)
+			}
+		}
+		if msg.Type != "plan_hidden" && msg.Type != "plan_pending" {
+			filtered = append(filtered, msg)
+		}
+	}
+	messages = filtered
 
 	return injectTutorialSceneSlideshows(messages, events)
 }
@@ -484,6 +996,22 @@ func buildPlanMessage(args map[string]any) StudioMessage {
 		}
 	}
 
+	// Preserve the complete accepted legacy definition for runtime bootstrap.
+	// Execution fields from the model call are intentionally discarded.
+	raw, _ := json.Marshal(args)
+	var legacy struct {
+		Context      string               `json:"context"`
+		WhatNotToDo  string               `json:"what_not_to_do"`
+		Verification string               `json:"verification"`
+		Steps        []agent.PlanStepInfo `json:"steps"`
+	}
+	if json.Unmarshal(raw, &legacy) == nil && len(legacy.Steps) > 0 {
+		for i := range legacy.Steps {
+			legacy.Steps[i].Status = "pending"
+			legacy.Steps[i].Evidence = ""
+		}
+		msg.Snapshot = &agent.PlanSnapshot{Goal: msg.Goal, Document: agent.PlanDocumentInfo{Context: legacy.Context, WhatNotToDo: legacy.WhatNotToDo, Verification: legacy.Verification}, Steps: legacy.Steps}
+	}
 	return msg
 }
 
@@ -506,24 +1034,17 @@ func applyPlanStepUpdate(messages []StudioMessage, args map[string]any) {
 			for j := range messages[i].Steps {
 				if messages[i].Steps[j].Name == stepName {
 					messages[i].Steps[j].Status = stepStatus
+					if s := messages[i].Snapshot; s != nil {
+						for k := range s.Steps {
+							if s.Steps[k].Name == stepName {
+								s.Steps[k].Status = stepStatus
+								s.Steps[k].Evidence, _ = args["evidence"].(string)
+							}
+						}
+					}
 				}
 			}
 			return
-		}
-	}
-}
-
-// finalizePlanSteps promotes any "pending" or "running" plan steps to "complete"
-// for completed session history. Only "failed" steps are left as-is.
-func finalizePlanSteps(messages []StudioMessage) {
-	for i := range messages {
-		if messages[i].Type == "plan" {
-			for j := range messages[i].Steps {
-				s := messages[i].Steps[j].Status
-				if s == "pending" || s == "running" {
-					messages[i].Steps[j].Status = "complete"
-				}
-			}
 		}
 	}
 }
@@ -532,22 +1053,23 @@ func finalizePlanSteps(messages []StudioMessage) {
 // transcript. Each non-partial event with a non-nil UsageMetadata represents
 // one API call's token counts. Returns nil if no usage data is present.
 func collectUsage(events session.Events) *UsageSummary {
-	var input, output, total int32
+	var input, output int64
 	for i := range events.Len() {
 		event := events.At(i)
-		if um := event.LLMResponse.UsageMetadata; um != nil {
-			input += um.PromptTokenCount
-			output += um.CandidatesTokenCount
-			total += um.TotalTokenCount
+		if event == nil || event.Partial || event.UsageMetadata == nil || agent.IsTurnContextEvent(event) {
+			continue
 		}
+		callInput, callOutput := bot.ModelUsageTokens(event.UsageMetadata)
+		input += callInput
+		output += callOutput
 	}
-	if total == 0 {
+	if input+output == 0 {
 		return nil
 	}
 	return &UsageSummary{
-		InputTokens:  input,
-		OutputTokens: output,
-		TotalTokens:  total,
+		InputTokens:  int32(input),
+		OutputTokens: int32(output),
+		TotalTokens:  int32(input + output),
 	}
 }
 
@@ -1159,23 +1681,6 @@ func readArtifactContentFromSession(fs *persistentsession.FileStore, userID, ses
 	return readArtifactContentFromEvents(getResp.Session.Events(), filePath)
 }
 
-// readArtifactContentFromSessionStore is the platform-mode equivalent of
-// readArtifactContentFromSession. It accepts a store.SessionStore (which may
-// be backed by PostgreSQL) and uses ReadTranscriptEvents to load events, then
-// reconstructs the latest known content for the requested path.
-func readArtifactContentFromSessionStore(ss store.SessionStore, appName, userID, sessionID, filePath string) (string, bool) {
-	if ss == nil {
-		return "", false
-	}
-
-	events, err := ss.ReadTranscriptEvents(context.TODO(), appName, userID, sessionID)
-	if err != nil {
-		return "", false
-	}
-
-	return readArtifactContentFromEventSlice(events, filePath)
-}
-
 func readArtifactContentFromEvents(events session.Events, filePath string) (string, bool) {
 	if events == nil {
 		return "", false
@@ -1469,10 +1974,11 @@ type chatQuestionOptionPayload struct {
 
 // chatQuestionPayload is the JSON structure persisted inside the text event.
 type chatQuestionPayload struct {
-	QuestionID string                      `json:"questionId"`
-	Kind       string                      `json:"kind"` // "yesno" | "select"
-	Prompt     string                      `json:"prompt"`
-	Options    []chatQuestionOptionPayload `json:"options,omitempty"`
+	AllowCustomAnswer *bool                       `json:"allow_custom_answer,omitempty"`
+	QuestionID        string                      `json:"questionId"`
+	Kind              string                      `json:"kind"` // "yesno" | "select"
+	Prompt            string                      `json:"prompt"`
+	Options           []chatQuestionOptionPayload `json:"options,omitempty"`
 }
 
 // persistChatQuestion serializes a chat question as a structured text event so
@@ -1517,11 +2023,12 @@ func tryParseChatQuestionMessage(text string) *StudioMessage {
 		options = append(options, opt)
 	}
 	return &StudioMessage{
-		Type:         "chat_question",
-		QuestionID:   payload.QuestionID,
-		QuestionKind: payload.Kind,
-		Prompt:       payload.Prompt,
-		Options:      options,
+		Type:              "chat_question",
+		QuestionID:        payload.QuestionID,
+		AllowCustomAnswer: payload.AllowCustomAnswer,
+		QuestionKind:      payload.Kind,
+		Prompt:            payload.Prompt,
+		Options:           options,
 	}
 }
 

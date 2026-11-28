@@ -29,6 +29,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	emailpkg "github.com/SAP/astonish/pkg/email"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/fleet"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/mailer"
@@ -239,6 +240,10 @@ func Run(cfg RunConfig) error {
 		}
 	}
 	defer entStore.Close()
+	svc.BotMandatePolicy = newProductionBotMandatePolicy(entStore, appCfg)
+	svc.BotTurnRegistry = execution.NewBotTurnAuthorizationRegistry(256)
+	defer svc.BotTurnRegistry.Close()
+	// BotInteractiveReady is enabled only by complete API/launcher composition.
 	backend = entStore
 	logStartupPhase("platform-store", "complete", storeStarted)
 	// Persist/learn per-model token limits from provider 400 responses (SAP Vertex).
@@ -1071,6 +1076,10 @@ func Run(cfg RunConfig) error {
 		}()
 	}
 
+	// Bot execution is composed after the actual Studio pre-warm below, not
+	// from the optional channel factory (which may never be constructed).
+	var botWorker *BotWorker
+
 	// --- Initialize scheduler if enabled ---
 	// Skipped in API mode — only default and worker modes run the scheduler.
 	var mtSched *MultiTenantScheduler
@@ -1152,7 +1161,7 @@ func Run(cfg RunConfig) error {
 				TLS:  appCfg.Sandbox.OpenShell.OpenShellGatewayTLS(),
 			})
 		}
-		mtSched.Start(ctx)
+		// Start only after Studio/Bot composition installs callbacks below.
 
 		// Register executor for API RunNow handler
 		api.SetExecutor(schedExec)
@@ -1647,6 +1656,13 @@ func Run(cfg RunConfig) error {
 	// Create and start the Studio server
 	studioServerStarted := time.Now()
 	var studioOpts []launcher.StudioOption
+	var studioChatResult *launcher.ChatFactoryResult
+	var studioBootstrapOnce sync.Once
+	studioOpts = append(studioOpts, launcher.WithStudioChatInitialized(func(result *launcher.ChatFactoryResult) {
+		// Startup consumes only the first bootstrap. Reset callbacks must not
+		// mutate worker state or publish a second worker from a request goroutine.
+		studioBootstrapOnce.Do(func() { studioChatResult = result })
+	}))
 	studioOpts = append(studioOpts, launcher.WithServices(svc))
 	if platformAuth != nil && backend != nil {
 		studioOpts = append(studioOpts, launcher.WithPlatformAuth(platformAuth, entStore))
@@ -1707,21 +1723,71 @@ func Run(cfg RunConfig) error {
 	api.SetPreWarmContextFunc(buildPreWarmCtx)
 	api.SetLLMPool(llmPool)
 
-	// Complete Studio initialization before advertising HTTP readiness. Semantic
-	// retrieval is required when configured, so initialization failures must stop
-	// startup rather than surface later on the first request.
+	// Required semantic retrieval was initialized above. A chat provider failure
+	// must not prevent HTTP/Settings from serving so credentials can be repaired.
+	// PreWarm remains retryable; never publish Bot execution from a failed bundle.
 	studioPreWarmDone := make(chan struct{})
 	warmCtx := buildPreWarmCtx()
-	if err := api.GetChatManager().PreWarm(warmCtx); err != nil {
-		return fmt.Errorf("pre-warm Studio chat agent: %w", err)
+	studioWarmErr := api.GetChatManager().PreWarm(warmCtx)
+	if studioWarmErr != nil {
+		logger.Printf("Warning: Studio chat unavailable; HTTP settings remain available: %v", studioWarmErr)
+	} else {
+		logger.Printf("Studio chat agent pre-warmed successfully")
 	}
-	logger.Printf("Studio chat agent pre-warmed successfully")
 	close(studioPreWarmDone)
+
+	// Borrow the real Studio bootstrap in every mode, independently of channels.
+	shared := productionBotChatResources(studioChatResult)
+	if daemonMode != config.DaemonModeAPI {
+		var botCleanup func()
+		botWorker, botCleanup, err = newProductionBotWorker(backend, appCfg, shared, svc.BotTurnRegistry)
+		if err != nil {
+			logger.Printf("Bots: execution unavailable: %v", err)
+		} else {
+			defer botCleanup()
+			svc.BotRunStateNotify = botWorker.NotifyRunState
+			svc.BotHomeSetup = botWorker.provisionHome
+			svc.BotFilesFactory = botWorker.filesForRequest
+			setBotInteractiveReady(svc, botWorker)
+			if mtSched != nil {
+				mtSched.SetBotSchedulerCallbacks(botWorker.SchedulerCallbacks())
+			}
+			botWorker.Start(ctx)
+			defer botWorker.Stop()
+			logger.Printf("Bots: durable worker started on shared Chat runtime")
+		}
+	}
+	// Offline readers borrow Studio's backend too; no second pool/catalog/engine.
+	// Only an absent sandbox bundle needs the storage-only configuration adapter.
+	if svc.BotFilesFactory == nil {
+		var filesBackend sandbox.Backend
+		if shared != nil {
+			filesBackend = shared.Backend
+		} else {
+			var filesCleanup func()
+			var filesErr error
+			filesBackend, filesCleanup, filesErr = sandbox.BackendFromAppConfig(appCfg)
+			if filesErr != nil {
+				logger.Printf("Bots: retained files unavailable: %v", filesErr)
+			}
+			if filesCleanup != nil {
+				defer filesCleanup()
+			}
+		}
+		if filesBackend != nil {
+			svc.BotFilesFactory = func(c context.Context, services *store.Services, scope store.BotScope) (store.BotFiles, error) {
+				return productionBotFiles(c, filesBackend, services, scope)
+			}
+		}
+	}
+	if mtSched != nil {
+		mtSched.Start(ctx)
+	}
 
 	// API pods do not initialize external channel adapters, but inbound A2A is an
 	// endpoint-owned service and must remain available there. Reuse the pre-warmed
 	// Studio runtime without starting Slack, Telegram, or email consumers.
-	if servesA2A(daemonMode) {
+	if servesA2A(daemonMode) && studioWarmErr == nil {
 		dispatcher, dispatchErr := api.GetChatManager().NewEndpointDispatcher(warmCtx)
 		if dispatchErr != nil {
 			return fmt.Errorf("initialize A2A dispatcher: %w", dispatchErr)

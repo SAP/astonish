@@ -25,6 +25,78 @@ func (b *sessionDeleteBackend) NewSession() {
 	b.newCalled = true
 }
 
+type permissionNewSessionBackend struct{ permissionTestBackend }
+
+func (b *permissionNewSessionBackend) NewSession() {
+	b.snapshot = backend.CodePermissionsSnapshot{}
+}
+
+func TestCodePermissionsAfterNewSession(t *testing.T) {
+	for _, deleted := range []bool{false, true} {
+		for _, shortcut := range []bool{false, true} {
+			b := &permissionNewSessionBackend{permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "previous", SessionAllFolders: true}}}
+			m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+			m.ready = true
+			var next tea.Model
+			if deleted {
+				next, _ = m.applySessionDeleted(sessionDeletedMsg{id: "previous"})
+			} else {
+				next, _ = m.startNewSession()
+			}
+			m = next.(model)
+			var cmd tea.Cmd
+			if shortcut {
+				next, cmd = m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+			} else {
+				next, cmd = m.handleSlash("/permissions")
+			}
+			m = next.(model)
+			if cmd == nil {
+				t.Fatal("permissions did not open")
+			}
+			next, _ = m.Update(cmd())
+			m = next.(model)
+			if m.tr.SessionID != "" || !m.permissions.known || m.permissions.err != "" || m.permissions.snapshot.SessionAllFolders {
+				t.Fatalf("deleted=%v shortcut=%v: new-session permissions rejected or leaked: transcript=%q permissions=%+v", deleted, shortcut, m.tr.SessionID, m.permissions)
+			}
+			m.cancel()
+		}
+	}
+}
+
+func TestCodePermissionsAfterSessionHistoryRestore(t *testing.T) {
+	for _, sessionID := range []string{"", "resumed"} {
+		for _, key := range []string{"slash", "ctrl+p"} {
+			t.Run(sessionID+"/"+key, func(t *testing.T) {
+				b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "resumed", SessionAllFolders: true}}
+				m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
+				defer m.cancel()
+				m.tr.SessionID = "previous-session"
+				next, _ := m.Update(historyLoadedMsg{sessionID: sessionID, entries: []backend.HistoryEntry{{Kind: "agent", Text: "Restored answer"}}})
+				m = next.(model)
+				var cmd tea.Cmd
+				if key == "slash" {
+					next, cmd = m.openCodePermissions()
+				} else {
+					next, cmd = m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+				}
+				m = next.(model)
+				if cmd == nil {
+					t.Fatal("permissions did not load")
+				}
+				next, _ = m.Update(cmd())
+				m = next.(model)
+				if m.tr.SessionID != "resumed" || m.info.SessionID != "resumed" || !m.permissions.known || m.permissions.err != "" {
+					t.Fatalf("restored permissions rejected: transcript=%q header=%q permissions=%+v", m.tr.SessionID, m.info.SessionID, m.permissions)
+				}
+				if !strings.Contains(m.renderCodePermissions(), "Enter revokes All folders for this session") {
+					t.Fatal("restored grant unavailable")
+				}
+			})
+		}
+	}
+}
+
 func TestSessionsPickerDeleteRequiresConfirmation(t *testing.T) {
 	b := &sessionDeleteBackend{}
 	m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 30})
@@ -94,7 +166,7 @@ func TestRenderSessionsOverlayPaintsEveryRowBlack(t *testing.T) {
 		t.Fatalf("expected overlay with multiple lines, got %d: %q", len(lines), stripANSI(out))
 	}
 	for i, line := range lines {
-		if !strings.HasPrefix(line, ansiTrueBlackBG) {
+		if !strings.HasPrefix(line, m.theme.backgroundSGR()) {
 			t.Fatalf("line %d is not explicitly painted black: %q", i, line)
 		}
 	}
@@ -281,7 +353,7 @@ func TestApplyHistorySetsTitleFromBackendInfo(t *testing.T) {
 	b := &modelAwareBackend{
 		staticBackend: staticBackend{info: backend.Info{Provider: "openai", Model: "gpt-4o"}},
 		bySession: map[string]backend.Info{
-			"sess-titled": {Provider: "openai", Model: "gpt-4o", Title: "Fix broken tests"},
+			"sess-titled":  {Provider: "openai", Model: "gpt-4o", Title: "Fix broken tests"},
 			"sess-notitle": {Provider: "anthropic", Model: "claude-sonnet-4"},
 		},
 	}

@@ -186,8 +186,15 @@ func buildVNCHandoffResult(mgr *browser.Manager, containerName, reason, pageURL,
 	// Register a handoff token that authorizes VNC proxy access for this
 	// container. The auth middleware validates this token — without it,
 	// the VNC proxy returns 401 even though KasmVNC itself has auth disabled.
-	registry := browser.GetHandoffTokenRegistry()
-	token, err := registry.Register(containerName)
+	var token string
+	var err error
+	if mgr.RegisterHandoffFunc != nil {
+		token, err = mgr.RegisterHandoffFunc(containerName, mgr.SessionID())
+	} else if mgr.ScopedHandoff {
+		return BrowserRequestHumanResult{}, fmt.Errorf("authenticated session handoff registration is not wired")
+	} else {
+		token, err = browser.GetHandoffTokenRegistry().Register(containerName)
+	}
 	if err != nil {
 		return BrowserRequestHumanResult{}, fmt.Errorf("failed to generate handoff token: %w", err)
 	}

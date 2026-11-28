@@ -34,6 +34,17 @@ type backendSlot struct {
 // other slot, restores its state (lazy-opening the backend on first visit), and
 // swaps the accent theme so the UI color changes instantly.
 func (m model) switchBackend() (tea.Model, tea.Cmd) {
+	if m.workspacePicker.loading {
+		m.workspacePicker.notice = "Operation in progress"
+		return m, nil
+	}
+	m.workspacePicker.open = false
+	m.workspaceGeneration++
+	m.detachBotWatch()
+	m.bots = botsState{}
+	if cap := m.botCap(); cap != nil {
+		cap.DetachBot()
+	}
 	// Cancel any in-flight turn before switching — we don't need the returned
 	// model/cmd since switchBackend rebuilds state from the slot anyway.
 	//nolint:staticcheck // returned model unused; we overwrite state below.
@@ -54,6 +65,7 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 	next := &m.backends[m.activeBackendIdx]
 
 	// Lazy-open the backend on first visit.
+	var themeLoadErr error
 	if !next.opened {
 		if err := next.backend.Open(m.ctx); err != nil {
 			// Open failed — revert to original slot and show error.
@@ -65,6 +77,11 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 		next.opened = true
 		// Create a fresh transcript for the newly-opened backend.
 		info := next.backend.Info()
+		if info.Mode == "code" {
+			th, err := resolveInitialCodeTheme(m.ctx, next.backend, m.themeOverride)
+			next.theme = th
+			themeLoadErr = err
+		}
 		tr := events.NewTranscript()
 		tr.SessionID = info.SessionID
 		tr.Provider = info.Provider
@@ -99,12 +116,18 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 		tr.ContextTokens = 0
 		tr.LastUsage = &events.Usage{Input: m.info.Usage.Input, Output: m.info.Usage.Output, Total: m.info.Usage.Total}
 	}
+	if themeLoadErr != nil {
+		tr.Apply(events.NewSystem("Could not load saved Code theme: " + themeLoadErr.Error()))
+	}
 	m.tr = tr
 	next.tr = tr
+	m.themePicker.open = false
+	m.themeGeneration++
 
 	// Swap theme — the core of the visual mode change.
 	m.theme = next.theme
 	m.theme.ApplyTextareaStyles(&m.ta)
+	m.spin.Style = m.theme.spinnerStyle()
 
 	// Clear markdown cache (rendered at old theme/width).
 	m.mdCache = nil

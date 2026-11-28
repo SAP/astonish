@@ -1,0 +1,518 @@
+# Bot specification traceability and release checklist
+
+## Open policy and release follow-ups — 2026-11-27
+
+These decisions are **OPEN** and require explicit owner/operator signoff before
+team release; documenting observed behavior is not acceptance on the user's behalf.
+The user expressly removed execution budget gates. Preserve that decision: none
+of these follow-ups authorizes restoring runtime/token/tool/model-cost caps.
+
+- [ ] **Resource policy / owner signoff (OPEN):** finite stored operator/version
+  values validate compatibility but do not bound production execution or cumulative
+  model cost. Decide team operating expectations and accounting visibility without
+  inventing a spend guarantee. Cancellation, concurrency, daily-run/schedule
+  admission, expiry and operational generation health remain distinct controls.
+  See [mandate semantics](../bot-mandates.md).
+- [ ] **Team Home disclosure / owner signoff (OPEN):** authorized team members can
+  browse working Home files without a report publication/review gate. Decide
+  whether unpublished drafts are intended team-visible content; personal scope
+  and private content/authority keys remain separate.
+- [ ] **Raw downloads / owner signoff (OPEN):** downloads preserve exact retained
+  bytes without credential redaction; bounded previews are scoped-redacted. Decide
+  acceptable team disclosure policy; preview redaction does not certify raw file
+  safety. See [file API boundary](api-studio.md#bot-working-files-and-immutable-deliveries).
+- [ ] **Team cancellation / owner signoff (OPEN):** non-viewer team members can
+  cancel another owner's team run. Decide whether cancellation should remain
+  team-wide or be narrowed to owner/admin; this correction does not change it.
+- [ ] **Ticket lifecycle / owner signoff (OPEN):** tickets last at most 90 seconds
+  (shortened when issuing authentication expires earlier), can survive normal
+  logout, and require fresh active-directory membership/object authorization.
+  Decide whether that short post-logout lifetime is acceptable; no durable sharing
+  or immediate logout-revocation guarantee is claimed.
+- [ ] **F5 offline-alias release follow-up (OPEN):** resolve backend dependence
+  for the offline alias; an alias/configuration label alone does not establish
+  backend-independent offline availability. Record the affected backend and fresh
+  evidence before closing F5. This is separate from the memory follow-up below.
+- [ ] **Memory follow-up (OPEN):** retain the separate memory readiness/behavior
+  obligation and its own verification; neither F5 alias resolution nor resource-
+  policy signoff establishes memory acceptance.
+
+No rollout, restored budget enforcement, accepted disclosure policy or completed
+F5/memory verification is implied by this update. Dated evidence below retains
+its original meaning and does not close these decisions.
+
+## Objective-owned employee gate (controlled local, not deployment)
+
+- Run the exact `--stage employee --employee-phase all` command documented in
+  `tests/e2eboot/README.bots-acceptance.md`. Inspect the new report's actual
+  commands, source/build digests and package-qualified raw JSONL parent/subcase
+  passes. Never substitute historical receipts or a broad package PASS.
+- Require disposable scoped HTTP workers; clarification accepted once; irrelevant
+  fruit → Apple Inc. → material market gap → sourced inline answer without an
+  extra owner turn/reviewer/file; ordinary Chat against the identical fixture;
+  exact historical six/eight envelopes, malformed correction, empty/failed
+  sources and honest partial results; non-news/delegate/scheduled/file paths;
+  exact authorized downloads, revocation/budget and uncertain/crash no-replay.
+- Require real Docker retained transport (owner claim ≤5s and controlled tool-to-
+  model overhead ≤15s), bounded same-Bot exclusion, maintenance independence,
+  pause/stop/drain and cold recovery. Require current built Studio and native
+  PTY ordered live/reconnect/reload delivery, not only reducer tests.
+- Require `TestBotEmployeeObjectiveInquiryHTTP` in both scopes and adequate-first
+  states with exact ordinary-Chat/shared-provider/final-source-body diagnostics
+  and 3-read/4-model or 1-read/2-model counters. Require historical live-six/eight
+  exact-envelope/original-digest diagnostics, SQL 36263/36268 provenance and
+  effective maximum five. Wrong-package/test or missing/spoofed markers fail.
+  `TestBotInteractiveAuthorityHTTPAcceptance`, `TestBotEventsHTTPAcceptance` and
+  `TestBotHistoryStreamHTTPAcceptance` must run/pass without skips. These bindings
+  replace the prior declared gaps; only a completed fresh integrated run passes.
+- Run broad Go, targeted race, frontend tests/typecheck/build and configured lint
+  independently. Record their real exits and blockers. This local tier does not
+  discharge live Kubernetes/PostgreSQL, paid-provider quality/latency or rollout.
+
+
+## Current local release state — 2026-11-23
+
+- [x] Revision 12 phase 6 recorded complete at sequence 485, strict receipt
+  `f2577352711339b7e2fd30b552da5f98318693f99aa935ffc764d1bb7eebd41e`.
+- [x] Fresh scoped Go suite exit 0 (`/tmp/bot-release-go-final.jsonl`) and scoped
+  lint exit 0 (`/tmp/bot-release-lint-retry.log`), supplied evidence, not rerun here.
+- [ ] Final baseline and integrated `all` verification: runs in flight at this
+  update, `/tmp/bot-final-baseline.json` and `/tmp/bot-final-all.json`. Require
+  completed reports and successful exits; **final acceptance is not complete**.
+- [ ] Live Kubernetes/PVC and PostgreSQL: user-requested **DEFERRED, NOT PASS**.
+- [ ] Paid-provider replay and real-provider quality: unverified, not authorized.
+
+Current local consolidation shares ordinary Chat runtime/catalog/dispatch across
+interactive and scheduled/autonomous Bot modes without broadening permissions.
+Compiled storage retains exact private revision staging and historical publication
+IDs; terminal/delegate return joins bookkeeping. SQL reconciliation performance
+is report-only, not a substitute for the unchanged 15-second controlled gate.
+See [current evidence and boundaries](bot-runtime-evidence.md#current-consolidation-evidence--2026-11-23).
+
+The dated checkpoints below are **historical**, including their unresolved status
+at capture time. They do not supersede the current state above or become passes
+retroactively. Keep the original baseline and all failed receipts unchanged.
+No production/driver/plan edit, daemon restart, user Bot retry or rollout is implied.
+
+
+## Durable-progress controlled gate — 2026-11-16
+
+Run `python3 -B tests/e2eboot/bots_acceptance_driver.py --stage durable-progress`
+with `--report /tmp/astonish-durable-progress-report.json` and the explicit browser
+and Docker prerequisites in `tests/e2eboot/README.bots-acceptance.md`.
+Do not substitute historical receipts or a package build for this gate.
+
+- Required: personal/team six-hour controller-clock tests; settled-read,
+  settled-write and unresolved-write **OS process** restarts; same assignment,
+  restored evidence, monotonic accounting and no replay.
+- Required: controlled production HTTP/store lifecycle, schedule coalescing,
+  authority loss and authenticated continuation, quota controls, cancellation,
+  deletion and trusted synthesis nonexecution.
+- Required: built Studio browser, real terminal PTY and owned physical Docker
+  Home readiness/mount/cleanup. Exact package/test run-pass records and all named
+  restart/clock subtests are mandatory; any skip or missing test fails.
+- Fresh scoped evidence: all three `TestBotProgressProcessRestartAcceptance` cases
+  passed, including real lease expiry for the unresolved write and exactly one
+  final publication for both settled cases. Acceptance-driver Python tests passed
+  (132 tests), and the plan's scoped Go lint reported `0 issues.`
+- Final parent gate remains pending: the current strict run failed
+  `TestBotTitleConfirmationDockerBrowserAcceptance` with "Bot Home exposed a tool
+  activity card" after restoring the waiting question and submitting its answer.
+  It therefore does not establish physical Home provisioning/cleanup acceptance.
+  A corrected built-client rerun and final diff checks are required; failed
+  attempts are not acceptance and must not enable the new default.
+- Unverified: real-provider judgment/quality, two-hour wall-clock soak,
+  PostgreSQL concurrency, Kubernetes and full tool-node overlay. Optional tier
+  flags currently block with exit 2; they do not silently skip or use live settings.
+
+No current user Bot, normal daemon, production database, schedule or credential
+configuration is changed by this controlled gate.
+
+## Permanent deletion acceptance checkpoint — 2026-11-16
+
+The focused deletion gate includes these exact tests:
+
+- `TestBotPermanentDeleteAttachedDockerAcceptance`: production HTTP + real scoped
+  SQLite + production Docker backend in one disposable fixture. Running owned
+  attachment, pending content 410/status 202, forged-attachment refusal, fresh
+  controller/registry polling, physical resource absence, SQL Task/history/job
+  purge, final 404 and unchanged unrelated scheduler sentinel.
+- `TestBotPermanentDeleteHTTP/personal` and `/team`: physical-directory cleanup
+  failure and post-verification SQL outage, fresh-worker completion without a
+  backend/client retry, owned rows absent and peer Bot/files/Tasks/jobs preserved.
+- `TestBotPermanentDeleteBrowserAcceptance`: actual built Studio sidebar and
+  cancellation/confirmation, 202/410/status202/404, observer-independent worker
+  cleanup, disposable Docker volume absence and SQLite/FTS purge with preserved
+  peer file and shared credential. This browser fixture uses a controlled volume
+  adapter; the production attached backend is verified by the first test.
+
+Current scoped tests passed **3 top-level tests, 5 named PASS records including
+personal/team subtests, zero skips**, and scoped Go lint reports `0 issues.`
+The Studio production build/typecheck passed. Earlier gate attempts exposed a
+browser opt-in mismatch (skip) and unused registry assignment (lint failure);
+those do not count as acceptance and were corrected before the no-skip rerun.
+
+Restart means replacement of worker/backend/registry objects with durable registry
+reopen, not an OS daemon-process restart. PostgreSQL/Kubernetes deletion and live
+Apple News cleanup are not claimed. No normal daemon restart, shared prune, live
+user-resource mutation, provider spending or deployment occurred. SQLite keeps
+freed pages reusable; deletion performs no automatic global VACUUM. The older
+title-confirmation obligations below remain unclosed.
+
+## Title-confirmation acceptance checkpoint — 2026-11-15
+
+New title starts require a persisted `ask_user` interpretation before ordinary
+execution. The selected option/custom answer supplies intent, never blanket tool,
+external-effect or recurrence permission. Three/four suggestions and custom text
+use existing Studio/terminal question controls; waiting time is excluded from
+active runtime. Historical runs, direct messages and schedules are not migrated.
+
+The focused invocation is `bots_acceptance.sh --stage title-confirmation` with
+explicit `ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1`, absolute executable
+`ASTONISH_BOT_BROWSER_PATH` and existing local `ASTONISH_SANDBOX_IMAGE`.
+It builds Studio and requires exact non-skipped lifecycle, actual browser, owned
+Docker Home and title PTY evidence. Missing prerequisites block rather than skip.
+Provider secrets/production database settings are excluded from controlled gates.
+
+**Earlier failed evidence (retained; final acceptance pending a fresh gate):**
+built Studio compilation and the then-current 37 driver unit tests passed; actual
+Rod journeys failed before their question persisted. Logs
+`.tmp/title-confirmation-browser.log` and
+`.tmp/title-confirmation-browser-authorized.log` expose the old `ControlOnly()`
+rejection in `botBoundTool.Run` on real admitted draft-conversation titles.
+Factory-only success does not override this failure. No production guard was
+weakened in the acceptance fixture; a narrow production correction and fresh
+browser/PTY rerun are required.
+
+The owned Docker harness checks physical absence before confirmation and, after
+it, the worker-created Home binding, volume ownership, helper mount and receipt
+bytes. In the earlier failed attempts, post-answer assertions did **not run** past
+the blocker. This harness is not
+full tool-node overlay or research/Task-file evidence. Separately,
+`TestBotTitleConfirmationProcessRestart` now passes a controlled two-process
+SQLite/authorization restart proof and is required by both strict and contract
+manifests: the second test process reopens persisted confirmation state with a
+fresh authorization registry before accepting the owner answer. This is a
+question-repository subprocess check, not browser worker replacement or an actual
+daemon restart/browser recovery drill. Full overlay and Task-file publication
+remain unverified by the title-confirmation gate.
+Personal/team built-browser parity, configured search after confirmation, real
+provider question relevance/title-to-card latency and final live result quality
+remain obligations unless separately recorded by a current invocation. Historical
+failed live grounding below is retained; no normal daemon restart/deploy, existing
+user-resource edits, provider spending, shared Docker cleanup or commit occurred.
+
+## Employee regression correction checkpoint — 2026-11-14
+
+The six user requirements supersede optional employee review and producer-triggered
+retention. Live AI News evidence confirmed greeting-only title output, direct RSS
+fetch, poor article support, guessed provenance and an empty physical Home.
+These failures remain unresolved as live release acceptance; no normal rollout.
+
+Source changes now include four configured-search engines and scoped standard-server
+resolution, ordinary title research admission, automatic digest-bound employee
+review with bounded tool-free repair, draft-text withholding, durable review-attempt
+reservations, dedicated every-turn extraction journals (schema marker 4), fresh
+maintenance claims, locked physical Docker knowledge publication, scoped safety and
+usage, model-authored acknowledgement/ask_user guidance, and exact prior-tool
+provenance context. Physical owned Docker tests have demonstrated retained files,
+short correction application and Prepared reuse without model replay; those tests
+use controlled models, not real-provider semantics or OS-process restart evidence.
+
+Remaining requirements include safe fresh scope changes through typed ask_user
+answers, real acknowledgement/question/live-restore parity, full regression
+compatibility and actual configured-provider grounded results. Full relevant tests
+currently fail (`/tmp/bot-employee-full-final.json`) in older work/check/learning,
+approval/question, artifact and external-trigger cases. Several deterministic
+fixtures do not distinguish automatic review calls from producer calls; failures
+must be classified and repaired without weakening the review gate. A poor or
+unsupported candidate must remain withheld. No whole-suite pass is claimed for
+this checkpoint. No normal daemon restart, user-data mutation, paid run, commit,
+push or deployment occurred.
+
+## Bot-owned Task workspace checkpoint — 2026-11-14
+
+Six approved implementation phases now have recorded verification: Task contracts,
+confined physical workspace storage, configured search-first research, shared
+manual/scheduled Task execution, Details Skills removal, and restart/backup
+continuity. Final `task-acceptance` is **not complete** and no deployment is approved.
+
+The continuity retry exposed an unrelated fresh-HOME embedding-model download
+stall. Its isolated harness now supplies a test-owned loopback embedding endpoint
+through supported configuration; Task files, helper bytes and SQLite state are
+still inspected independently in real Docker Homes after process replacement.
+The recorded phase verification passed. A separate earlier concurrent driver
+failed its scheduler occurrence case and remains failed evidence in
+`/tmp/bot-task-continuity-fixture.log`; it must not be presented as that pass.
+
+Final acceptance plumbing now has a distinct fresh-only `--verify-bot-tasks`
+launcher and `--stage all --config` orchestration. The Go collector retains three
+unchanged Stock Market News attempts, run/transcript/search observations, and
+independent registry/physical-file observations. Offline validation refuses to
+turn model booleans, missing evidence or unrelated controlled fixtures into
+accountable source grounding or real lifecycle certification. Supplying config
+alone does not implement the remaining lifecycle and semantic acceptance gates.
+`LOCAL_BOT_TASK_CONFIG` was absent in this execution environment; no new paid
+stock samples were run. Prior failed stock grounding remains unresolved.
+
+Whole-repository ordinary Go tests passed this turn (`/tmp/bot-task-full-go.log`).
+Frontend tests (163 files, 1343 tests), typecheck, production build and lint passed.
+The first full Python run failed an additive public `task` pin projection check;
+the corrected full rerun passed 312 tests with one existing skip
+(`/tmp/bot-task-python-final.log`). Scoped races passed in entstore, launcher and
+daemon (`/tmp/bot-task-race-final.log`); Ent regeneration completed with an exact
+pre/post file-digest comparison and no drift (`/tmp/bot-task-ent-final.log`).
+Full Go lint initially caught a self-comparison in a workspace digest test. The
+test now checks the independently calculated SHA-256 fixture, its scoped test
+passes, and corrected `make lint` reports zero issues
+(`/tmp/bot-task-lint-corrected.log`).
+No normal `:9393` restart, user Bot/schedule edit, spending-limit change,
+credential scrape, commit, push or rollout was performed.
+
+## SCI provider acceptance follow-up — 2026-11-13
+
+The operator selected `sap_ai_core_sci`. Its explicitly selected configuration now supplies the isolated candidate, retaining the historical display name `New AI Core Provider` and model `anthropic--claude-4.6-sonnet`. The credential prerequisite is resolved; no secrets are included here.
+
+- **Actual-provider diagnostic executed:** `.tmp/agent-sci-live-diagnostic.log` records a 21-second execution pass: six model calls, five source calls, zero mandatory reviews. Captures are in `.tmp/real-stock-title-live-2641515788`.
+- **Content-quality failed:** direct inspection and `.tmp/agent-sci-stock-diagnostic-grounding.md` identify stale headlines presented as current, an incorrect weekday, unsupported elaborations, and headline-only numerical evidence. Execution success is not content acceptance.
+- **First native candidate failed:** `.tmp/astonish-chat-first-_d3bn86h/browser-evidence.json` retains three title attempts and broader journey failures. Bot Home falsely reported SAP credentials unavailable. The new Bot-only `botProviderHasCredential` checks the required SAP tuple; fail-first personal/team HTTP tests pass. Ordinary Chat is unchanged.
+- **Verification support implemented:** payload-free native adapter observations, retained-log correlation, terminal capture around the existing final manual-reuse action, and an offline claim/source assessment interface with bounded same-invocation inspection. Tests are not live receipts; adapter-boundary observations do not authenticate upstream wire identity.
+- **Patched binary built:** `.tmp/astonish-agent-linux-candidate-v2`, SHA-256 `e32ea360186ad3ef30addfad942923c9e0409bb1c767057fa42b677dd8ff9e69`; isolated Linux `--version` exited 0.
+- **Live retry blocked by Docker disk capacity:** `.tmp/agent-sci-candidate-v2-live.log`, `.tmp/agent-sci-candidate-v2-retry.log`, and `.tmp/agent-sci-candidate-v2-clean-retry.log` retain image-staging `no space left on device` failures. The first owned candidate was stopped (exit 0) and removed with its image; this turn's failed-build intermediate images were also removed. Evidence directories remain. No shared prune or normal-daemon/user-data mutation occurred.
+- **Local checks:** `.tmp/agent-sci-production-fixes.log`, `.tmp/agent-sci-final-python.log`, and `.tmp/agent-sci-final-harness.log` passed together. The earlier combined race completion was recovered in `.tmp/agent-complete-race-current.log`.
+
+**Post-cleanup update:** With operator authorization, 59 old exited acceptance containers were removed after archiving their Docker logs in `.tmp/authorized-acceptance-cleanup-20261113-124324`; unreferenced labelled acceptance images were removed without force or shared pruning. All 31 pre-existing running containers and 208 pre-existing volumes remained present. A subsequent fresh image built successfully. An empty network belonging to this session's already-removed candidate was removed to recover one subnet; no existing user network was changed.
+
+Candidate v3 (`7a97a92d23ff9ed1e2b64465c8e5f9ff44a92d3ee2da3d15a26246aa9ac8f758`, `.tmp/astonish-chat-first-x2ohs33e`) executed three fresh title runs on the intended provider/model, all reaching succeeded/answered. **All three failed substantive content inspection**: `.tmp/agent-sci-v3-stock1-audit.md` and `.tmp/agent-sci-v3-stock23-audit.md` retain stale-current mixing and unsupported headline elaborations. No passing grounding assessment was authored. Its launcher exited 1 and the owned daemon was stopped with exit 0; evidence remains.
+
+Actual execution also exposed and led to focused fixes for committed resolved provider/model metadata, quoted/rotated adapter logs, native SSE capitalization/publication newline decoding, pre-send reconnection handling, and Studio's trimmed-message admission matcher. A real learning failure was traced to an ADK `http_request` result envelope digest mismatch; observation now hashes the complete captured/redacted response without weakening API/store digest validation. Those fixes have focused regression evidence, not a passing rerun of the full learning journey. Controlled execution, progress, learning, continuity and owned PostgreSQL stages were rerun successfully before the last learning-digest fix (`.tmp/agent-sci-current-*.log`).
+
+Document editing remains **unsupported by the captured mandate**, not a discovery bug: the actual complete catalog contains no file tools. Enabling it requires an explicitly authorized, Bot-Home-confined document capability; routing around the mandate or exposing generic host file tools is not acceptable. The source-grounding failure also remains unresolved; production-factory tests confirm the diligence guidance reaches model instructions, so missing prompt wiring is not an established cause.
+
+**Phase 7 remains incomplete.** Disk/subnet recovery allowed live execution but did not establish release readiness. Useful grounded stock results, authorized document/comparison work, post-fix learning/restart/scheduler reuse, and final native terminal parity still require current-invocation evidence. The following checkpoint is historical where this follow-up supersedes it.
+
+## Agent-owned work redesign — 2026-11-13 checkpoint
+
+**Implementation phases 1–6: runtime verification recorded. Final employee acceptance: BLOCKED; no release or rollout.** New agent-led runs no longer require a universal review verdict to publish an ordinary answer; optional progress/check/learning calls are not completion rituals. Historical assessed runs and their evidence retain their original meaning. This checkpoint supersedes the *current-status* statements in the dated quality sections below, not their failures or unmet deployed obligations.
+
+| Evidence slice | Recorded result | Boundary |
+|---|---|---|
+| Protocol, execution, optional capabilities, learning, surfaces and continuity (phases 1–6) | Session phase verification passed, including the full continuity phase verification with owned PostgreSQL. Supporting retained logs include `.tmp/agent-execution-verify.log`, `.tmp/agent-progress-final.log`, `.tmp/agent-progress-rehydrate.log`, `.tmp/agent-capabilities-verify.log` and `.tmp/agent-progress-race.log`. | Controlled runtime/source gates, not final same-provider employee acceptance. Phase surface checks do not establish real remote-terminal parity for the final live journey. |
+| Guarded PostgreSQL continuity | `.tmp/agent-postgres-result.log` records non-skipped `TestBotAgentPostgresContinuityCASProjection` and `TestBotAgentPostgresContinuityRestoreQuiescence` passes, including personal/team and agent/legacy running/waiting restore cases. `.tmp/run-agent-postgres.py` runs `--agent-stage postgres` against an owned ephemeral loopback `pgvector/pgvector:pg17` container with an isolated generated DSN. | Closes the previously unexecuted agent continuity PostgreSQL slice, not deployed PostgreSQL or full acceptance. The helper requests owned-container removal in `finally`; this log is not an independent cleanup receipt. |
+| Go regression suites | Whole-repository `env -u KUBECONFIG -u ASTONISH_TEST_DSN go test ./...` completed successfully; evidence: `.tmp/agent-all-go-verified.log`. Full `pkg/api`, `pkg/launcher`, `pkg/daemon` and `pkg/store/entstore` suites also passed separately. | Supersedes the earlier in-progress status, not the retained failures in `.tmp/agent-all-go.log` and `.tmp/agent-all-go-final.log`. Package success is not live-provider acceptance. |
+| Python acceptance-driver tests | Latest `.tmp/agent-python-validated.log`: **219 tests, OK (skipped=1)** for `python3 -B -m unittest discover -s tests/e2eboot -p '*_test.py'`. The existing namespace drill is skipped. The live journey harness Go package `tests/e2eboot/chat_first_browser` also passed its package tests. | Driver/harness tests and their fixture-generated acceptance JSON are not real-model acceptance; this is not a no-skips final gate. |
+| Lint | `make lint` completed successfully; `.tmp/agent-lint-final.log` records `0 issues.` | Does not substitute for the remaining combined final verification, API race completion, frontend checks or generation-drift check. |
+| Generation and native candidate | `make ent-generate` completed successfully; `.tmp/agent-generation.log` reports all four Ent clients up to date. Native candidate build completed successfully (`.tmp/agent-build.log`), and `.tmp/astonish-agent-candidate --version` ran successfully. | Generation drift comparison has **not** been performed. The build log is empty on success; process completion and the version invocation are session-recorded evidence, not inferred from that filename. Building/running the version command is not a live employee journey. |
+| Focused race checks | `.tmp/agent-complete-race-current.log` records all selected API, launcher and entstore tests passing with `-race -count=1 -timeout=30m` (API 1132.716s, launcher 6.456s, entstore 43.712s). The previously failing seed case also passed three race-enabled repetitions in `.tmp/agent-seed-race-recovered.log`. | The fixture waits for the original admitted run's terminal record without re-admission or replay. Earlier timeout and seed failures remain historical evidence; these tests are not live-provider acceptance. |
+| Fresh same-provider employee journey | **Not accepted.** Explicit isolated real-provider configuration is absent. Adapter provenance, freeform stock-answer grounding and real terminal live/restored parity are not fully implemented. | This is an implementation gap as well as a prerequisite gap; supplying configuration alone cannot close it. |
+
+### Required final invocation and unresolved obligations
+
+After supplying an operator-owned isolated configuration and a guarded disposable PostgreSQL DSN, the exact strict invocation is:
+
+```sh
+ASTONISH_BOTS_TEST_DB_ISOLATED=1 \
+ASTONISH_TEST_DSN="${ASTONISH_TEST_DSN:?Set a disposable PostgreSQL DSN}" \
+python3 -B tests/e2eboot/employee_http_acceptance.py --agent-stage all \
+  --config "${LOCAL_BOT_AGENT_CONFIG:?Set an explicit isolated same-provider configuration}"
+```
+
+This command is a **required future gate, not a recorded pass**. It must run current-invocation controlled cases, built browser/real PTY, PostgreSQL and a fresh `python3 -B tests/e2eboot/local_bot_smoke_launcher.py --verify-bot-agent --config "$LOCAL_BOT_AGENT_CONFIG"` journey, without `--state` reuse or a union of old receipts. Remaining obligations:
+
+- [ ] Prove intended **New AI Core Provider / `anthropic--claude-4.6-sonnet`** parity across explicit configuration, candidate Home model status, production worker resolver and actual adapter metadata. An alias or configured label alone is insufficient; do not copy secrets from the normal daemon.
+- [ ] Run three fresh unchanged **Stock Market News** title-only requests with live producer-selected retrieval. Retain source payloads/digests, visible model/tool output, optional checks, candidate/run/report identities and all final replies; verify material claims against sources, not merely successful execution. No preseeded answers or mandatory optional-tool path.
+- [ ] Complete document revision, conflicting/stale multi-source comparison, feedback/restart, manual skill reuse, at least three genuine scheduler occurrences, schedule deletion and manual work again. Prove useful correction/limitations and no replay of cancelled or uncertain effects.
+- [ ] Finish real Studio/terminal ordered progress/result/learning parity live and after reconnect, plus actual-adapter provenance and freeform grounding checks; controlled projections are not substitutes.
+- [ ] Record final frontend test/typecheck/build/lint, successful API race completion, generation-drift comparison and the complete strict invocation. Whole-repository Go, lint, Ent generation and native build/version checks above have passed independently; they do not close these remaining gates. Missing prerequisites, skipped required cases, partial diagnostics or failed live samples must remain failures/blockers.
+
+**No normal `:9393` daemon restart, deployment or rollout was performed; no user Bot/schedule, credentials, spending limits or proxy configuration was changed.** Only isolated acceptance resources are in scope. Production external-effect acceptance, direct Kubernetes and the broader BOTS-001–010 matrix below remain open. This documentation checkpoint records evidence; it does not close phase 7 or retroactively certify the failed mandatory-review journeys.
+
+## Quality ownership gate — 2026-11-10
+
+Latest retry: network capacity was restored through separately authorized exact unused acceptance-network removal. Candidate `3eb1a6420c5d951eec44e35df184f7dab24ffd52838bb3058df178bc3c0afc27` fetched actual weather and passed three early employee checks, then stopped on non-JSON pending-control assessment output from the configured proxy/model despite explicit schema forwarding. Source capture happened once and correction did not replay it; output remained partial. The owned daemon was stopped (exited 0), evidence retained in `.tmp/astonish-chat-first-3frthzdz` and `.tmp/bot-employee-results.md`. Provider constrained-output reliability and the complete live quality journey remain unverified. The network failure below is historical, not the latest blocker.
+
+Persistent requirements, bounded review/correction, draft-safe publication and Studio/terminal quality projection passed their controlled phase gates. Full Go tests, lint, frontend checks and focused races also passed. This does not establish real-model recurring quality: the fresh `--verify-bot-quality` attempt on candidate `03e8d12dbfa623337e2d231fcda67e03e7a46f174890752ed316e12f4b2bd09a` exited 1 before Bot model/tool execution because Docker could not allocate the new organization's network (`all predefined address pools have been fully subnetted`). The uniquely owned test daemon was stopped and observed exited 0; no shared cleanup or normal-daemon deployment was performed. Evidence and exact resource identity are retained in `.tmp/bot-employee-results.md` and `.tmp/astonish-chat-first-qlu4wh8d`.
+
+The live quality gate remains blocked, PostgreSQL work-state testing is compiled but unexecuted, and the external-effect/Kubernetes/deployed release obligations below remain unchanged. A new fresh invocation after separately authorized capacity remediation is required; old employee receipts and controlled assessments cannot satisfy it.
+
+## Employee operations final-gate boundary — 2026-11-09
+
+**Owned employee acceptance: VERIFIED 17/17; production external-effect acceptance: BLOCKED.** `.tmp/employee-writer-live.md` records launcher `1bce8324` exit 0 at 15:00:54 UTC; `.tmp/employee-writer-final-status.json` and `employee-writer-final-receipts.json` bind all seventeen checks to candidate `e3d37bb03f12eef37a912f5c13b114256c0f33e74617cdfac2a5917331b1bad7`, root `.tmp/astonish-chat-first-bz706voj`, writer container `eab3723e7a51bfaff8106d358953d03ca835c6a6fe884eaf49c732867545423c`, Bot `a3975bd1-0c26-4cc4-a635-ee040d7b2b64` and Home `c8457742-dbee-46fc-9d2e-551555571163`. This is the updated seventeen-check final-phase contract, not fourteen checks or a union of old candidates.
+
+The checks are `candidate-node`, `title-weather`, `existing-bot-read-no-authority`, `existing-bot-adoption`, `schedule-natural`, `offline-restart-tick`, `reauth-same-home`, `routine-memory`, `cadence-change`, `pause`, `while-paused`, `resume`, `historical-disabled-schedule`, `exception-denied-no-repeat`, `exception-approved-once`, `hard-delete-preserves-peer`, and `terminal-evidence`. The last check is durable terminal-state evidence, not a claim of terminal-client deployment coverage. The main Bot/Home were deleted by acceptance; the peer was preserved. Canonical read-only writer-namespace observations, not failed manual helper probes, support the result:
+
+- `.tmp/employee-writer-denied-memory-validation.json`, `employee-writer-denied-final-validation.json`, and `employee-writer-approved-once-validation.json`: denial preserved memory through restart/tick; a new source-bound approval applied local memory retirement exactly once, retaining the superseded audit row until hard deletion.
+- `.tmp/employee-writer-terminal-validation.json`: no active run/lease; **13 succeeded and 1 interrupted**, not fourteen successful runs.
+- `.tmp/employee-writer-delete-validation.json`, `employee-writer-peer-validation.json`, `employee-writer-peer-volume-validation.json`, and `employee-writer-volume-deletion-validation.json`: scoped deletion, exact peer preservation, deleted Home volume absent and peer volume present. All abbreviated validation paths in these bullets are under `.tmp/`.
+
+The 2026-11-08 PostgreSQL `scheduled_jobs_pkey` conflict and earlier combined-race/reset failures are historical, not current failures. `.tmp/employee-postgres-repeat-fix.md` preserves fail-first fixture-pool evidence and both passing combined-plus-lifecycle and exact-original `-race -count=3` runs. `.tmp/employee-latest-postgres-final.md` adds a later combined **210 named RUN/PASS records, zero fails/skips**, plus separate controlled API `TestBotRoutineCaptureOutcome` **24 RUN/PASS**, zero fails/skips. These counts include subtest parents/repetitions, not unique journeys. Initial fixture failures and bounded cleanup results remain in those reports. Controlled daemon HTTP selectors belong to `pkg/daemon`, not `pkg/api`; no empty/skipped selector is accepted.
+
+**Remaining production requirement:** [external uncertainty acceptance](employee-external-uncertainty-acceptance.md) and `.tmp/employee-external-uncertainty-acceptance.md` record four controlled loopback passes, not production employee external acceptance. One approved POST/effect with a lost response stayed partial/uncertain, rejected two replays and supported two read-only key-bound reconciliations; deny/wrong-scope/wrong-target produced zero effects. The in-memory approval store and test-only classifier/reconciliation do not prove human UI-to-worker integration or durable production restart. A separately reviewed bounded provider/resource adapter and durable key/receipt protocol are the next design decision; arbitrary external grants are not a remedy.
+
+No phase, release or BOTS-001–010 scenario is closed here. Direct Kubernetes and the broader deployed matrix remain unverified; user daemon `:9393`, existing user Bots, Kubernetes resources and proxy configuration were untouched. The earlier failure and nine-stage sections below are dated history, not the current employee result; `.tmp/bot-employee-results.md` retains the failed 0/14 attempt and latest reconciliation separately.
+
+## Historical corrected Chat model status — 2026-11-07
+
+Title-first `chat_interactive` work, shared Chat questions and truthful durable thinking supersede tool-free Draft/Paused onboarding when interactive composition is enabled. Autonomous schedules require separate reviewed consent; legacy control-only workflows remain compatible. Fresh real-provider corrected-model live acceptance was **pending at this checkpoint**; the seventeen-check 2026-11-09 evidence above supersedes that status without inferring a pass from source tests. All nine-stage 2026-11-06 receipts below are historical evidence of the earlier control-conversation workflow, not proof of title-first useful work. Their candidate, failures, resumes and scope remain intact. No BOTS-001–010 status or broader release gate is promoted here.
+
+## Chat-first evidence boundary — 2026-11-06
+
+The current [Chat-first contracts](bot-chat-first.md) add mandatory HTTP/source-proposal and browser selectors to the strict driver, retaining terminal parity and legacy explicit-intent acceptance. Driver regression tests establish wiring only. Earlier local/infrastructure results below are historical, not fresh proof of these changes. Controlled HTTP/model, browser and PTY tests must be distinguished from the bounded real daemon/provider/Docker evidence reconciled below; the scoped nine-stage live smoke is now verified on one safely resumed candidate, while a fresh uninterrupted single-invocation pass and the broader release remain unclaimed. No BOTS-001–010 scenario is promoted from missing, and no release gate is waived. Source-proposal recovery requires the saved ID; tool-free drafting is not autonomous external execution.
+
+## Chat-first smoke compliance gaps
+
+**Historical 2026-11-06 status: VERIFIED 9/9, 21:32 UTC, same candidate with safe checkpoint resumes; not deployed Kubernetes or full release acceptance.** Launcher `d00eb582` exited 0; independent ownership/evidence validation also exited 0. Evidence: `.tmp/astonish-chat-first-08xel0sl/browser-evidence.json`, `/tmp/chat-first-paused-stage-recovery.md`. Candidate SHA-256 `795786c9f627555a8562b2df7ef6c01019450fceb6837f30b1d8530af0ed20b9`; Bot `196936cd-488f-4812-8a41-de09911e70d2`; Home `4df705f3-dce9-421d-b7ae-3eb82296d6bd`; URL `http://127.0.0.1:63512`.
+
+| Required stage | Current same-candidate evidence |
+|---|---|
+| `minimal-conversation` | Inert Draft, zero initial runs, native desktop/mobile light/dark screenshots, durable conversation Home. |
+| `responsibility-confirmed` | Exact proposal `935418f6-4b6c-590c-8728-e12b2557d466` confirmed with its saved digest. |
+| `tool-artifact-reload` | Read-only load run `39043e73-c52a-585b-96e4-27b32fcacd41`, exact 36-byte authenticated download, two artifact cards after cleanup/reload. |
+| `scheduled-tick-return` | Trigger `8f96498a-491c-5493-adc7-936782b0ffbd`, actual tick `ed4ee095-24cf-497d-9c3b-4d4fd6007f21` returned to same Home. |
+| `exact-approval-continued` | Distinct write/load runs each succeeded with one tool and one consumed exact approval; no replay. |
+| `paused-approval-blocked` | Approval `67f1196e-b1d1-44b5-a292-d6c124f94ace` approved but unconsumed; task waiting, zero tools, unchanged bytes and 18 runs. |
+| `memory-next-answer` | Correction `23ad7f04-6e80-5d3c-87bc-307fea385919`; subsequent answer `c7dcbb3a-8d50-4e9e-b752-0458001f533c` uses corrected fact. |
+| `details-no-reconnect` | Same composer DOM identity, zero new stream fetches. |
+| `paused-restart-bytes` | One owned restart; paused, recurrence disabled/no catch-up; 18 runs unchanged; 36-byte artifact and all 108302 history bytes unchanged; 65-second negative observation. |
+
+**Reproducibility boundary:** the original 7/9 result and eighth-receipt authentication failure remain history. This is not a fresh uninterrupted single invocation. The original terminal tool-free refusal was preserved; a separately reviewed read-only replacement task used only `load_file` with exact path/title. The first continuation performed the only restart, then exited 1 at Sign In. Idle harness refresh and normal sign-in resumed from the actual pre-restart history, without second restart or consent replay. Every preexisting Sent/Before/IDs/Consents/Receipts entry remained unchanged. No cross-candidate receipt union or evidence editing establishes this pass. Full BOTS-001–010 and direct Kubernetes acceptance remain missing; broader retained browser/MCP/PTY gates remain open; OpenShell deferred.
+
+### Historical smoke gaps — superseded by current scoped 9/9
+
+**Historical status: partial live workflow, no final smoke acceptance and no deployed Kubernetes acceptance at that checkpoint.** The nine names below remain the `REQUIRED_EVIDENCE` contract in `tests/e2eboot/local_bot_smoke_launcher.py`. Evidence spans separate timestamped owned candidates; it is not one passing invocation. The artifact-fixed fresh `.tmp/astonish-chat-first-bbvtaeo2` candidate (`:49348`) was running at the 20:31 checkpoint in `/tmp/chat-first-artifact-fixed-smoke.md`, not accepted.
+
+| Required stage | Recorded bounded evidence | Still required for reproducible acceptance |
+|---|---|---|
+| `minimal-conversation` | Native Studio minimal Draft/Home observed; prior coherent attempts recorded this receipt. | Fresh same-candidate scoped Home and conservative state. |
+| `responsibility-confirmed` | Exact review applied; prior coherent attempts recorded this receipt. | Authoritative fresh proposal/source/digest and applied receipt in the final journey. |
+| `tool-artifact-reload` | Historical 36-byte download survived teardown/restart. Later exact load succeeded and bytes/teardown passed, but the Home card timed out; metadata-only Home projection is now repaired in source. | Fresh artifact card plus same-Home reload, exact authenticated bytes and destroyed original/continuation compute on the patched candidate. Do not backfill by replaying old actions or promote historical Partial runs. |
+| `scheduled-tick-return` | Genuine 18:39 tick succeeded with zero tools. Recovered paused conversation's terminal-source review applied the same five-minute schedule at 19:04:58, disabled/no next run/no catch-up. | Reproduce reviewed recurrence, separate activation, actual tick/same-Home report and reviewed disabled recurrence in one candidate journey. |
+| `exact-approval-continued` | Prior coherent `.tmp/astonish-chat-first-2oxa7lo7` recorded this fourth receipt: exact write and load each succeeded with one tool and one consumed approval, no write replay. | Fresh candidate-bound exact digest/fence and at-most-once dispatch assertions; never reuse consumed approval. |
+| `paused-approval-blocked` | **Clean lifecycle proven** at 19:25–19:26: fresh actual `waiting_approval`, compute absent, native Pause then approval persisted approved but continuation blocked; 24-second follow-up found zero tools, no new run/container, paused and schedule disabled. | Repeat in the final candidate journey. Historical decision has not itself been restart-tested; no consumption while paused was claimed. |
+| `memory-next-answer` | Prior applied-memory acknowledgment exists, with some stale provider prose. | Saved corrected content plus a subsequent answer using the fact, not just receipt acknowledgment; preserve historical proposals. |
+| `details-no-reconnect` | DOM identity/stream-count checks and prior coherent receipts exist. | Same assertions in final journey, not a screenshot substitute. |
+| `paused-restart-bytes` | Owned 18:43 and later recovery restart preserved paused Home/history, approvals, exact 36 bytes and disabled schedule. | Final candidate ownership-checked restart, no replay/new admission and scoped history/byte equality. |
+
+### Historical prerequisites and acceptance snapshot
+
+- **Coherent driver implemented, full live pass still outstanding.** Default `chat_first_browser/main.go` selects `coherentWorkflow`; former diagnostic exits are no longer the default success-path blocker. `/tmp/chat-first-coherent-harness.md` records native review, terminal-source waits, candidate/Home-bound receipts, bounded checkpoints and negative/partial/missing-stage guard tests. Remaining/retained/permission opt-ins still cannot satisfy acceptance. Do not union old receipts, edit evidence JSON, ignore nonzero exits or replay ambiguous consent. Earlier fresh attempts safely failed at owned-node launch and then missing artifact card; neither is a completed smoke.
+- **18:41 busy classification and 18:49 recovery/cadence gap resolved within their recorded bounds.** Typed HTTP 409 plus `Retry-After: 1` preserves stale digest/revision rejection; a dedicated live busy-message assertion is not claimed. `/tmp/chat-first-live-recovery-final.md` records exact physical absence, higher-fence paused conversation progress (proposal-only Partial, not zero total tool calls), native in-place five-minute edit and restart invariants. Recovery does not destroy surviving compute or guess advanced fences; never clear the root by SQL or forge a receipt.
+- **Clean paused decision proven separately.** `/tmp/chat-first-clean-paused-approval.md` supersedes the earlier pause-before-waiting attempt. It records actual waiting state before pause, native **“Approved; continuation blocked by pause. The Bot remains paused.”**, approved/unconsumed decision, zero external dispatch and unchanged earlier approvals/artifact metadata. No whole-workflow or post-new-decision restart claim follows.
+- **Exact fresh-Draft activation PostgreSQL gap closed.** `/tmp/chat-first-final-pg-activation.md` records **18 leaf cases, PostgreSQL 16.15**, all passed/no skips: personal/team fresh-Draft consent through proposal and legacy activation, transaction rollback/retry, router reopen and pause/stop → Resume with disabled recurrence. Disposable fixture databases and container were removed. This is not PostgreSQL version 18, a daemon restart or live scheduler/provider proof; broader PostgreSQL obligations below retain their own bounds.
+- **Artifact projection source repaired, not historical data repaired.** `/tmp/chat-first-bot-artifact-fix.md` records fail-first personal/team tests and the canonical metadata-only artifact projection in `bot_transcript.go`. Existing ChatRunner capture was already correct. Cursor/full-reload dedup, cross-Bot/session and provenance boundaries are covered; report gates and authorization remain unchanged. No backfill or completed-action replay. Fresh UI/download/reload acceptance remains with the concurrently owned smoke.
+- **Final source checks and provenance remain distinct from live acceptance.** `/tmp/chat-first-final-artifact-checks.md` records this artifact candidate's full Go, scoped race and Go lint checks. Earlier web/extension results, initial PTY timeout and ordinary opt-in skips remain in `/tmp/chat-first-final-checks-latest.md`; no new frontend/deployed PTY proof is inferred. Local model sensitivity and genuinely unverified historical/tool outcomes remain limitations, but missing builtin file outcome capture is not a blanket current claim: later exact write/load succeeded independently. Direct Kubernetes, retained browser/MCP/PTY and BOTS-001–010 remain open; OpenShell is deferred.
+
+## Status and evidence rules — 2026-11-06
+
+**Implementation tracker: Phases 1–6 recorded passed; Phase 7 running. Release: not accepted.** Current evidence includes controlled memory/cursor results, physical Docker home acceptance, isolated PostgreSQL acceptance and final clean local acceptance below. Local process `c2f91280` finished with actual exit **3**: all eight local component gates passed, but all ten deployed scenarios remain missing and specification coverage failed. Direct Kubernetes still has no configured context and remains unverified. This documentation reconciliation records existing evidence without rerunning infrastructure; component success does not establish deployed release acceptance.
+
+Requirements: the user-supplied `astonish-bots-spec.md` (2026-11-03), §§5–17, and relevant behavior sections of `system_prompt.md`. Original spec phase numbers (§16) differ from the approved seven-phase implementation plan. OpenShell Bot implementation/purge/live acceptance is **deferred by explicit user decision**; preserve its existing code. It is not a release blocker for this Docker/direct-Kubernetes scope, nor verified Bot support.
+
+Evidence levels used here:
+
+- **Source/unit:** an implementation and a named test exist; this audit does not claim they ran.
+- **Controlled journey:** real routes/store/ChatRunner or SPA/PTY, but controlled identity/model/tools/home. SQLite reopen is not deployed daemon restart; temporary directories are not containers.
+- **Current live component:** Phase 7's non-skipped physical Docker home pass is bounded to the image, IDs and assertions below; it is not deployed worker/provider proof.
+- **Historical live component:** earlier PostgreSQL race/migration/archive and Docker home runs, bounded to their recorded cases. They do not compose into a live Bot release proof.
+- **Missing deployed acceptance:** no current end-to-end evidence. A fail-closed unsupported operation is a safety success, not implementation of that operation. A skipped test, empty selector, fixture receipt or catalog entry cannot promote it.
+
+## Current Phase 7 evidence
+
+These are recorded results from the repair/acceptance handoffs, not new executions by this documentation task:
+
+- **Correction-aware next run:** `go test ./pkg/daemon -run '^TestBotCorrectionFollowupHTTPWorker$' -count=1` passed unchanged in personal and team scopes after first failing both. `pkg/daemon/bot_correction_followup_test.go` exercises real HTTP admission, BotWorker and wired Chat with a controlled model: initial `Delivery is Thursday`, durable reconciliation, then `Delivery is Friday` in current system context and the persisted answer, without the old claim in that context. Goal completion and disabled-followup assertions also pass. This is controlled integration, not a deployed daemon/provider/sandbox journey. Agent/launcher/daemon suites and scoped memory tests passed; see `/tmp/astonish-phase7-memory-fix.md` and the [current-memory contract](bots.md#current-memory-in-worker-prompts).
+- **SQLite transcript cursor repair:** `fenceTranscript` in `pkg/store/entstore/bot_transcript.go` now takes the conditional root-row UPDATE lock before reading the run in both scope adapters. This prevents obsolete-read-snapshot promotion (`SQLITE_BUSY_SNAPSHOT`, 517); unchanged in-transaction lease/intent/status/worker/version checks still reject unauthorized writes. `TestBotTranscriptConcurrentCursor` covers same-ID deduplication and distinct concurrent IDs with strictly increasing, exact-once paginated replay; `TestBotTranscriptAtomicFence` includes wrong-worker and incompatible-status denial. Recorded passes: `go test -race ./pkg/store/entstore -run '^TestBotTranscript' -count=20`, `go test ./pkg/store/entstore -run '^TestBotTranscript' -count=100`, and the full package. No new retry layer or acceptance weakening; no current live PostgreSQL claim. Evidence: `/tmp/astonish-phase7-transcript-race.md`.
+- **Current physical Docker acceptance:** `/tmp/astonish-phase7-docker-home.log` records non-skipped `TestBotHomeDockerPersistenceLive` PASS (14.71s; package 15.186s), Docker 27.4.0, image `sha256:c7754e0081baa2cb3bd92683829059767ae5c43b56223c612bb823cfcf2d574f`. Sessions `home-live-1793926372915249000-a` and `-b` used distinct containers `fb8121cd47de…` and `a8d68d3d2649…` and the same owned home volume; `-other` used a different volume/container. Both runs were destroyed; offline artifact bytes, bounded/symlink guards, idempotent owned-home purge, retention of the other Bot and no leaked reader helpers were verified. Layers were mounted read-only. This physical component pass does not establish deployed scheduled execution, browser/MCP/PTY retained-home behavior, nested mounts or Kubernetes. Direct Kubernetes remains unconfigured/unverified.
+- **Final clean local acceptance:** process `c2f91280` ended with actual exit **3**, the expected partial-evidence result, not release success. `/tmp/astonish-phase7-local-clean.log:4625-4639` records eight PASS gates: `make-test`, `frontend-typecheck`, `frontend-build`, `frontend-lint`, `make-lint`, `browser`, `cli-pty`, `sqlite`. The prior full-lint failures are superseded by these passing gates, not waived. Browser/PTY results are current controlled local acceptance, not deployed client proof. This local invocation reports `postgres`, `docker-home`, and `kubernetes-home` **NOT RUN**; separate component evidence must not be relabeled as part of this run. `spec-coverage` **FAIL**: BOTS-001–010 remain missing, each without deployed `test_refs` (ten scenarios, twenty diagnostic lines). OpenShell remains deferred.
+- **Current isolated PostgreSQL acceptance:** `/tmp/astonish-phase7-postgres.md` and its sanitized JSONL record `go test -json -count=1 -p 1 -timeout=5m -tags=integration ./pkg/store/entstore -run '^TestIntegration(BotPostgres|PostgresBot).*$'` with an allowlisted environment and acknowledged disposable localhost DSN. All **5/5 mandatory tests**, **12/12 top-level tests**, and **44/44 total test/subtest events** passed; zero skips/failures; test and strict-parser exits 0 (48.992s). The owned pgvector PostgreSQL container was healthy, all generated databases removed, and owned container/anonymous-volume cleanup and no-container-left verification passed. This proves scoped migration/backup recovery, memory filtering/attribution, binding/configuration/publication, spend concurrency/caps, correction and cleanup—not deployed worker/provider acceptance. Explicit execution-intent and approval-concurrent-consumption tests remain SQLite fixtures, not PostgreSQL evidence; this run did not use the race detector.
+- **Live lifecycle implementation exists, execution blocked:** `tests/e2e/bots/live_lifecycle_test.go::TestBotsLiveLifecycle` and `tests/e2eboot/bots_live_acceptance.go` compose real Bootstrap HTTP, BotWorker, provider and direct Kubernetes retained home. Tagged compilation passed with no tests run. The actual lifecycle invocation exited **1**, FAIL not SKIP, at `ASTONISH_E2E_DEDICATED=1` preflight; no live lifecycle executed. Direct Kubernetes still has no configured context. The slice requires dedicated DB/namespaces/PVCs, current retained-home image, independent Bound RWX home claim and working provider configuration. It is toolless: the retained `lifecycle.txt` artifact is a sandbox-written fixture, not model output. Scheduling, channels, approvals, cross-tenant cases, tool catalogue parity and artifact HTTP-route composition are outside this first slice. Evidence: `/tmp/astonish-phase7-live-lifecycle.md`.
+
+All deployed gates below remain open until independently recorded evidence closes the specific obligation. Clean local gates and isolated PostgreSQL/Docker passes do not close Phase 7 or establish release readiness.
+
+## Traceability: specification §§5–16
+
+Test names below identify real source anchors, not passing E2E claims. Paths are relative to the repository root. Related contracts remain in [Bots](bots.md), [adapters](bot-production-adapters.md), [triggers](bot-triggers.md), [memory](memory.md) and [backup/recovery](platform-backup-recovery.md).
+
+| Requirement | Implementation and concrete test anchors | Boundary / outstanding obligation |
+|---|---|---|
+| §5.1 versioned identity, conservative policy, soft deletion, credential references | `pkg/store/bots.go`; `pkg/store/entstore/bots_test.go`; `pkg/api/bot_handlers_test.go::TestBotStorageHTTPAcceptance` | Scoped SQLite/control plane; avatar/display parity and secret non-disclosure across every output need explicit acceptance, not inferred schema coverage. |
+| §5.2 charter outcome, sources, limits, interruption policy | `pkg/bot/documents.go`; `pkg/bot/documents_test.go::TestDocumentsExplicitCASEdit`; `pkg/api/bot_configuration_handlers_test.go::TestBotReviewedProsePreservesPolicyHTTP` | Version/CAS and policy preservation exist; quality/one-screen suitability and live adherence are not mechanically established. |
+| §5.3 scratch, promotion, reviewed template fork | `pkg/api/bot_promotion_handlers_test.go::TestBotReviewedPromotionHTTP`; `bot_unfinished_intake_handlers_test.go::TestBotUnfinishedIntakeHTTPAcceptance`; `bot_phase2_http_test.go::TestBotPhase2HTTPAcceptance`; `bot_browser_test.go::TestBotWorkspaceBrowserAcceptance` (all under `pkg/api`) | Controlled HTTP/browser. Do not equate reviewed form intake with proof of the spec's conversational agent wizard; approved-only carryover needs deployed walkthrough. |
+| §6.1 load/plan/act/verify/report/cleanup | `pkg/daemon/bot_worker.go`, `pkg/bot/supervisor.go`, `pkg/api/bot_runtime_acceptance_test.go::TestBotRuntimeHTTPAcceptance` | Real scheduler/worker/ChatRunner with controlled model/home and trusted fixture observations. Automatic choice/distillation of routine flows and exhaustive goal reconciliation are not proven by that journey. |
+| §6.2 cron, hooks, mentions, manual, deadlines | `pkg/daemon/bot_runtime.go`; `pkg/api/bot_trigger_handlers_test.go::TestBotTriggersHTTPAdmission`; `pkg/daemon/bot_trigger_execution_test.go::TestBotExternalTriggersHTTPWorkerExecution` | Signed webhook, bounded public-HTTPS polling and scoped channel bindings are not arbitrary email/file watchers. Read [trigger limits](bot-triggers.md). No live source/channel acceptance here. |
+| §6.3 serialization, timeout, restart, safe resume | `pkg/daemon/bot_worker_lifecycle_test.go::TestBotWorkerPollRecoversCrashAfterDatabaseReopen`, `TestBotWorkerResumedBudgetExhausted`; `pkg/store/entstore/bot_approval_chat_test.go::TestBotApprovalSQLiteReopenChatRunner` | SQLite reconstructed components and fences, not deployed crash/physical teardown. No blind replay of uncertain effects; general arbitrary-task checkpoint recovery is not promised. |
+| §7 delegation: narrowed authority, no send/spend, failure preservation | `pkg/agent/bot_policy.go`; `pkg/api/bot_policy_all_dispatch_test.go::TestBotPolicyAllDispatchPaths`; `pkg/bot/budget_test.go::TestSharedRunBudgetConcurrentParentChild` | Controlled dispatch. Real sandbox delegated work, interrupted-child synthesis and no leaked private brief require acceptance. Unsafe global Fleet operations are not enabled. |
+| §§8.1–8.4 tiered cloned prompts, run context, scheduled/interactive/Ask/Plan | `pkg/agent/bot_prompt.go`, `bot_prompt_test.go`; `pkg/agent/bot_policy.go`; `pkg/api/bot_policy_all_dispatch_test.go::TestBotPolicyAllDispatchPaths` | Existing builder/runtime retained. No claim of complete conversational behavior from prompt tests. Server-owned next-run projection is missing; no invented cron timestamp. |
+| §8.5 persona and acknowledgment | `pkg/bot/documents_test.go::TestDocumentsProjection`, `TestDocumentsExplicitCASEdit`; `pkg/api/bot_document_handlers_test.go::TestBotDocumentsHTTPBoundary` | Reviewed record projections/activity, not arbitrary Markdown file writes as authority. Active prose editing is not supported; inactive edits preserve disabled schedules. |
+| §9.1 goals/commitments/evidence and goal briefing | `pkg/api/bot_handlers_test.go::TestBotStorageHTTPAcceptance`; `pkg/bot/runtime_test.go::TestBotTodosAndEvidence` | Evidence/owner confirmation and tracked-item state exist. Full goal-to-future-run follow-through remains unproven. |
+| §9.2 curated memory, attribution, corrections, people/groups, no secrets/permission | `pkg/api/bot_phase2_http_test.go::TestBotPhase2HTTPAcceptance`; `pkg/api/bot_memory_attributed_update_http_test.go::TestBotMemoryAttributedUpdateHTTP`; `pkg/store/entstore/bot_memory_runtime_test.go::TestBotRunMemory`; `pkg/daemon/bot_correction_followup_test.go::TestBotCorrectionFollowupHTTPWorker` | Controlled HTTP/worker correction-followup now passes in both scopes, including corrected next-run context/answer, goal completion and disabled followups; full deployed acceptance remains missing. People/groups are projections; group raw ingest is unsupported. No automatic relationship inference/omniscient background maintenance. |
+| §9.3 bounded run todos, evidence rather than attempted completion | `pkg/bot/runtime_test.go::TestBotTodosAndEvidence`; `pkg/store/bots.go` | Contract validation; no live long-task checklist/compaction acceptance. |
+| §9.4 durable home, fresh compute, retained deliverables | `pkg/sandbox/docker/bot_home_live_test.go::TestBotHomeDockerPersistenceLive`; `pkg/sandbox/k8s/bot_home_recovery_test.go::TestBotHomeRejectUnsafeRecoveredPod`; `pkg/api/bot_offline_artifact_http_test.go::TestBotOfflineArtifactHTTP` | Current Phase 7 Docker physical component pass recorded above; direct K8s remains unconfigured/unverified. Browser profile/MCP/PTY retained-home and skipped nested-mount case remain gates. Storage retention is not backup. |
+| §10.1 full thread report, exact facts, artifacts, unverified | `pkg/bot/report_test.go::TestRenderReport`; `pkg/api/bot_runner_resume_safety_test.go::TestBotResumeModelPreservesExactNumbers`; `pkg/api/bot_runner_outcomes_test.go::TestBotChatRuntimeAdapterToolOutcomeCannotBecomeSuccess` | Controlled attestation, not live external fact verification. Bot report PDF unavailable. Next-run UI projection unavailable. |
+| §10.2 send/defer/skip and audit | `pkg/api/bot_notifications_acceptance_test.go::TestBotNotifications`; `pkg/store/entstore/bot_publication_postgres_test.go::TestIntegrationPostgresBotPublicationWaitingThenFinal` | Controlled HTTP receipt; historical PG persistence. Only private Telegram destinations have production binding authority. Shared transport has no provider receipt ID: nil error remains uncertain. Slack/email notifications and groups fail closed. |
+| §10.3 exact decisions, inline inbox, durable continuation | `pkg/store/entstore/bot_approval_chat_test.go::TestBotApprovalSQLiteReopenChatRunner`; `bot_interaction_chat_test.go::TestBotQuestionSQLiteReopenChatRunner`; `pkg/api/bot_scheduled_browser_test.go::TestBotScheduledWorkspaceBrowserAcceptance` | Post-answer continuation exists. Repeated questions and deployed interruption/revocation transitions need proof; detached tutorial/browser-human waits unavailable. |
+| §§11.1–11.3 autonomy, denial precedence, exact grants, caps | `pkg/execution/run_policy.go`; `pkg/api/bot_policy_all_dispatch_test.go::TestBotPolicyAllDispatchPaths`; `pkg/daemon/bot_production_price_test.go::TestBotProductionUnknownPriceReadiness` | Four levels do not make every action available. Cost-capped activation fails closed without conservative price oracle; purchase execution lacks cap-enforcing production adapter. Scope approval is not destination authenticity proof. |
+| §12 classify/retry/partial/repair/human takeover | `pkg/api/bot_runner_resume_safety_test.go::TestBotResumeNoReplayAfterEffect`; `pkg/bot/supervisor_test.go::TestSupervisorOutcomeNeverClaimsSuccessAfterError`; `pkg/daemon/bot_runtime_test.go::TestBotSchedulerPreservesRetryOccurrence` | No deployed 429/login/bot-wall + bounded fallback acceptance; autonomous repair/readback/disable cycle and human takeover are not established. |
+| §13 injection, secret/privacy, tenancy, safeguards | `pkg/api/bot_policy_all_dispatch_test.go::TestBotPolicyAllDispatchPaths`; `pkg/daemon/bot_production_test.go::TestBotLiveGuardRevocationAndFence`; `pkg/api/bot_runtime_access_test.go::TestBotTeamSessionAccess` | Policy/tenancy tests do not prove resistance to every textual/image attack or privacy leak. Real tool transport and cross-team home canaries required. |
+| §14.1 Studio list/thread/runs/goals/triggers/memory/decisions | `pkg/api/bot_browser_test.go::TestBotWorkspaceBrowserAcceptance`; `bot_scheduled_browser_test.go::TestBotScheduledWorkspaceBrowserAcceptance` | Built SPA and real HTTP/SQLite, controlled runtime. Bots live inside Chat by product decision. Empty/error/reconnect/paused/deleted and expanded/collapsed sidebar must be checked on deployment; next-run field absent. |
+| §14.2 CLI/TUI, same daemon, no second scheduler | `cmd/astonish/bots_test.go::TestBotCLIAndPTYAcceptance`; `bots_parity_pty_test.go::TestBotParityPTYAcceptance`; `bots_code_pty_test.go::TestBotBareCodePTYAcceptance` | Subprocess/PTY implementation proof, not deployed remote-client acceptance. Bare Code must remain local. |
+| §14.3 API/auth | `pkg/api/bot_handlers_test.go::TestBotHTTPBoundary`; `pkg/api/bot_event_stream_test.go::TestBotEventsHTTPAcceptance`; `pkg/client/bots_test.go` | Implemented API is `/api/studio/bots`, not the spec's sketch `/api/bots`. Authenticated scope and immutable session linkage remain authoritative. |
+| §15 tenant data/session/scheduler reuse, migration | `pkg/store/entstore/bot_migrate_test.go`; `backup_bot_postgres_test.go::TestIntegrationBotPostgresPreBotMigration`, `TestIntegrationBotPostgresPreBotBackupRestore` | Historical PG/SQLite schema/archive evidence; physical-home backup plus database/key restore and worker quiescence need operator drill. UUID linkage, not session-name prefixes, authorizes reads. |
+| §16 original staged rollout | This audit plus approved plan tracker | Original MVP through polish are not automatically delivered by similarly numbered implementation phases. Run diffs, aggregate cost, compaction visibility, Bot-to-flow distillation and team-wide maximum-autonomy/host/budget guardrails need targeted source/acceptance evidence before being claimed. |
+
+## §17 acceptance matrix
+
+Every row remains **missing deployed acceptance** in `tests/scenarios/bots.yaml`.
+
+| Spec | Scenario | Existing bounded evidence / missing part |
+|---|---|---|
+| 17.1 | BOTS-001 | Reviewed promotion HTTP + workspace browser; prove only approved charter/goals/memory carry over on real deployment. |
+| 17.2 | BOTS-002 | Runtime two-run fixture + current physical Docker home component pass; compose real non-overlap, fresh compute, retained home, restart and no duplicate delivery. |
+| 17.3 | BOTS-003 | `TestBotNotifications`; prove actual unchanged run still reports in thread without provider ping. |
+| 17.4 | BOTS-004 | Threshold HTTP fixture; actual authorized destination, evidence/decision UI and independently meaningful receipt remain open. |
+| 17.5 | BOTS-005 | `TestBotPolicyAllDispatchPaths`; actual sandbox/MCP/flow/delegation denial canaries and audit. Unsupported purchases must remain unavailable, not bypassed to make test green. |
+| 17.6 | BOTS-006 | `TestBotCorrectionFollowupHTTPWorker` passes in both scopes: corrected next-run context/answer, goal completion and disabled followups through controlled HTTP/worker. **Full deployed correction + goals + subsequent behavior remains missing**; controlled model/home is not deployment proof. |
+| 17.7 | BOTS-007 | Atomic lifecycle/worker gates; measured deployed pause within 30 seconds, no subsequent tool dispatch and retained history still required. |
+| 17.8 | BOTS-008 | SQLite/PG retention/isolation and Docker component tests; direct K8s mounts/purge, cross-team canaries, restore deadline and backup/recovery drill missing. |
+| 17.9 | BOTS-009 | Error/partial/no-replay tests; complete deployed rate-limit/login/bot-wall no-retry/accurate-unverified journey missing. |
+| 17.10 | BOTS-010 | Shared/resumed budget tests + Runs rendering; provider billing/cost proof absent and production monetary model-cost caps unavailable. |
+
+## Muse reference behavior (not runtime instructions)
+
+`system_prompt.md` sections **Due Diligence** (49–58), **Discretion and Alignment / External Parties** (75–85), **Proactivity** (108–118), **Memory / Relationships** (126–149), **Date and Time** (153–163), **Conversation Context** (176–181), **Subagents** (286–302), and **Scheduled and Recurring Work** (304–330) inform §§6–13 above. The portable requirements are source-grounded claims, minimal disclosure, attributed correction, no blind effect retry, task ownership, consent separating once from recurring work, truthful notification and actual execution/delivery checks. Their enforcement is bounded by the listed tests; personality quality, automatic relationship reading and all downstream correction effects remain unproven. Muse identity/model claims, household-policy overrides, device APIs, wallet, Feed, side-chat workers, OS services and automatic self-improvement are **not imported**.
+
+## User walkthrough required on release candidate
+
+- [ ] Create from scratch, promote a Chat with explicit review, and privately fork a reviewed team template. Inspect exact carried-over records; reject unselected memory, grants and credentials.
+- [ ] Test once while draft without activating recurrence. Configure pinned model, reviewed trigger/autonomy and supported durable home; activate explicitly. Observe two genuine scheduled runs, distinct compute IDs and shared authorized home bytes.
+- [ ] Open Thread/Runs/Goals/Schedule/Memory/Decisions; reconnect Studio and remote TUI, check unread/read convergence, inline exact approval and one resumed effect. Check empty/error/deleted states and collapsed sidebar. Display unavailable next-run/cost honestly.
+- [ ] Exercise changed/unchanged/decision-needed reports and notification suppression; use a controlled authorized recipient for any real send. Preserve uncertainty if no provider receipt can prove delivery.
+- [ ] Correct a stored claim and affected goal; run again and inspect actual subsequent tool choices/report for the correction. Complete the goal with evidence and prove goal-owned nudges stop.
+- [ ] Pause during work; measure admission and dispatch stopping within one scheduler tick. Paused autonomous work remains blocked; explicitly admitted owner `chat_interactive` turns retain scoped Chat tools without re-enabling recurrence. Stop run, stop Bot, detach, delete and restore must remain distinct.
+- [ ] Confirm ordinary Chat rendering/report three-signal gate, existing adaptive/routine schedules and local Code behavior are unchanged; legacy jobs are never auto-converted.
+
+## Operator deployment, safety and recovery release gate
+
+- [ ] Record candidate revision, daemon/UI image digests, database version, backend, safe disposable tenant/scope, authenticated owner, model/provider and tool configuration. Check activation readiness, actual home binding and image/layer/PVC prerequisites; never point destructive harnesses at production.
+- [ ] Rerun PostgreSQL race/migration/archive cases; capture exact nonempty test/subtest names, PASS/FAIL/SKIP, command and artifacts. Re-run Docker fresh-home/teardown/purge; independently exercise direct Kubernetes pods, mount isolation, retained home, restart and logical purge. Nested mount cases cannot silently skip.
+- [ ] Exercise browser profile, MCP configuration-bound identity and real PTY in retained homes through the product launch path, not a host binary/PATH probe. Do not substitute temp directories or mock K8s clients.
+- [ ] Inject lease expiry/restart, post-effect lost response, storage failure and membership revocation. Establish interrupted/partial states, no blind replay, fresh fence and no viewer authority borrowed by worker.
+- [ ] Prove deny precedence, changed-after-approval rejection, secret redaction, cross-team/org filesystem and memory isolation, bounded rate-limit stops and no unsupported host fallback. Leave cost-capped runs, purchase adapters, unsafe Fleet/tutorial/human-handoff operations and unsupported notification providers unavailable unless separately implemented/approved.
+- [ ] Back up database records, durable-home bytes and the required encryption-key material using the platform recovery procedure. Record scope mappings and home-binding identities. Quiesce/fence source workers before restore; restore to an isolated target with schedules disabled, approvals revoked and publication held. Verify files/artifacts by digest and scoped access, then review before explicit activation. Database-only archive success is insufficient; retention and logical purge are not secure erasure or backups.
+- [ ] Confirm deletion retention/restore boundary with controlled clock; verify physical cleanup receipt and run teardown barriers before purge. Keep old workers from mounting/restoring the same home after cutover.
+- [ ] Record unsupported features and obtain explicit product disposition for unmet specification requirements. Publish deployment/rollback instructions and a user-visible support matrix. No blanket “spec complete” claim while this checklist has gaps.
+
+## Audit validation and catalog semantics
+
+Run `node tests/scenarios/report.mjs` and `node --test tests/scenarios/parse-run.test.mjs`. These validate/report the scenario catalog and result-parser contracts, **not Bot behavior**. `bots.yaml` uses existing fields and `status: missing`, with empty `test_refs` because no qualifying deployed real-provider E2E evidence has been obtained. The new `TestBotsLiveLifecycle` source exists and compiles, but failed infrastructure preflight before live execution; its existence does not cover any scenario. Real implementation test anchors are intentionally in this document/comments, not phantom passing E2E entries. Do not change status merely because a source test exists. A release evidence record needs exact command, candidate revision, backend, prerequisite configuration, non-skipped assertions, observed IDs/artifacts, failures and cleanup result.
+
+## Runtime-record database storage (format 3) release gate
+
+Bot conversation/session events, activity/outbox payloads, run checkpoints and approval questions/answers are persisted in their existing SQL JSON columns as an explicit versioned representation (format 3), rather than as individual retained sandbox content files. Workspace documents, skills, persona files, memory and task assets remain on disk (format 2). Rollback requires a compatible backup or a dual-reader binary, because older binaries cannot consume format-3 runtime records.
+
+Release gate items:
+
+- [ ] Migrate retained Bots explicitly via `POST /api/studio/bots/{botID}/runtime-storage/migrate` (or `astonish bots migrate-storage`), dry-run first. Confirm `complete:true busy:false` and that logical IDs, physical event IDs, order, cursors, timestamps, status, approval digests and receipts are unchanged. Migration is never triggered implicitly by GET, Snapshot, worker claim or Home setup.
+- [ ] Profile the activity endpoint with `ASTONISH_PROFILE_BOT_ACTIVITY=1`; require `X-Astonish-Bot-Runtime-IO-Covered: true` with `Opens=Puts=Failures=0` and sub-second handler time on database-backed reads. Zero counters without coverage=true are not proof.
+- [ ] Verify a real-provider conversation (accepted answer HTTP 202 → genuine model acknowledgement → tools → proper final → reload) and measure accepted-answer-to-acknowledgement latency SEPARATELY from setup/provider/commit time. Do not claim successful completion alone proves latency.
+- [ ] Confirm backup/restore recognizes format-3 runtime records alongside legacy files, preserves real artifact bytes, and continues to neutralize execution authority on restore. The full-scope platform `filefirst` export still requires every Bot in scope to be Paused/Stopped and quiescent.

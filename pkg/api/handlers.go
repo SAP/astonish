@@ -1038,6 +1038,9 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	// route handlers that decode JSON request bodies.
 	router.Use(MaxBodySizeMiddleware)
 
+	registerBotWebhookRoutes(router, backend)
+	registerBotRoutes(router)
+
 	router.HandleFunc("/api/agents", ListAgentsHandler).Methods("GET")
 	router.HandleFunc("/api/agents/{name}", GetAgentHandler).Methods("GET")
 	router.HandleFunc("/api/agents/{name}", SaveAgentHandler).Methods("PUT")

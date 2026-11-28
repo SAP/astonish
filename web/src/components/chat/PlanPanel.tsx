@@ -1,19 +1,27 @@
 import { Loader, Check, Circle, AlertCircle, ListChecks, File, FileEdit, Trash2, Terminal, GitBranch } from 'lucide-react'
 import type { PlanMessage, PlanStepInfo } from './chatTypes'
+import { PlanLifecycle } from './chatTypes'
+import { Button } from '@/components/ui/button'
 
 // Renders the execution plan announced by announce_plan as a human-readable
 // document: separator line, "Execution Plan" header, per-phase details with
 // files and verify commands. Status icons track live execution progress.
 // Optional document sections (context, whatNotToDo, verification) are rendered
 // above and below the phases list when present.
-export default function PlanPanel({ data }: { data: PlanMessage }) {
+export default function PlanPanel({ data, disabled, onApprove }: {
+  data: PlanMessage
+  disabled?: boolean
+  onApprove?: () => void
+}) {
   const completedCount = data.steps.filter(s => s.status === 'complete').length
   const failedCount = data.steps.filter(s => s.status === 'failed').length
   const totalCount = data.steps.length
   const hasRunning = data.steps.some(s => s.status === 'running')
   const allDone = (completedCount + failedCount) === totalCount && totalCount > 0
 
-  const statusLabel = allDone
+  const statusLabel = data.snapshot && data.snapshot.document.lifecycle !== PlanLifecycle.Completed && allDone
+    ? 'Verification required'
+    : allDone
     ? (failedCount > 0 ? 'Partial' : 'Complete')
     : hasRunning
       ? 'In Progress'
@@ -91,6 +99,7 @@ export default function PlanPanel({ data }: { data: PlanMessage }) {
             {data.goal}
           </span>
         </div>
+        {onApprove && data.steps.length > 0 && data.steps.every(step => step.status === 'pending') && !data.snapshot?.document.lifecycle && !data.snapshot?.pending_revision && <div className="px-4 pb-3"><Button disabled={disabled} onClick={onApprove}>Approve plan</Button></div>}
 
         {/* Optional Context section — above the phases list */}
         {data.context && (

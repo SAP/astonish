@@ -1,5 +1,11 @@
 # Testing Architecture
 
+## Corrected Bot Chat model gates — 2026-11-07
+
+`TestIntegrationPostgresBotChatModel` and `TestIntegrationPostgresBotTitleStartState` exercise real PostgreSQL personal/team transactions, not SQLite substitution. The new gate checks title replay across reopen, execution mode/caller-ceiling persistence and public redaction, queued state, custom question continuation after registry revocation, explicit reauthorization and one saved run/fresh fence. It requires `ASTONISH_PG_ACTIVATION_DISPOSABLE=1` plus a dedicated loopback nondefault-port DSN using role `astonish_activation_final`, database `postgres`, TLS disabled and no fallback hosts; absence fails rather than skips. Use disposable PostgreSQL with pgvector and remove its tmpfs container afterward.
+
+Strict driver selectors require title browser, ambiguous-question, thinking restore and title PTY tests alongside legacy compatible journeys. Controlled models and source tests are not real-provider acceptance. Fresh corrected title-first live acceptance remains pending; historical nine-stage control-conversation results cannot be recycled. BOTS-001–010 still requires current non-skipped deployed evidence. No full release certification is implied.
+
 This document defines the three-tier testing structure for Astonish.
 
 `docs/TESTING.md` is the comprehensive reference for the unit / SSE-scenario / backend-integration / prompt-contract layers (vocabulary: "Layer 0–3"). This document is authoritative for the **build-tag taxonomy** (`unit` / `integration` / `e2e`) and for the e2e harness, K8s sandbox infra, and inspector mode. The two are complementary: the layers describe **what kind of bug a test catches**; the build tags describe **what infrastructure a test needs to run**.

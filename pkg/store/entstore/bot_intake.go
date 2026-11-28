@@ -1,0 +1,425 @@
+package entstore
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"time"
+
+	personaljob "github.com/SAP/astonish/ent/personal/scheduledjob"
+	personalsession "github.com/SAP/astonish/ent/personal/session"
+	teamjob "github.com/SAP/astonish/ent/team/scheduledjob"
+	teamsession "github.com/SAP/astonish/ent/team/session"
+	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
+)
+
+var _ store.BotIntakeStore = (*personalBotStore)(nil)
+var _ store.BotIntakeStore = (*teamBotStore)(nil)
+
+func (s *personalBotStore) PromoteChat(ctx context.Context, q store.BotPromotionRequest) (*store.Bot, error) {
+	return s.repository().PromoteChat(ctx, q)
+}
+func (s *teamBotStore) PromoteChat(ctx context.Context, q store.BotPromotionRequest) (*store.Bot, error) {
+	return s.repository().PromoteChat(ctx, q)
+}
+func (s *personalBotStore) ConvertAdaptiveJob(ctx context.Context, q store.BotConversionRequest) (*store.Bot, error) {
+	return s.repository().ConvertAdaptiveJob(ctx, q)
+}
+func (s *teamBotStore) ConvertAdaptiveJob(ctx context.Context, q store.BotConversionRequest) (*store.Bot, error) {
+	return s.repository().ConvertAdaptiveJob(ctx, q)
+}
+
+func (s *personalBotStore) ReviewAdaptiveJob(ctx context.Context, id uuid.UUID) (*store.BotAdaptiveReview, error) {
+	return s.repository().ReviewAdaptiveJob(ctx, id)
+}
+func (s *teamBotStore) ReviewAdaptiveJob(ctx context.Context, id uuid.UUID) (*store.BotAdaptiveReview, error) {
+	return s.repository().ReviewAdaptiveJob(ctx, id)
+}
+func (r *botRepository) ReviewAdaptiveJob(ctx context.Context, id uuid.UUID) (*store.BotAdaptiveReview, error) {
+	actor, err := r.auth.authorize(ctx, uuid.Nil, true)
+	if err != nil {
+		return nil, err
+	}
+	var out *store.BotAdaptiveReview
+	err = r.db.Transaction(ctx, func(tx botDB) error {
+		var updated time.Time
+		switch d := tx.(type) {
+		case personalBotDB:
+			row, err := d.client.ScheduledJob.Get(ctx, id)
+			if err != nil {
+				return personalBotError(err)
+			}
+			updated = row.UpdatedAt
+		case teamBotDB:
+			row, err := d.client.ScheduledJob.Get(ctx, id)
+			if err != nil {
+				return teamBotError(err)
+			}
+			updated = row.UpdatedAt
+		default:
+			return store.ErrBotUnsupported
+		}
+		job, err := tx.(botIntakeDB).reviewAdaptive(ctx, id, actor, updated)
+		if err != nil {
+			return err
+		}
+		out = &store.BotAdaptiveReview{SourceJobID: id, UpdatedAt: updated, Schedule: job.Schedule, Instructions: job.Payload.Instructions}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type botIntakeDB interface {
+	reviewChat(context.Context, uuid.UUID, uuid.UUID) error
+	reviewAdaptive(context.Context, uuid.UUID, uuid.UUID, time.Time) (*store.ScheduledJob, error)
+	pauseAdaptive(context.Context, uuid.UUID, time.Time) error
+}
+
+func (d personalBotDB) reviewChat(ctx context.Context, id, actor uuid.UUID) error {
+	row, err := d.client.Session.Get(ctx, id.String())
+	if err != nil {
+		return personalBotError(err)
+	}
+	if row.UserID == nil || *row.UserID != actor || row.BotID != nil || row.BotRunID != nil || row.Purpose != personalsession.PurposeChat {
+		return store.ErrBotForbidden
+	}
+	return nil
+}
+func (d teamBotDB) reviewChat(ctx context.Context, id, actor uuid.UUID) error {
+	row, err := d.client.Session.Get(ctx, id.String())
+	if err != nil {
+		return teamBotError(err)
+	}
+	if row.UserID == nil || *row.UserID != actor || row.BotID != nil || row.BotRunID != nil || row.Purpose != teamsession.PurposeChat {
+		return store.ErrBotForbidden
+	}
+	return nil
+}
+func (d personalBotDB) reviewAdaptive(ctx context.Context, id, actor uuid.UUID, expected time.Time) (*store.ScheduledJob, error) {
+	row, err := d.client.ScheduledJob.Get(ctx, id)
+	if err != nil {
+		return nil, personalBotError(err)
+	}
+	if row.CreatedBy == nil || *row.CreatedBy != actor {
+		return nil, store.ErrBotForbidden
+	}
+	if row.Mode != personaljob.ModeAdaptive || row.Status != personaljob.StatusActive || !row.UpdatedAt.Equal(expected) {
+		return nil, store.ErrBotConflict
+	}
+	return personalEntScheduledJobToStore(row), nil
+}
+func (d teamBotDB) reviewAdaptive(ctx context.Context, id, actor uuid.UUID, expected time.Time) (*store.ScheduledJob, error) {
+	row, err := d.client.ScheduledJob.Get(ctx, id)
+	if err != nil {
+		return nil, teamBotError(err)
+	}
+	if row.CreatedBy == nil || *row.CreatedBy != actor {
+		return nil, store.ErrBotForbidden
+	}
+	if row.Mode != teamjob.ModeAdaptive || row.Status != teamjob.StatusActive || !row.UpdatedAt.Equal(expected) {
+		return nil, store.ErrBotConflict
+	}
+	return entScheduledJobToStore(row), nil
+}
+func (d personalBotDB) pauseAdaptive(ctx context.Context, id uuid.UUID, expected time.Time) error {
+	row, err := d.client.ScheduledJob.Get(ctx, id)
+	if err != nil {
+		return personalBotError(err)
+	}
+	if !row.UpdatedAt.Equal(expected) {
+		return store.ErrBotConflict
+	}
+	expected = row.UpdatedAt
+	n, err := d.client.ScheduledJob.Update().Where(personaljob.IDEQ(id), personaljob.ModeEQ(personaljob.ModeAdaptive), personaljob.StatusEQ(personaljob.StatusActive), personaljob.UpdatedAtGTE(expected.Truncate(time.Microsecond)), personaljob.UpdatedAtLT(expected.Truncate(time.Microsecond).Add(time.Microsecond))).SetStatus(personaljob.StatusPaused).ClearNextRunAt().Save(ctx)
+	if err != nil {
+		return personalBotError(err)
+	}
+	if n != 1 {
+		return store.ErrBotConflict
+	}
+	return nil
+}
+func (d teamBotDB) pauseAdaptive(ctx context.Context, id uuid.UUID, expected time.Time) error {
+	row, err := d.client.ScheduledJob.Get(ctx, id)
+	if err != nil {
+		return teamBotError(err)
+	}
+	if !row.UpdatedAt.Equal(expected) {
+		return store.ErrBotConflict
+	}
+	expected = row.UpdatedAt
+	n, err := d.client.ScheduledJob.Update().Where(teamjob.IDEQ(id), teamjob.ModeEQ(teamjob.ModeAdaptive), teamjob.StatusEQ(teamjob.StatusActive), teamjob.UpdatedAtGTE(expected.Truncate(time.Microsecond)), teamjob.UpdatedAtLT(expected.Truncate(time.Microsecond).Add(time.Microsecond))).SetStatus(teamjob.StatusPaused).ClearNextRunAt().Save(ctx)
+	if err != nil {
+		return teamBotError(err)
+	}
+	if n != 1 {
+		return store.ErrBotConflict
+	}
+	return nil
+}
+
+// insertIntakeDraft runs wholly in its caller's scoped transaction. Intake hash
+// includes the reviewed request, so idempotency cannot silently change carryover.
+func insertIntakeDraft(ctx context.Context, tx botDB, rec botStoredRecord, v store.BotVersion, goals []store.BotGoal, carry store.BotCarryover, operation string, source uuid.UUID, seeds ...*store.BotSkillSeed) (*store.Bot, error) {
+	if err := tx.InsertBot(ctx, rec); err != nil {
+		return nil, err
+	}
+	for i, seed := range seeds {
+		if seed == nil {
+			continue
+		}
+		if i >= len(v.Triggers) {
+			return nil, store.ErrBotInvalid
+		}
+		id, err := insertIntakeSkillSeed(ctx, tx, rec.Bot, seed)
+		if err != nil {
+			return nil, err
+		}
+		v.Triggers[i].SkillID = &id
+		v.Triggers[i].Invocation = seed.Responsibility
+		v.Triggers[i].Instructions = ""
+	}
+	hash, err := botHash(v)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.InsertVersion(ctx, v, hash); err != nil {
+		return nil, err
+	}
+	if err := tx.InsertHomeSession(ctx, rec.Bot); err != nil {
+		return nil, err
+	}
+	for _, g := range goals {
+		if err := tx.InsertGoal(ctx, g); err != nil {
+			return nil, err
+		}
+	}
+	for _, m := range carry.Memories {
+		if strings.TrimSpace(m.Content) == "" {
+			return nil, store.ErrBotInvalid
+		}
+	}
+	// Carryover remains in the file-backed lifecycle activity, never generic
+	// memory rows or full-text indexes. Source chat memory is unchanged.
+	payload, err := json.Marshal(map[string]any{"operation": operation, "source_id": source, "actor_id": rec.Bot.OwnerID, "artifacts": carry.Artifacts, "carryover": carry})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: rec.Bot.CreatedAt}, "active-created"); err != nil {
+		return nil, err
+	}
+	return &rec.Bot, nil
+}
+
+// validateIntakeSkillSeed accepts only bounded reviewed prose. A seed is not a
+// serialized revision: no history, capability or foreign provenance can cross.
+func validateIntakeSkillSeed(seed *store.BotSkillSeed) error {
+	if seed == nil {
+		return nil
+	}
+	if strings.TrimSpace(seed.Title) == "" || len(seed.Title) > 200 || strings.TrimSpace(seed.Responsibility) == "" || len(seed.Responsibility) > 4096 || strings.TrimSpace(seed.OwnerExpectation) == "" || len(seed.OwnerExpectation) > 16000 || len(seed.Method) == 0 || len(seed.Method) > store.BotSkillMaxMethodSteps {
+		return store.ErrBotInvalid
+	}
+	for _, step := range seed.Method {
+		if strings.TrimSpace(step) == "" {
+			return store.ErrBotInvalid
+		}
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		return err
+	}
+	if len(raw) > store.BotSkillMaxRevisionBytes/2 {
+		return store.ErrBotInvalid
+	}
+	return nil
+}
+
+// The explicit adopter supplies OwnerExpectation. Store it as a fresh local goal
+// so normal source validation can resolve it, without fabricating a model run,
+// owner message, successful observation, or authority grant.
+func insertIntakeSkillSeed(ctx context.Context, tx botDB, b store.Bot, seed *store.BotSkillSeed) (uuid.UUID, error) {
+	if err := validateIntakeSkillSeed(seed); err != nil {
+		return uuid.Nil, err
+	}
+	db, ok := tx.(botSkillDB)
+	if !ok {
+		return uuid.Nil, store.ErrBotUnsupported
+	}
+	id, goalID := uuid.New(), uuid.New()
+	goal := store.BotGoal{ID: goalID, BotID: b.ID, Revision: 1, Title: seed.Title, CompletionCriteria: seed.OwnerExpectation, Status: store.BotGoalActive, WorkspacePath: "goals/" + goalID.String()}
+	if err := tx.InsertGoal(ctx, goal); err != nil {
+		return uuid.Nil, err
+	}
+	// Read the canonical stored representation for its source digest.
+	g, err := tx.ReadGoal(ctx, b.ID, goalID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	digest, err := botHash(g)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	owner := store.BotSkillProvenance{Level: store.BotSkillOwnerSpecified, BotID: b.ID, GoalID: &goalID, GoalRevision: 1, SourceDigest: digest, Quote: seed.OwnerExpectation, RecordedAt: b.CreatedAt}
+	method := store.BotSkillProvenance{Level: store.BotSkillProposed, BotID: b.ID, RecordedAt: b.CreatedAt}
+	v := store.BotSkillRevision{SchemaVersion: store.BotSkillSchemaVersion, ID: uuid.New(), BotID: b.ID, SkillID: id, Revision: 1, Responsibility: seed.Responsibility, Expectations: []store.BotSkillExpectation{{ID: "owner-expectation", Text: seed.OwnerExpectation, Provenance: owner}}, Method: append([]string(nil), seed.Method...), Provenance: []store.BotSkillProvenance{owner, method}, ChangeReason: "Explicitly adopted seed; method is unverified, not observed learning"}
+	v.Digest = v.ContentDigest()
+	if err := validateSkillRevisionSources(ctx, tx, v); err != nil {
+		return uuid.Nil, err
+	}
+	count, size, err := db.skillQuota(ctx, b.ID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := store.ValidateBotSkillQuota(count, size, int64(len(raw))); err != nil {
+		return uuid.Nil, err
+	}
+	s := store.BotSkill{ID: id, BotID: b.ID, Key: "seed-" + id.String(), Title: seed.Title, GoalID: &goalID, Status: store.BotSkillDraft, Revision: 1, HeadRevision: 1, HeadDigest: v.Digest, CreatedAt: b.CreatedAt, UpdatedAt: b.CreatedAt}
+	if err := db.writeSkill(ctx, botStoredSkill{Skill: s}, 0); err != nil {
+		return uuid.Nil, err
+	}
+	if err := db.insertSkillRevision(ctx, v); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
+}
+
+func (r *botRepository) PromoteChat(ctx context.Context, q store.BotPromotionRequest) (*store.Bot, error) {
+	if !q.Reviewed || r.auth.scope == store.BotScopeTeam && !q.ReviewedForTeam {
+		return nil, store.ErrBotForbidden
+	}
+	if q.SourceSessionID == uuid.Nil {
+		return nil, store.ErrBotInvalid
+	}
+	actor, err := r.auth.authorize(ctx, uuid.Nil, true)
+	if err != nil {
+		return nil, err
+	}
+	v, err := store.NewBotVersionForCreation(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
+	v.Charter = q.Charter
+	goals := make([]store.BotGoal, 0, len(q.Carryover.Goals))
+	for _, g := range q.Carryover.Goals {
+		goals = append(goals, store.BotGoal{Title: g.Title, CompletionCriteria: g.CompletionCriteria})
+	}
+	for _, a := range q.Carryover.Artifacts {
+		if strings.TrimSpace(a.Title) == "" || strings.TrimSpace(a.Content) == "" {
+			return nil, store.ErrBotInvalid
+		}
+	}
+	rec, v, goals, err := prepareBotCreate(store.BotCreateRequest{Name: q.Name, OwnerID: actor, IdempotencyKey: q.IdempotencyKey, Version: v, Goals: goals}, actor, r.auth.scope, r.clock())
+	if err != nil {
+		return nil, err
+	}
+	rec.CreateHash, err = botHash([]any{"chat_promotion", q.SourceSessionID, q})
+	if err != nil {
+		return nil, err
+	}
+	var result *store.Bot
+	err = r.db.Transaction(ctx, func(tx botDB) error {
+		db, ok := tx.(botIntakeDB)
+		if !ok {
+			return store.ErrBotUnsupported
+		}
+		if err := db.reviewChat(ctx, q.SourceSessionID, actor); err != nil {
+			return err
+		}
+		old, err := tx.FindCreate(ctx, rec.CreateKey)
+		if err == nil {
+			if old.CreateHash != rec.CreateHash {
+				return store.ErrBotConflict
+			}
+			result = &old.Bot
+			return nil
+		}
+		if err != store.ErrBotNotFound {
+			return err
+		}
+		result, err = insertIntakeDraft(ctx, tx, rec, v, goals, q.Carryover, "chat_promotion", q.SourceSessionID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+func (r *botRepository) ConvertAdaptiveJob(ctx context.Context, q store.BotConversionRequest) (*store.Bot, error) {
+	if !q.Reviewed || r.auth.scope == store.BotScopeTeam && !q.ReviewedForTeam {
+		return nil, store.ErrBotForbidden
+	}
+	if q.SourceJobID == uuid.Nil || q.ExpectedUpdatedAt.IsZero() {
+		return nil, store.ErrBotInvalid
+	}
+	actor, err := r.auth.authorize(ctx, uuid.Nil, true)
+	if err != nil {
+		return nil, err
+	}
+	var result *store.Bot
+	err = r.db.Transaction(ctx, func(tx botDB) error {
+		db, ok := tx.(botIntakeDB)
+		if !ok {
+			return store.ErrBotUnsupported
+		}
+		// Check an existing committed result before reading the now-paused original.
+		key, err := botHash([]string{actor.String(), q.IdempotencyKey})
+		if err != nil {
+			return err
+		}
+		hash, err := botHash([]any{"adaptive_conversion", q.SourceJobID, q})
+		if err != nil {
+			return err
+		}
+		old, err := tx.FindCreate(ctx, key)
+		if err == nil {
+			if old.CreateHash != hash {
+				return store.ErrBotConflict
+			}
+			result = &old.Bot
+			return nil
+		}
+		if err != store.ErrBotNotFound {
+			return err
+		}
+		job, err := db.reviewAdaptive(ctx, q.SourceJobID, actor, q.ExpectedUpdatedAt)
+		if err != nil {
+			return err
+		}
+		v, err := store.NewBotVersionForCreation(ctx, actor)
+		if err != nil {
+			return err
+		}
+		v.Charter = q.Charter
+		// Only the reviewed job schedule and instructions cross over; no delivery,
+		// credentials, Params, execution history or owner/team bindings are copied.
+		if job.Schedule.Cron == "" || strings.TrimSpace(job.Payload.Instructions) == "" {
+			return store.ErrBotInvalid
+		}
+		v.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Cron: job.Schedule.Cron, Timezone: job.Schedule.Timezone, Instructions: job.Payload.Instructions}}
+		rec, v, goals, err := prepareBotCreate(store.BotCreateRequest{Name: q.Name, OwnerID: actor, IdempotencyKey: q.IdempotencyKey, Version: v}, actor, r.auth.scope, r.clock())
+		if err != nil {
+			return err
+		}
+		rec.CreateHash = hash
+		result, err = insertIntakeDraft(ctx, tx, rec, v, goals, store.BotCarryover{}, "adaptive_conversion", q.SourceJobID, q.SkillSeed)
+		if err != nil {
+			return err
+		}
+		// Last write: a CAS failure rolls back every replacement row, and any later
+		// commit failure rolls back this pause. Activation remains a separate action.
+		return db.pauseAdaptive(ctx, q.SourceJobID, q.ExpectedUpdatedAt)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}

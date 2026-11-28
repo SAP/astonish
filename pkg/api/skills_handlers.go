@@ -1678,20 +1678,19 @@ func AcknowledgeSkillHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // getValidationLLMProvider returns an LLMProvider for skill validation.
-// Uses the ChatManager's LLM if already initialized, otherwise creates one
-// directly from the effective platform config (provider cascade).
+// Uses the ChatManager's LLM only outside platform scope; platform requests
+// always create a model from their effective provider cascade.
 func getValidationLLMProvider(r *http.Request) skills.LLMProvider {
-	// Fast path: use the already-initialized chat LLM.
-	// NOTE: We snapshot comp under the lock. Even if another goroutine replaces
-	// cm.components after we release the lock, our reference remains valid (GC
-	// keeps it alive). The LLM pointer is safe to use after unlock.
-	cm := GetChatManager()
-	cm.mu.Lock()
-	comp := cm.components
-	cm.mu.Unlock()
-
-	if llm := validationLLMFromComponents(comp); llm != nil {
-		return llm
+	// A global chat model is not evidence that this platform request has a
+	// deployable provider. Reusing it would bypass scoped provider isolation.
+	if svc := store.FromRequest(r); svc == nil || svc.Mode != store.ModePlatform {
+		cm := GetChatManager()
+		cm.mu.Lock()
+		comp := cm.components
+		cm.mu.Unlock()
+		if llm := validationLLMFromComponents(comp); llm != nil {
+			return llm
+		}
 	}
 
 	// Slow path: create LLM from effective config

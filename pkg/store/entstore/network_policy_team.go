@@ -19,7 +19,11 @@ type teamNetworkPolicyStore struct {
 var _ store.NetworkPolicyStore = (*teamNetworkPolicyStore)(nil)
 
 func (s *teamNetworkPolicyStore) List(ctx context.Context) ([]store.NetworkPolicyRule, error) {
-	rows, err := s.client.NetworkPolicy.Query().
+	client := s.client
+	if tx, ok := ctx.Value(botPolicyTransactionKey{}).(botPolicyTransaction); ok && tx.outer == client {
+		client = tx.current
+	}
+	rows, err := client.NetworkPolicy.Query().
 		Order(networkpolicy.ByHost()).
 		All(ctx)
 	if err != nil {

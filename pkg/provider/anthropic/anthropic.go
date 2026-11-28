@@ -143,6 +143,7 @@ func (p *Provider) handleResponse(body io.Reader, yield func(*model.LLMResponse,
 	}
 
 	llmResp.UsageMetadata = usageMetadata(resp.Usage)
+	llmResp.FinishReason, llmResp.TurnComplete = terminationMetadata(streamStopReason(resp.StopReason))
 
 	yield(llmResp, nil)
 }
@@ -163,6 +164,21 @@ const (
 	streamStopRefusal      streamStopReason = "refusal"
 )
 
+// terminationMetadata certifies only an explicit successful end. A tool handoff,
+// pause, or missing/unknown reason must not authorize final-answer publication.
+func terminationMetadata(reason streamStopReason) (genai.FinishReason, bool) {
+	switch reason {
+	case streamStopEndTurn, streamStopSequence:
+		return genai.FinishReasonStop, true
+	case streamStopMaxTokens, streamStopContextLimit:
+		return genai.FinishReasonMaxTokens, false
+	case streamStopRefusal:
+		return genai.FinishReasonSafety, false
+	default:
+		return genai.FinishReasonOther, false
+	}
+}
+
 // Partial text is display-only; tools are committed only when message_stop
 // proves that the response is complete. Native thinking payloads are discarded.
 // Signed-thinking history round trips remain unsupported, as before streaming
@@ -170,6 +186,7 @@ const (
 func (p *Provider) handleStreamWithContext(ctx context.Context, body io.Reader, yield func(*model.LLMResponse, error) bool) {
 	reader := bufio.NewReader(body)
 	var usage Usage
+	var stopReason streamStopReason
 	var parts []*genai.Part
 	var block *Content
 	var blockIndex int
@@ -188,7 +205,18 @@ func (p *Provider) handleStreamWithContext(ctx context.Context, body io.Reader, 
 		if emitted {
 			err = llmerror.NewInterruptedStream(err)
 		}
-		yield(nil, err)
+		// Preserve observed usage and failure termination without publishing
+		// buffered tools or certifying an incomplete/invalid stream as a final.
+		metadata := usageMetadata(usage)
+		if stopReason == "" && metadata == nil {
+			yield(nil, err)
+			return
+		}
+		finish, complete := terminationMetadata(stopReason)
+		if complete {
+			finish = genai.FinishReasonOther
+		}
+		yield(&model.LLMResponse{UsageMetadata: metadata, FinishReason: finish}, err)
 	}
 	fail := func(message string) { failError(fmt.Errorf("anthropic stream: %s", message)) }
 	emitText := func(value string) bool {
@@ -237,7 +265,15 @@ func (p *Provider) handleStreamWithContext(ctx context.Context, body io.Reader, 
 					usage.OutputTokens = event.Usage.OutputTokens
 				}
 				if event.Delta != nil {
-					switch streamStopReason(event.Delta.StopReason) {
+					next := streamStopReason(event.Delta.StopReason)
+					if next != "" {
+						if stopReason != "" && stopReason != next {
+							fail("conflicting stop reasons")
+							return
+						}
+						stopReason = next
+					}
+					switch next {
 					case "", streamStopEndTurn, streamStopSequence, streamStopToolUse, streamStopPauseTurn:
 						// Only message_stop commits these successful terminal states.
 					case streamStopMaxTokens, streamStopContextLimit:
@@ -350,7 +386,8 @@ func (p *Provider) handleStreamWithContext(ctx context.Context, body io.Reader, 
 					return
 				}
 				if len(parts) > 0 || usageMetadata(usage) != nil {
-					yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: usageMetadata(usage)}, nil)
+					finish, complete := terminationMetadata(stopReason)
+					yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: usageMetadata(usage), FinishReason: finish, TurnComplete: complete}, nil)
 				}
 				return
 			}
@@ -387,6 +424,10 @@ func valueOrZero(value *int) int {
 }
 
 func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*Request, error) {
+	parallelToolCalls, err := common.ParallelToolCalls(req)
+	if err != nil {
+		return nil, err
+	}
 	canonicalReq, err := common.CanonicalizeRequestTools(req)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize tools: %w", err)
@@ -513,25 +554,46 @@ func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*R
 		}
 	}
 
+	// Translate only the explicit per-request option; preserve ordinary defaults.
+	var toolChoice *ToolChoice
+	if parallelToolCalls != nil && len(tools) > 0 {
+		toolChoice = &ToolChoice{
+			Type:                   ToolChoiceAuto,
+			DisableParallelToolUse: !*parallelToolCalls,
+		}
+	}
 	return &Request{
-		Model:     p.model,
-		Messages:  messages,
-		System:    system,
-		MaxTokens: 64000,
-		Stream:    streaming,
-		Tools:     tools,
+		Model:      p.model,
+		ToolChoice: toolChoice,
+		Messages:   messages,
+		System:     system,
+		MaxTokens:  64000,
+		Stream:     streaming,
+		Tools:      tools,
 	}, nil
 }
 
 // Structs for Anthropic API
 
 type Request struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	System    string    `json:"system,omitempty"`
-	MaxTokens int       `json:"max_tokens"`
-	Stream    bool      `json:"stream,omitempty"`
-	Tools     []Tool    `json:"tools,omitempty"`
+	Model      string      `json:"model"`
+	Messages   []Message   `json:"messages"`
+	System     string      `json:"system,omitempty"`
+	MaxTokens  int         `json:"max_tokens"`
+	Stream     bool        `json:"stream,omitempty"`
+	Tools      []Tool      `json:"tools,omitempty"`
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
+}
+
+// ToolChoiceType is the native Anthropic tool-selection mode.
+type ToolChoiceType string
+
+const ToolChoiceAuto ToolChoiceType = "auto"
+
+// ToolChoice permits a final answer without requiring a tool invocation.
+type ToolChoice struct {
+	Type                   ToolChoiceType `json:"type"`
+	DisableParallelToolUse bool           `json:"disable_parallel_tool_use"`
 }
 
 type Tool struct {
@@ -572,11 +634,12 @@ type Usage struct {
 }
 
 type Response struct {
-	ID      string    `json:"id"`
-	Type    string    `json:"type"`
-	Role    string    `json:"role"`
-	Content []Content `json:"content"`
-	Usage   Usage     `json:"usage"`
+	StopReason string    `json:"stop_reason"`
+	ID         string    `json:"id"`
+	Type       string    `json:"type"`
+	Role       string    `json:"role"`
+	Content    []Content `json:"content"`
+	Usage      Usage     `json:"usage"`
 }
 
 type StreamEvent struct {

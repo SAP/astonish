@@ -117,7 +117,8 @@ func (c *Config) applyDefaults() {
 // DockerBackend is the Backend implementation backed by plain Docker containers
 // with OverlayFS rootfs composition. Zero value is not usable; construct via New.
 type DockerBackend struct {
-	cfg Config
+	botFileSessions sync.Map // BotHomeBinding -> immutable session ID; scoped to this backend.
+	cfg             Config
 
 	// mu protects networkRegistry.
 	mu sync.RWMutex

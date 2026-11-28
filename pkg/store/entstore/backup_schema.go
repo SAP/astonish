@@ -27,7 +27,7 @@ func backupScopeKey(scope backup.Scope) string {
 	}
 }
 
-func schemaVersionForScope(ctx context.Context, backend string, db *sql.DB, scope backup.Scope) (backup.SchemaVersion, error) {
+func schemaVersionForScope(ctx context.Context, backend string, db backupSQLQuery, scope backup.Scope) (backup.SchemaVersion, error) {
 	dialect := Dialect(backend)
 	schema := ""
 	if dialect == DialectPostgres {
@@ -44,14 +44,14 @@ func schemaVersionForScope(ctx context.Context, backend string, db *sql.DB, scop
 	}, nil
 }
 
-func schemaHash(ctx context.Context, db *sql.DB, dialect Dialect, schema string) (string, error) {
+func schemaHash(ctx context.Context, db backupSQLQuery, dialect Dialect, schema string) (string, error) {
 	if dialect == DialectSQLite {
 		return sqliteSchemaHash(ctx, db)
 	}
 	return logicalSchemaHash(ctx, db, dialect, schema)
 }
 
-func sqliteSchemaHash(ctx context.Context, db *sql.DB) (string, error) {
+func sqliteSchemaHash(ctx context.Context, db backupSQLQuery) (string, error) {
 	tables, err := sqliteUserTables(ctx, db)
 	if err != nil {
 		return "", err
@@ -69,7 +69,182 @@ func sqliteSchemaHash(ctx context.Context, db *sql.DB) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func sqliteTableSchema(ctx context.Context, db *sql.DB, table string) ([]string, error) {
+// sqlitePreBotSchemaHash reconstructs only the known additive Bot v1 delta.
+// It retains every other table, column type, nullability, primary key and order;
+// this is not a general subset-schema compatibility check.
+func sqlitePreBotSchemaHash(ctx context.Context, db backupSQLQuery, scope backup.Scope) (string, error) {
+	tables, err := sqliteUserTables(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, table := range tables {
+		if preBotAddedTable(table, scope.Kind) {
+			continue
+		}
+		columns, err := sqliteTableSchema(ctx, db, table)
+		if err != nil {
+			return "", err
+		}
+		var kept []string
+		for _, column := range columns {
+			fields := strings.SplitN(column, ":", 3)
+			if len(fields) != 3 {
+				return "", fmt.Errorf("invalid schema column %q", column)
+			}
+			name := fields[1]
+			if table == "sessions" && (name == "bot_id" || name == "bot_run_id" || name == "purpose" || name == "retention") {
+				continue
+			}
+			if scope.Kind == "team" && table == "sandbox_sessions" && name == "bot_home_binding" {
+				continue
+			}
+			kept = append(kept, fmt.Sprintf("%03d:%s:%s", len(kept), name, fields[2]))
+		}
+		parts = append(parts, table+"("+strings.Join(kept, ",")+")")
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func preBotAddedTable(table, scope string) bool {
+	switch table {
+	case "bots", "bot_schema_version", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_skills", "bot_skill_revisions", "bot_tasks", "bot_task_revisions", "bot_knowledge_extractions", "bot_knowledge_file_heads":
+		return scope == "team" || scope == "personal"
+	case "bot_templates":
+		return scope == "team"
+	}
+	return false
+}
+
+func sqlitePreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	if scope.Kind != "team" && scope.Kind != "personal" {
+		return false, nil
+	}
+	if archive.Version != "sqlite:"+backup.ArchiveFormat || archive.Hash == "" {
+		return false, nil
+	}
+	if ok, err := preSkillBackupCompatible(ctx, db, DialectSQLite, manifest, scope, archive); ok || err != nil {
+		return ok, err
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Scope == scope && preBotAddedTable(entry.Entity, scope.Kind) {
+			return false, nil
+		}
+	}
+	hash, err := sqlitePreBotSchemaHash(ctx, db, scope)
+	return err == nil && hash == archive.Hash, err
+}
+
+// postgresPreBotSchemaHash uses the existing PostgreSQL archive representation
+// (table names and ordered column names), removing the known Bot additions.
+// It is deliberately not a subset-schema compatibility check.
+func postgresPreBotSchemaHash(ctx context.Context, db backupSQLQuery, scope backup.Scope) (string, error) {
+	schema := postgresSchemaForScope(scope)
+	tables, err := userTables(ctx, db, DialectPostgres, schema)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, table := range tables {
+		if preBotAddedTable(table, scope.Kind) {
+			continue
+		}
+		columns, err := tableColumns(ctx, db, DialectPostgres, schema, table)
+		if err != nil {
+			return "", err
+		}
+		var kept []string
+		for _, name := range columns {
+			if table == "sessions" && (name == "bot_id" || name == "bot_run_id" || name == "purpose" || name == "retention") {
+				continue
+			}
+			if scope.Kind == "team" && table == "sandbox_sessions" && name == "bot_home_binding" {
+				continue
+			}
+			kept = append(kept, name)
+		}
+		parts = append(parts, table+"("+strings.Join(kept, ",")+")")
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func postgresPreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	if scope.Kind != "team" && scope.Kind != "personal" {
+		return false, nil
+	}
+	if archive.Version != "postgres:"+backup.ArchiveFormat || archive.Hash == "" {
+		return false, nil
+	}
+	if ok, err := preSkillBackupCompatible(ctx, db, DialectPostgres, manifest, scope, archive); ok || err != nil {
+		return ok, err
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Scope == scope && preBotAddedTable(entry.Entity, scope.Kind) {
+			return false, nil
+		}
+	}
+	hash, err := postgresPreBotSchemaHash(ctx, db, scope)
+	return err == nil && hash == archive.Hash, err
+}
+
+// preSkillBackupCompatible recognizes exactly Bot v1, excluding only known
+// v2 Skill and v3 Task additions. It also accepts exact v2 through the Task-only
+// delta. No arbitrary missing columns/tables are accepted.
+func preSkillBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	if ok, err := preKnowledgeBackupCompatible(ctx, db, dialect, manifest, scope, archive); ok || err != nil {
+		return ok, err
+	}
+	if ok, err := preTaskBackupCompatible(ctx, db, dialect, manifest, scope, archive, false); ok || err != nil {
+		return ok, err
+	}
+	return preTaskBackupCompatible(ctx, db, dialect, manifest, scope, archive, true)
+}
+
+// includeSkills reconstructs v1 rather than v2; each path compares an exact hash
+// and rejects archive entries for every table it excludes.
+func preTaskBackupCompatible(ctx context.Context, db backupSQLQuery, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion, includeSkills bool) (bool, error) {
+	excluded := func(table string) bool {
+		return table == "bot_knowledge_extractions" || table == "bot_knowledge_file_heads" || table == "bot_tasks" || table == "bot_task_revisions" || includeSkills && (table == "bot_skills" || table == "bot_skill_revisions")
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Scope == scope && excluded(entry.Entity) {
+			return false, nil
+		}
+	}
+	schema := ""
+	if dialect == DialectPostgres {
+		schema = postgresSchemaForScope(scope)
+	}
+	tables, err := userTables(ctx, db, dialect, schema)
+	if err != nil {
+		return false, err
+	}
+	var parts []string
+	for _, table := range tables {
+		if excluded(table) {
+			continue
+		}
+		var columns []string
+		if dialect == DialectSQLite {
+			columns, err = sqliteTableSchema(ctx, db, table)
+		} else {
+			columns, err = tableColumns(ctx, db, dialect, schema, table)
+		}
+		if err != nil {
+			return false, err
+		}
+		parts = append(parts, table+"("+strings.Join(columns, ",")+")")
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]) == archive.Hash, nil
+}
+
+func sqliteTableSchema(ctx context.Context, db backupSQLQuery, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quoteSQLiteIdent(table)+")")
 	if err != nil {
 		return nil, err
@@ -94,7 +269,7 @@ func sqliteTableSchema(ctx context.Context, db *sql.DB, table string) ([]string,
 	return columns, nil
 }
 
-func logicalSchemaHash(ctx context.Context, db *sql.DB, dialect Dialect, schema string) (string, error) {
+func logicalSchemaHash(ctx context.Context, db backupSQLQuery, dialect Dialect, schema string) (string, error) {
 	tables, err := userTables(ctx, db, dialect, schema)
 	if err != nil {
 		return "", err

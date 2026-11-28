@@ -69,6 +69,10 @@ func (s *localSessionStore) load() error {
 			continue
 		}
 		cp := *r
+		if cp.BotHomeBinding != nil {
+			binding := *cp.BotHomeBinding
+			cp.BotHomeBinding = &binding
+		}
 		s.entries[cp.SessionID] = &cp
 	}
 	return nil
@@ -124,6 +128,10 @@ func (s *localSessionStore) Put(_ context.Context, sess *store.SandboxSession) e
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	cp := *sess
+	if cp.BotHomeBinding != nil {
+		binding := *cp.BotHomeBinding
+		cp.BotHomeBinding = &binding
+	}
 	if existing, ok := s.entries[cp.SessionID]; ok {
 		if !existing.CreatedAt.IsZero() && (cp.CreatedAt.IsZero() || existing.CreatedAt.Before(cp.CreatedAt)) {
 			cp.CreatedAt = existing.CreatedAt
@@ -157,6 +165,10 @@ func (s *localSessionStore) Get(_ context.Context, sessionID string) (*store.San
 		return nil, nil
 	}
 	cp := *e
+	if cp.BotHomeBinding != nil {
+		binding := *cp.BotHomeBinding
+		cp.BotHomeBinding = &binding
+	}
 	return &cp, nil
 }
 
@@ -169,6 +181,10 @@ func (s *localSessionStore) GetByContainerName(_ context.Context, containerName 
 	for _, e := range s.entries {
 		if e.ContainerName == containerName {
 			cp := *e
+			if cp.BotHomeBinding != nil {
+				binding := *cp.BotHomeBinding
+				cp.BotHomeBinding = &binding
+			}
 			return &cp, nil
 		}
 	}
@@ -193,6 +209,10 @@ func (s *localSessionStore) List(_ context.Context, filter store.SandboxSessionF
 			continue
 		}
 		cp := *e
+		if cp.BotHomeBinding != nil {
+			binding := *cp.BotHomeBinding
+			cp.BotHomeBinding = &binding
+		}
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool {

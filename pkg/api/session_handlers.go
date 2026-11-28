@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -24,6 +27,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/session"
 )
@@ -51,18 +55,31 @@ func resolveSessionStore(svc *store.Services, sessionID string, requests ...*htt
 	if svc == nil {
 		return nil
 	}
-	allowed := func(meta *store.SessionMeta) bool {
-		// The request-less caller is the separately superadmin-gated cache
-		// diagnostics endpoint. All ordinary session consumers pass a request.
+	ctx := context.TODO()
+	if len(requests) > 0 && requests[0] != nil {
+		ctx = requests[0].Context()
+	}
+	allowed := func(meta *store.SessionMeta, scope store.BotScope) bool {
+		if meta.HasBotLinkage() {
+			return len(requests) > 0 && botSessionReadAllowed(requests[0], svc, meta, scope)
+		}
+		// Preserve ordinary Chat support/owner behavior.
 		return len(requests) == 0 || sessionOwnerAllowed(requests[0], meta.UserID)
 	}
 	if svc.PersonalSessions != nil {
-		if meta, err := svc.PersonalSessions.GetSessionMeta(context.TODO(), sessionID); err == nil && meta != nil && allowed(meta) {
-			return svc.PersonalSessions
+		meta, err := svc.PersonalSessions.GetSessionMeta(ctx, sessionID)
+		if err != nil {
+			return nil
+		}
+		if meta != nil {
+			if allowed(meta, store.BotScopePersonal) {
+				return svc.PersonalSessions
+			}
+			return nil // A denied private record must not fall through to team scope.
 		}
 	}
 	if svc.Sessions != nil {
-		if meta, err := svc.Sessions.GetSessionMeta(context.TODO(), sessionID); err == nil && meta != nil && allowed(meta) {
+		if meta, err := svc.Sessions.GetSessionMeta(ctx, sessionID); err == nil && meta != nil && allowed(meta, store.BotScopeTeam) {
 			return svc.Sessions
 		}
 	}
@@ -102,6 +119,9 @@ func requireSessionIDOwner(w http.ResponseWriter, r *http.Request, sessionID str
 				respondError(w, http.StatusNotFound, "Session not found")
 				return false
 			}
+			if meta.HasBotLinkage() {
+				return true
+			} // Already resolved against the scoped Bot above.
 			return requireSessionOwner(w, r, meta.UserID)
 		}
 		// Scoped storage misses must not fall through to daemon-local data.
@@ -242,7 +262,11 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Session not found")
 			return
 		}
-		if !requireSessionOwner(w, r, meta.UserID) {
+		if meta.HasBotLinkage() {
+			// Authorization used the viewer; storage Get still uses the recorded
+			// execution owner, preserving teamSessionStore.Get's owner constraint.
+			userID = meta.UserID
+		} else if !requireSessionOwner(w, r, meta.UserID) {
 			return
 		}
 
@@ -283,15 +307,51 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			redactor = credentials.NewRedactor()
 			redactor.HydrateFromStore(merged)
 		}
-		messages := eventsToMessages(getResp.Session.Events(), redactor)
-		artifacts := collectArtifacts(getResp.Session.Events())
-		// Project persisted astonish-report fences onto matching artifacts so
-		// the frontend can decide which markdown files to embed inline.
-		artifacts = joinReportMarkers(artifacts, collectReportMarkers(getResp.Session.Events()))
-		totalUsage := collectUsage(getResp.Session.Events())
+		events := getResp.Session.Events()
+		var presentation *[]ChatEvent
+		if meta.HasBotLinkage() {
+			scope := store.BotScopePersonal
+			if sessionStore == svc.Sessions {
+				scope = store.BotScopeTeam
+			}
+			repo := svc.PersonalBots
+			if scope == store.BotScopeTeam {
+				repo = svc.Bots
+			}
+			if repo == nil {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+			bid, parseErr := uuid.Parse(meta.BotID)
+			sid, sidErr := uuid.Parse(meta.ID)
+			b, readErr := repo.Get(r.Context(), bid)
+			if parseErr != nil || sidErr != nil || readErr != nil || b == nil || !botSessionReadAllowed(r, svc, meta, scope) {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+			clean, display, projectErr := projectLinkedBotSession(r.Context(), &SessionEventProjector{BotID: bid, HomeSessionID: b.HomeSessionID, SessionID: sid, Repository: repo, Redactor: redactor}, events)
+			if projectErr != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to load session")
+				return
+			}
+			events, presentation = clean, &display
+			if resolveSessionStore(svc, sessionID, r) != sessionStore {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+		}
+		messages := eventsToMessages(events, redactor)
+		if !meta.HasBotLinkage() {
+			messages = overlaySessionPlan(messages, getResp.Session, redactor)
+		}
+		artifacts := collectArtifacts(events)
+		// Preserve the ordinary report three-signal gate on sanitized content.
+		artifacts = joinReportMarkers(artifacts, collectReportMarkers(events))
+		totalUsage := collectUsage(events)
 
 		resp := StudioSessionDetailResponse{
 			StudioSessionResponse: storeMetaToResponse(*meta),
+			PresentationEvents:    presentation,
 			Messages:              messages,
 			Artifacts:             artifacts,
 			TotalUsage:            totalUsage,
@@ -376,7 +436,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 	if cm.components != nil && cm.components.ChatAgent != nil {
 		redactor = cm.components.ChatAgent.Redactor
 	}
-	messages := eventsToMessages(getResp.Session.Events(), redactor)
+	messages := overlaySessionPlan(eventsToMessages(getResp.Session.Events(), redactor), getResp.Session, redactor)
 
 	// Collect file artifacts from write_file/edit_file tool calls
 	artifacts := collectArtifacts(getResp.Session.Events())
@@ -546,6 +606,52 @@ func StudioSessionTraceHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(output)
 }
 
+// scopedDelegationHandoff projects only the versioned record, never arbitrary
+// state or a reconstructed parent plan. Invalid/legacy records are unavailable.
+// Redact decoded string values before encoding so quotes/newlines stay valid JSON.
+func scopedDelegationHandoff(value any, parentID, childID string, identity map[string]any, redactor *credentials.Redactor) string {
+	text, ok := value.(string)
+	if !ok || len(text) == 0 || len(text) > agent.DelegationHandoffMaxBytes {
+		return ""
+	}
+	var record agent.DelegationHandoff
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return ""
+	}
+	if decoder.Decode(new(any)) != io.EOF || record.Version != agent.DelegationHandoffVersion ||
+		record.ParentSessionID != parentID || record.ChildSessionID != childID ||
+		record.BatchID != strVal(identity["batch_id"]) || record.TaskID != strVal(identity["task_id"]) ||
+		record.Attempt < 1 || record.Attempt != toInt(identity["attempt"]) {
+		return ""
+	}
+	switch record.Plan.Status {
+	case agent.DelegationPlanMatched:
+		if record.Plan.Step == nil || record.Plan.Document == nil || record.Plan.Step.Name != record.PlanStep || record.Plan.PlanID == "" {
+			return ""
+		}
+	case agent.DelegationPlanMissing, agent.DelegationPlanStepMissing:
+	default:
+		return ""
+	}
+	// UseNumber preserves the captured int64 revision/sequence exactly.
+	var fields map[string]any
+	decoder = json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fields); err != nil {
+		return ""
+	}
+	if redactor != nil {
+		fields = redactor.RedactMap(fields)
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
 // StudioSubtaskEventsHandler handles GET /api/studio/sessions/{id}/subtask-events.
 // Returns the full tool call/result history for a specific sub-agent task,
 // loaded from the child session. Used by the frontend TaskPlanPanel for
@@ -576,6 +682,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selectedIdentities := make(map[string]map[string]any)
+	selectedHandoffs := make(map[string]any)
 	matchesState := func(svc session.Service, id string) bool {
 		got, err := svc.Get(r.Context(), &session.GetRequest{AppName: studioChatAppName, UserID: effectiveUserID(r), SessionID: id})
 		if err != nil || got == nil || got.Session == nil {
@@ -609,6 +716,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 			identity[key], _ = state.Get(key)
 		}
 		selectedIdentities[id] = identity
+		selectedHandoffs[id], _ = state.Get(agent.DelegationHandoffStateKey)
 		return true
 	}
 	if childID != "" && !validSessionID.MatchString(childID) {
@@ -653,7 +761,9 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	// extractChildToolEvents parses ADK session events from a child session
 	// and returns subtask event items (tool calls, results, and text).
 	extractChildToolEvents := func(events []*session.Event) []subtaskEventItem {
-		var items []subtaskEventItem
+		// A handoff row is always first for an authorized selected child. Empty
+		// text explicitly means unavailable (old, malformed or unsupported record).
+		items := []subtaskEventItem{{Type: "handoff", Text: scopedDelegationHandoff(selectedHandoffs[childID], sessionID, childID, selectedIdentities[childID], subtaskRedactor)}}
 		uiTools := newUIToolTracker()
 		for _, evt := range events {
 			if evt.Content == nil {
@@ -689,7 +799,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 					items = append(items, subtaskEventItem{
 						Type: "task_tool_result", CallID: part.FunctionResponse.ID,
 						ToolName:   name,
-						ToolResult: summarizeToolResult(resp),
+						ToolResult: resp, // Preserve structured edits and full result provenance for rich detail.
 					})
 				}
 				if part.Text != "" && evt.Content.Role == "model" {
@@ -761,8 +871,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 		events, err := sessionStore.ReadTranscriptEvents(r.Context(), studioChatAppName, userID, matchedChild.ID)
 		if err != nil {
 			slog.Warn("failed to read child session events", "child_id", matchedChild.ID, "error", err)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(subtaskEventsResponse{Events: []subtaskEventItem{}})
+			respondError(w, http.StatusInternalServerError, "Unable to load execution detail")
 			return
 		}
 
@@ -780,6 +889,11 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fs := cm.fileStore()
+	cm.mu.Lock()
+	if cm.components != nil && cm.components.ChatAgent != nil {
+		subtaskRedactor = cm.components.ChatAgent.Redactor
+	}
+	cm.mu.Unlock()
 	if fs == nil {
 		respondError(w, http.StatusInternalServerError, "File store not available")
 		return
@@ -789,6 +903,40 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to list child sessions: "+err.Error())
 		return
+	}
+
+	// FileStore compaction inserts archive nodes into parent links. Follow only
+	// archives carrying the exact requested child's captured parent/child identity;
+	// never widen membership to arbitrary grandchildren or another delegate.
+	archiveParents := make(map[string]string)
+	if childID != "" {
+		for i := 0; i < len(children) && i < 64; i++ {
+			candidate := children[i]
+			if candidate.ID == childID || !validSessionID.MatchString(candidate.ID) || candidate.AppName != studioChatAppName || !sessionOwnerAllowed(r, candidate.UserID) || !matchesState(fs, candidate.ID) {
+				continue
+			}
+			if scopedDelegationHandoff(selectedHandoffs[candidate.ID], sessionID, childID, selectedIdentities[candidate.ID], nil) == "" {
+				continue
+			}
+			descendants, err := fs.ListChildren(candidate.ID)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to read compacted child")
+				return
+			}
+			for _, descendant := range descendants {
+				seen := false
+				for _, existing := range children {
+					if existing.ID == descendant.ID {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					archiveParents[descendant.ID] = candidate.ID
+					children = append(children, descendant)
+				}
+			}
+		}
 	}
 
 	// Find the last child session matching the task name.
@@ -820,14 +968,37 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	childID = matchedChildID
-	transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, matchedChildID+".jsonl")
-	transcript := persistentsession.NewTranscript(transcriptPath)
-	events, err := transcript.ReadEvents()
-	if err != nil {
-		slog.Warn("failed to read child session transcript", "child_id", matchedChildID, "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(subtaskEventsResponse{Events: []subtaskEventItem{}})
-		return
+	// Reconstruct only the validated ancestry that led to this exact child,
+	// not every archive visited while discovering it (which may include branches).
+	chain := []string{childID}
+	for id := archiveParents[childID]; id != ""; id = archiveParents[id] {
+		if scopedDelegationHandoff(selectedHandoffs[childID], sessionID, childID, selectedIdentities[childID], nil) == "" ||
+			scopedDelegationHandoff(selectedHandoffs[id], sessionID, childID, selectedIdentities[childID], nil) == "" {
+			respondError(w, http.StatusNotFound, "Subtask not found")
+			return
+		}
+		chain = append(chain, id)
+	}
+	var events []*session.Event
+	seenEvents := make(map[string]bool)
+	for i := len(chain) - 1; i >= 0; i-- {
+		transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, chain[i]+".jsonl")
+		transcript := persistentsession.NewTranscript(transcriptPath)
+		part, err := transcript.ReadEvents()
+		if err != nil {
+			slog.Warn("failed to read child session transcript", "child_id", childID, "transcript_id", chain[i], "error", err)
+			respondError(w, http.StatusInternalServerError, "Unable to load execution detail")
+			return
+		}
+		for _, event := range part {
+			if event == nil || (event.ID != "" && seenEvents[event.ID]) {
+				continue
+			}
+			if event.ID != "" {
+				seenEvents[event.ID] = true
+			}
+			events = append(events, event)
+		}
 	}
 
 	items := extractChildToolEvents(events)
@@ -893,6 +1064,9 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		GetChatManager().cancelStream(sessionID)
+		GetChatManager().ForgetContinuation(r.Context(), appName, sessionID)
+		GetChatManager().forgetConversationState(sessionID)
 		// Namespace and ownership verified — now safe to stop any active fleet session.
 		registry := getFleetSessionRegistry()
 		if fs := registry.Get(sessionID); fs != nil {
@@ -963,6 +1137,9 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		if !requireSessionOwner(w, r, meta.UserID) {
 			return
 		}
+		GetChatManager().cancelStream(sessionID)
+		GetChatManager().ForgetContinuation(r.Context(), appName, sessionID)
+		GetChatManager().forgetConversationState(sessionID)
 		// Namespace and ownership verified — now safe to stop any active fleet session.
 		registry := getFleetSessionRegistry()
 		if fs := registry.Get(sessionID); fs != nil {
@@ -1076,6 +1253,15 @@ func StudioArtifactDownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fileName := filepath.Base(cleanPath)
 
+	if content, handled := readRetainedBotArtifact(r, sessionID); handled {
+		if content == nil {
+			respondError(w, http.StatusNotFound, "file not found")
+		} else {
+			serveArtifactDownload(w, fileName, content)
+		}
+		return
+	}
+
 	// Tier 1: Try serving directly from host filesystem
 	if content, ok := readLocalArtifact(r, cleanPath); ok {
 		serveArtifactDownload(w, fileName, content)
@@ -1104,7 +1290,7 @@ func StudioArtifactDownloadHandler(w http.ResponseWriter, r *http.Request) {
 		// 3b: Platform mode — read from PG session store
 		if svc := store.FromRequest(r); svc != nil {
 			if ss := resolveSessionStore(svc, sessionID, r); ss != nil {
-				if content, ok := readArtifactContentFromSessionStore(ss, studioChatAppName, effectiveUserID(r), sessionID, cleanPath); ok {
+				if content, ok := readAuthorizedSessionArtifact(r, ss, sessionID, cleanPath); ok {
 					serveArtifactDownload(w, fileName, []byte(content))
 					return
 				}
@@ -1177,6 +1363,16 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if content, handled := readRetainedBotArtifact(r, sessionID); handled {
+		if content == nil {
+			respondError(w, http.StatusNotFound, "file not found")
+		} else {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write(content)
+		}
+		return
+	}
+
 	// Tier 1: Try reading from host filesystem
 	if content, ok := readLocalArtifact(r, cleanPath); ok { // #nosec G304 -- path validated by validateArtifactPath
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1208,7 +1404,7 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 		// 3b: Platform mode — read from PG session store
 		if svc := store.FromRequest(r); svc != nil {
 			if ss := resolveSessionStore(svc, sessionID, r); ss != nil {
-				if content, ok := readArtifactContentFromSessionStore(ss, studioChatAppName, effectiveUserID(r), sessionID, cleanPath); ok {
+				if content, ok := readAuthorizedSessionArtifact(r, ss, sessionID, cleanPath); ok {
 					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 					fmt.Fprint(w, content)
 					return
@@ -1220,9 +1416,125 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 	respondError(w, http.StatusNotFound, "file not found")
 }
 
+// readRetainedBotArtifact resolves storage identity exclusively from a persisted
+// report in the authorized session scope. It does not resume disposable compute.
+// A matched report is authoritative: failures must not return stale transcript bytes.
+func readRetainedBotArtifact(r *http.Request, sessionID string) ([]byte, bool) {
+	svc := store.FromRequest(r)
+	meta, err := botSessionMetadata(r.Context(), svc, sessionID)
+	if err != nil {
+		return nil, true
+	}
+	if meta == nil || !meta.HasBotLinkage() {
+		return nil, false
+	}
+	if meta.Purpose != store.SessionPurposeBotRun {
+		return nil, true // Home-linked Bot content also has no transcript fallback.
+	}
+	ss := resolveSessionStore(svc, sessionID, r)
+	if ss == nil {
+		return nil, true
+	}
+	repo := svc.Bots
+	if ss == svc.PersonalSessions {
+		repo = svc.PersonalBots
+	}
+	if repo == nil {
+		return nil, true
+	}
+	botID, err := uuid.Parse(meta.BotID)
+	if err != nil {
+		return nil, true
+	}
+	b, err := repo.Get(r.Context(), botID)
+	if err != nil || b == nil || b.ID != botID || b.OwnerID.String() != meta.UserID {
+		return nil, true
+	}
+	runID, err := uuid.Parse(meta.BotRunID)
+	if err != nil {
+		return nil, true
+	}
+	run, err := repo.GetRun(r.Context(), b.ID, runID)
+	if err != nil || run == nil || run.ID != runID || run.BotID != b.ID || run.SessionID.String() != sessionID {
+		return nil, true
+	}
+	requested := r.URL.Query().Get("path")
+	for _, artifact := range run.Report.Artifacts {
+		// Relative report paths and their canonical in-sandbox /root spelling
+		// identify the same artifact; neither is ever passed through as a host path.
+		if requested != artifact.RelativePath && requested != "/root/"+artifact.RelativePath {
+			continue
+		}
+		home := b.Home
+		if artifact.ID == uuid.Nil || home.ID == uuid.Nil || home.BotID != b.ID || home.Scope != b.Scope || home.Revision < 1 || artifact.HomeID != home.ID || sandbox.ValidateBotHomeArtifactPath(artifact.RelativePath) != nil {
+			return nil, true
+		}
+		digest, err := hex.DecodeString(artifact.SHA256)
+		if err != nil || len(digest) != sha256.Size {
+			return nil, true
+		}
+		tc := store.TenantContextFrom(r.Context())
+		if tc == nil {
+			return nil, true
+		}
+		binding := &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: tc.OrgSlug, TeamID: tc.TeamSlug, UserID: b.OwnerID.String(), BotID: b.ID.String()}, Backend: sandbox.BackendKind(home.Backend), Ref: home.StorageKey}
+		if binding.Validate() != nil {
+			return nil, true
+		}
+		backend, cleanup, err := sandboxBackendForAuthorizedRequest(r)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if artifact.ContentRef != nil {
+			ref := *artifact.ContentRef
+			scope := store.BotContentScope{OrgID: binding.Scope.OrgID, TeamID: binding.Scope.TeamID, OwnerID: binding.Scope.UserID, BotID: b.ID}
+			if err != nil || ref.Validate() != nil || ref.Kind != store.BotContentArtifact || ref.Scope != scope || ref.SHA256 != artifact.SHA256 || ref.SizeBytes != artifact.SizeBytes || ref.SizeBytes > sandbox.MaxBotHomeArtifactBytes {
+				return nil, true
+			}
+			files, ok := backend.(sandbox.BotHomeFilesBackend)
+			if !ok {
+				return nil, true
+			}
+			stream, openErr := files.OpenBotContent(r.Context(), binding, ref, store.BotFileRange{})
+			if stream != nil && stream.ReadCloser != nil {
+				defer botOwnFileStream(r.Context(), stream)()
+			}
+			if openErr != nil || stream == nil || stream.ReadCloser == nil {
+				return nil, true
+			}
+			data, readErr := io.ReadAll(io.LimitReader(stream, ref.SizeBytes+1))
+			closeErr := stream.Close()
+			actual := sha256.Sum256(data)
+			if readErr != nil || closeErr != nil || r.Context().Err() != nil || int64(len(data)) != ref.SizeBytes || stream.Entry.SizeBytes != ref.SizeBytes || stream.Entry.SHA256 != ref.SHA256 || hex.EncodeToString(actual[:]) != ref.SHA256 {
+				return nil, true
+			}
+			return append([]byte{}, data...), true
+		}
+		reader, ok := backend.(sandbox.BotHomeArtifactBackend)
+		if err == nil && ok {
+			data, readErr := reader.ReadBotHomeArtifact(r.Context(), binding, artifact.RelativePath, sandbox.MaxBotHomeArtifactBytes)
+			actual := sha256.Sum256(data)
+			if readErr == nil && int64(len(data)) <= sandbox.MaxBotHomeArtifactBytes && strings.EqualFold(artifact.SHA256, hex.EncodeToString(actual[:])) {
+				return append([]byte{}, data...), true
+			}
+			return nil, true
+		}
+		return nil, true
+	}
+	return nil, true // Bot content never falls back to reconstructed tool transcripts.
+}
+
 func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID string) bool {
 	if !requireSessionIDOwner(w, r, sessionID) {
 		return false
+	}
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), sessionID); err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return false
+	} else if meta != nil {
+		// Authorized Bot history can reconstruct artifacts without granting any
+		// right to resume or inspect the disposable compute associated with it.
+		return true
 	}
 	reg := sandboxRegistryFromRequest(r)
 	var err error
@@ -1246,6 +1558,9 @@ func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID st
 // tenant checks happen before this function is called.
 func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]byte, bool) {
 	if sessionID == "" || filePath == "" {
+		return nil, false
+	}
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), sessionID); err != nil || meta != nil {
 		return nil, false
 	}
 
@@ -1346,6 +1661,13 @@ func StudioArtifactPDFHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), sessionID); err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	} else if meta != nil {
+		respondError(w, http.StatusServiceUnavailable, "Bot PDF rendering requires an authorized render adapter")
+		return
+	}
 	// Read the source markdown content using the same 3-tier fallback.
 	var mdContent []byte
 
@@ -1375,7 +1697,7 @@ func StudioArtifactPDFHandler(w http.ResponseWriter, r *http.Request) {
 		if mdContent == nil {
 			if svc := store.FromRequest(r); svc != nil {
 				if ss := resolveSessionStore(svc, sessionID, r); ss != nil {
-					if content, ok := readArtifactContentFromSessionStore(ss, studioChatAppName, effectiveUserID(r), sessionID, cleanPath); ok {
+					if content, ok := readAuthorizedSessionArtifact(r, ss, sessionID, cleanPath); ok {
 						mdContent = []byte(content)
 					}
 				}

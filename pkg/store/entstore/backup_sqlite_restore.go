@@ -119,7 +119,13 @@ func (s *Store) restoreSQLiteLogicalBackup(ctx context.Context, archivePath stri
 	if err := checkSQLiteScopeSchemaCompatible(ctx, manifest, s.platformDB, backup.Scope{Kind: "platform"}); err != nil {
 		return nil, err
 	}
-	files, err := backup.ReadArchiveFiles(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase})
+	var files map[string][]byte
+	var err error
+	if opts.fileFirst != nil {
+		files = opts.fileFirst.files
+	} else {
+		files, err = backup.ReadArchiveFiles(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +218,16 @@ func checkSQLiteScopeSchemaCompatible(ctx context.Context, manifest backup.Manif
 	if err != nil {
 		return fmt.Errorf("read target schema for %s: %w", backupScopeKey(scope), err)
 	}
-	return checkSchemaCompatible(archiveVersion, targetVersion)
+	if mismatch := checkSchemaCompatible(archiveVersion, targetVersion); mismatch != nil {
+		compatible, err := sqlitePreBotBackupCompatible(ctx, db, manifest, scope, archiveVersion)
+		if err != nil {
+			return err
+		}
+		if !compatible {
+			return mismatch
+		}
+	}
+	return nil
 }
 
 func openRestoreSQLiteDB(path string) (*sql.DB, error) {
@@ -281,6 +296,16 @@ func restoreTablePriority(entity string) int {
 		return 1
 	case "sessions":
 		return 2
+	case "bot_schema_version", "bots", "bot_templates":
+		return 4
+	case "bot_versions", "bot_goals", "bot_runs":
+		return 5
+	case "bot_tracked_items", "bot_approvals", "bot_outbox":
+		return 6
+	case "bot_skills", "bot_tasks":
+		return 7
+	case "bot_skill_revisions", "bot_task_revisions", "bot_knowledge_extractions", "bot_knowledge_file_heads":
+		return 8
 	case "session_events", "chat_session_events", "sandbox_sessions":
 		return 3
 	default:

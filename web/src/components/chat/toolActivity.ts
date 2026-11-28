@@ -161,17 +161,22 @@ export type ChronologicalActivitySegment =
   | { kind: 'passthrough'; index: number }
   | { kind: 'activity'; start: number; end: number; entries: ActivityEntry[]; steps: ToolActivityStep[]; coveredIndices: number[] }
 
+export type ActivityTextMode = 'fold-intermediate' | 'preserve-agent'
+
 /** Lossless display projection; raw records retain their original identity and order. */
-export function groupChronologicalActivity(messages: ChatMsg[]): ChronologicalActivitySegment[] {
+export function groupChronologicalActivity(messages: ChatMsg[], textMode: ActivityTextMode = 'fold-intermediate'): ChronologicalActivitySegment[] {
+  // Bot progress is already explicitly published by the runtime. Keep that
+  // owner-facing narration visible, rather than hiding it in a collapsed tool.
+  const boundary = (message: ChatMsg) => isHardBreak(message) || (textMode === 'preserve-agent' && message.type === 'agent')
   const segments: ChronologicalActivitySegment[] = []
   let i = 0
   while (i < messages.length) {
-    if (isHardBreak(messages[i])) {
+    if (boundary(messages[i])) {
       segments.push({ kind: 'passthrough', index: i++ })
       continue
     }
     const start = i
-    while (i < messages.length && !isHardBreak(messages[i])) i++
+    while (i < messages.length && !boundary(messages[i])) i++
     const end = i - 1
     const steps = pairSteps(messages, start, end)
     if (!steps.length) {
@@ -214,12 +219,12 @@ export function groupChronologicalActivity(messages: ChatMsg[]): ChronologicalAc
   return segments
 }
 
-export function buildChronologicalActivityRenderIndex(messages: ChatMsg[]) {
+export function buildChronologicalActivityRenderIndex(messages: ChatMsg[], textMode: ActivityTextMode = 'fold-intermediate') {
   const activityByStart = new Map<number, Extract<ChronologicalActivitySegment, { kind: 'activity' }>>()
   const skipIndices = new Set<number>()
   let lastActivityStart = -1
   messages.forEach((message, index) => { if (message.type === 'thinking') skipIndices.add(index) })
-  for (const segment of groupChronologicalActivity(messages)) {
+  for (const segment of groupChronologicalActivity(messages, textMode)) {
     if (segment.kind !== 'activity') continue
     activityByStart.set(segment.start, segment)
     lastActivityStart = segment.start
@@ -394,12 +399,20 @@ function isVisibleBoundaryType(type: string): boolean {
     type === 'distill_preview'
 }
 
+// Canonical server publication identity, already carried by both replay and live
+// Bot envelopes. This is a display boundary only, never a markdown/harness gate.
+const BOT_REPORT_INVOCATION = /^bot-report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function isBotReportMessage(msg: ChatMsg): boolean {
+  return msg.type === 'agent' && (!!msg.operationId || BOT_REPORT_INVOCATION.test(msg.invocationId ?? ''))
+}
+
 export function isHardBreak(msg: ChatMsg): boolean {
-  return isHardBreakType(msg.type)
+  return isBotReportMessage(msg) || isHardBreakType(msg.type)
 }
 
 export function isSoftNote(msg: ChatMsg): boolean {
-  return isSoftNoteType(msg.type)
+  return !isBotReportMessage(msg) && isSoftNoteType(msg.type)
 }
 
 /** True when content hosts (or is streaming into) an astonish-app fence. */

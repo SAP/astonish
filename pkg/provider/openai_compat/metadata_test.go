@@ -60,7 +60,7 @@ func TestOpenAICompatibleUndetectedStaysChat(t *testing.T) {
 		case "/openai/v1/models":
 			fmt.Fprint(w, `{"data":[]}`)
 		case "/litellm/v1/chat/completions":
-			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+			fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
 		default:
 			http.NotFound(w, r)
 		}

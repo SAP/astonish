@@ -159,7 +159,11 @@ func (pa *PlatformAuth) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Check if this is the first user (org bootstrap) — always allowed regardless
 	// of registration policy, since someone must be able to set up the platform.
 	ctx := r.Context()
-	orgCount, _ := pa.pgStore.Organizations().Count(ctx)
+	orgCount, err := pa.pgStore.Organizations().Count(ctx)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to check setup status")
+		return
+	}
 	isFirstUser := orgCount == 0
 
 	// Check if registration is allowed (DB override > YAML config).
@@ -201,15 +205,21 @@ func (pa *PlatformAuth) handleRegister(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    time.Now(),
 	}
 
-	if err := pa.pgStore.Users().Create(ctx, user); err != nil {
-		slog.Error("failed to create user", "email", user.Email, "error", err)
-		respondError(w, http.StatusInternalServerError, "failed to create user")
-		return
+	if !isFirstUser {
+		if err := pa.pgStore.Users().Create(ctx, user); err != nil {
+			slog.Error("failed to create user", "email", user.Email, "error", err)
+			respondError(w, http.StatusInternalServerError, "failed to create user")
+			return
+		}
 	}
 
-	// First user: auto-provision org + team (bootstrap flow, unchanged)
+	// First user: publish identity only after required tenant provisioning.
 	if isFirstUser {
 		org, role, err := pa.provisionFirstOrg(ctx, user)
+		if errors.Is(err, store.ErrPlatformInitialized) {
+			respondError(w, http.StatusConflict, "platform already initialized; please sign in")
+			return
+		}
 		if err != nil {
 			slog.Error("failed to provision org for first user", "user", user.ID, "error", err)
 			respondError(w, http.StatusInternalServerError, "failed to provision organization")
@@ -855,76 +865,15 @@ func (pa *PlatformAuth) provisionFirstOrg(ctx context.Context, user *store.User)
 		CreatedAt: time.Now(),
 	}
 
-	// Create org record in platform DB
-	if err := pa.pgStore.Organizations().Create(ctx, org); err != nil {
-		return nil, "", fmt.Errorf("failed to create org: %w", err)
+	bootstrap, ok := pa.pgStore.(store.FirstUserBootstrap)
+	if !ok {
+		return nil, "", errors.New("store does not support atomic first-user setup")
 	}
-
-	// Provision org database (CREATE DATABASE + run migrations)
-	if err := pa.pgStore.ProvisionOrg(ctx, org.ID, orgSlug); err != nil {
-		return nil, "", fmt.Errorf("failed to provision org database: %w", err)
+	if err := bootstrap.BootstrapFirstUser(ctx, user, org); err != nil {
+		return nil, "", err
 	}
-
-	// Make user the org owner
-	role := "owner"
-	if err := pa.pgStore.Organizations().AddMember(ctx, user.ID, org.ID, role); err != nil {
-		return nil, "", fmt.Errorf("failed to add owner to org: %w", err)
-	}
-
-	// First user is automatically promoted to platform superadmin
-	if err := pa.pgStore.Users().SetPlatformRole(ctx, user.ID, "superadmin"); err != nil {
-		slog.Warn("failed to set platform superadmin role on first user", "error", err)
-	} else {
-		user.PlatformRole = "superadmin"
-	}
-
-	// Create default team within the org
-	orgDataStore, err := pa.pgStore.ForOrg(orgSlug)
-	if err != nil {
-		slog.Warn("failed to get org data store for default team creation", "error", err)
-		return org, role, nil
-	}
-
-	defaultTeam := &store.Team{
-		ID:         uuid.New().String(),
-		Name:       "General",
-		Slug:       "general",
-		SchemaName: "team_general",
-		CreatedAt:  time.Now(),
-	}
-	if err := orgDataStore.Teams().CreateTeam(ctx, defaultTeam); err != nil {
-		slog.Warn("failed to create default team", "error", err)
-		return org, role, nil
-	}
-
-	// Provision team schema
-	if err := orgDataStore.ProvisionTeam(ctx, "general"); err != nil {
-		slog.Warn("failed to provision default team schema", "error", err)
-		return org, role, nil
-	}
-
-	// Add user to default team as admin
-	if err := orgDataStore.Teams().AddMember(ctx, &store.TeamMembership{
-		UserID:   user.ID,
-		TeamID:   defaultTeam.ID,
-		Role:     "admin",
-		JoinedAt: time.Now(),
-	}); err != nil {
-		slog.Warn("failed to add user to default team", "error", err)
-	}
-
-	// Provision personal schema for the user
-	if err := orgDataStore.ProvisionPersonalSchema(ctx, user.ID); err != nil {
-		slog.Warn("failed to provision personal schema", "error", err)
-	}
-
-	slog.Info("first-user setup complete",
-		"user", user.Email,
-		"org", orgSlug,
-		"team", "general",
-	)
-
-	return org, role, nil
+	slog.Info("first-user setup complete", "user", user.Email, "org", orgSlug, "team", "general")
+	return org, "owner", nil
 }
 
 // resolveDefaultTeam finds the user's default team slug within an org.

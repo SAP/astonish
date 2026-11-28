@@ -16,6 +16,10 @@ const HANDLED_EVENTS = new Set([
   'tool_call',
   'tool_result',
   'approval',
+  // Bot streams carry persisted events (including metadata/state) verbatim.
+  // Never unwrap these into executable chat or approval events.
+  'transcript',
+  'replay_complete',
 ]);
 
 /** Studio emits `sessionId`; fixtures and some clients use `id`. */
@@ -165,31 +169,36 @@ export function connectChat({
         }
 
         buffer += decoder.decode(value, { stream: true });
-        const blocks = buffer.split('\n\n');
-        buffer = blocks.pop() ?? '';
-
-        for (const block of blocks) {
-          if (!block.trim()) {
-            continue;
-          }
-          const lines = block.split('\n');
+        let separator: RegExpExecArray | null;
+        while ((separator = /\r?\n\r?\n/.exec(buffer))) {
+          const block = buffer.slice(0, separator.index);
+          buffer = buffer.slice(separator.index + separator[0].length);
+          const lines = block.split(/\r?\n/);
           let eventType = 'message';
-          let dataStr = '';
+          const dataLines: string[] = [];
 
           for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              dataStr = line.slice(6);
+            const colon = line.indexOf(':');
+            if (colon <= 0) {
+              continue; // Comments and fields without values.
+            }
+            const field = line.slice(0, colon);
+            const value = line.slice(colon + 1).replace(/^ /, '');
+            if (field === 'event') {
+              eventType = value.trim();
+            } else if (field === 'data') {
+              dataLines.push(value);
             }
           }
 
-          if (!dataStr) {
+          if (!dataLines.length) {
             continue;
           }
           try {
-            const data = JSON.parse(dataStr) as Record<string, unknown>;
-            dispatchEvent(eventType, data, onEvent);
+            const data: unknown = JSON.parse(dataLines.join('\n'));
+            if (data && typeof data === 'object' && !Array.isArray(data)) {
+              dispatchEvent(eventType, data as Record<string, unknown>, onEvent);
+            }
           } catch {
             // Ignore malformed SSE payloads, matching Studio's connectChat.
           }

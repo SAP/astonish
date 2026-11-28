@@ -54,10 +54,11 @@ Three auto-managed markdown files serve specific purposes:
 
 ## Architecture
 
-Astonish currently has two persistence shapes:
+Astonish distinguishes ordinary Chat persistence from Bot-owned content:
 
 - **Personal / local mode** uses the file-backed markdown knowledge base described below.
-- **Platform mode** stores personal, team, and org memories in tenant-scoped database stores behind `entstore`, while still using the same agent-facing `MemoryStore` and `ThreeTierSearcher` interfaces. Platform code must resolve stores through request context and the tenant router; it must not open raw tenant connections.
+- **Platform ordinary Chat** stores personal, team, and org memories in tenant-scoped database stores behind `entstore`, while still using the same agent-facing `MemoryStore` and `ThreeTierSearcher` interfaces. Platform code must resolve stores through request context and the tenant router; it must not open raw tenant connections.
+- **Bots (personal and team)** use retained files and a scoped disk-memory repository, not generic platform-memory SQL content. See [File-first Bot memory](#file-first-bot-memory-separate-from-ordinary-chat). The generic retrieval, indexing and scenario-card descriptions below are not Bot bootstrap rules.
 
 ### Knowledge Retrieval Per Turn
 
@@ -201,6 +202,48 @@ Implementation details:
 - Retrieval asks the underlying search for extra candidates, runs query-aware scenario-card filtering, prefers scenario cards, suppresses any transitional raw memories that are explicitly listed as `source_memory_ids`, de-duplicates equivalent scenario cards as a safety net, and drops scenario cards that share only generic words with the query. This same filtering is used by automatic knowledge injection, the direct `memory_search` tool, and the Studio memory search endpoint so manual and automatic searches are consistent.
 
 The key invariant is that Astonish should save **how to do the thing efficiently**, not a transcript of exploratory dead ends. Temporary outages, timeouts, rate limits, and “X did not work” observations may appear only as conditional cautions that require re-verification before they change behavior. If a raw memory cannot produce a usable recommended path, it is not durable memory; the system can learn it again later and create a proper card. The card frontmatter `scope` must match the store tier where the row is written (`personal`, `team`, or `org`); this prevents confusing diagnostics where a personal row contains team metadata.
+
+### File-first Bot memory (separate from ordinary Chat)
+
+Bots do not use the generic platform-memory SQL rows described above as their content authority. Ordinary Chat/code memory, its reflector, scenario cards and three-tier search keep their existing behavior. Retained Home owns working documents; protected immutable content storage owns attributed memory history. SQL holds scoped control state and typed content references, not Bot memory bodies, embeddings, nested `source_records` or replacement snapshots. Generic SQL memory `Add`/`Update` exclude Bot-linked sessions; there is no legacy-body fallback or automatic migration.
+
+#### Real documents and bounded bootstrap
+
+`bot.Documents.Load` reads `SOUL.md`, `IDENTITY.md`, `USER.md`, `CHARTER.md` and actual `MEMORY.md` through `store.BotFiles`. Critical documents are bounded to 16 KiB each; `BotMemoryBootstrapBytes` is **12 KiB**, including the explicit `read_file` retrieval hint. Oversized external files remain intact: `BoundDocumentText` trims only the UTF-8 prompt excerpt. `SourceVersion` identifies the full file SHA-256, not a memory-row revision.
+
+`LoadMapped` retains its compatibility signature but ignores the old memory-service argument. It reads optional `GOALS.md`, `people/INDEX.md`, `groups/INDEX.md`, and `goals/INDEX.md`, `skills/INDEX.md`, `tasks/INDEX.md`, `knowledge/INDEX.md` when present. It does not synthesize notes, record mappings or historical reports from SQL. Missing critical files fail; missing optional indexes are skipped. Missing file capability fails explicitly. A GET never initializes Home, starts a run or repairs files. Historical configuration versions cannot project historical working files.
+
+The compact index is for current goals, useful knowledge, completed/unfinished work, concise outcomes and paths. Full earlier deliverables require explicit reads, not a latest-20 memory query or automatic historical-report injection. Active-resume transcript handling is a separate contract and must not be replaced by a lossy memory summary. Index/persona text and paths never grant permission or prove external effects. Ordinary `write_file`/`edit_file` are restricted to `outputs/`; they cannot rewrite instructions, policy or `MEMORY.md`.
+
+#### Scoped disk memory and attribution
+
+`store.NewBotMemoryService` resolves the Bot-specific disk view through the same authenticated scoped Bot repository. `botDiskMemoryStore` retains memory IDs and the agent-facing result shape, but reads an immutable disk catalogue. `bot_memory_head_v1` is a typed `BotContentRef` in control state. Content is staged before the head becomes visible; scoped revision/sequence CAS and fresh authority guard the head commit. Interrupted or rejected commits can leave unreferenced immutable objects, not partly edited current claims. This is not a filesystem/SQL distributed transaction or permission to delete orphans during reads.
+
+Each operation authorizes the Bot and constrains candidates by linked home/run sessions before ranking or pagination. Generic owner-wide search/merger context is shadowed. Unsupported capabilities never fall back to unrestricted memory. Mutations require dedicated `BotMemoryMutationStore`, reviewed-edit or fenced runtime paths; the generic disk `MemoryStore` view is read-only. `NewBotRunMemoryService` requires a current lease and confines autonomous mutation to the producing run's session. Autonomous notes cannot silently replace owner-reviewed or attributed claims. Credential values are placeholderized before tool saves.
+
+`MemoryAttribution` binds Bot/goal/run provenance, source, evidence, observation time, status (`inferred`/`verified`) and optional `superseded_by`. Valid owner-confirmation or observation evidence is required for verified knowledge; model text cannot upgrade an inference. Source content and provenance remain in protected disk history. `IsCurrentBotMemory` excludes retired records from ordinary Bot recall and `memory_get`; list/get and Memory Health retain history for review. Attributed search excludes superseded observations unless explicitly requested. These are Bot rules, not a generic Chat retention change.
+
+Approved routine `memory_forget` is logical retirement with `superseded_by: routine-operation:<operation UUID>`, not physical deletion. Denial and exception expiry do not retire memory. Validate the exact target marker, absence from current recall and preservation of original content/provenance and neighboring records, including after reopen; an empty UI list is insufficient evidence.
+
+#### Reviewed batches, corrections and health
+
+`BotMemoryService.ApplyReviewed` uses `BotMemoryReviewStore.ApplyReviewedBotMemory`, not generic consolidation. A confirmed request binds an idempotency UUID, expected Bot revision, typed kind (`document`/`consolidate`), reason and 1–100 edits. Each edit has an authorized target session and fingerprint-bound source mappings; consolidation needs at least two sources. `MemoryContentFingerprint` includes content, category, path, session, creator/time and attribution. Stale fingerprints, foreign sources, superseded claims and changed retries fail closed.
+
+Personal/team implementations require their exact `botDiskMemoryStore` and content backend. They freshly authorize, CAS the Bot revision, preserve original sources, insert inferred replacements and mark sources `memory-review:<UUID>`. Source snapshots and `source_records` are disk content, not SQL JSON. The durable receipt binds request and actor; exact replay returns the receipt without repeating the change. Transaction rollback preserves the old visible head even if immutable staged bytes exist. There is no claim of globally atomic membership revocation across databases.
+
+`GET /api/studio/bots/{id}/memory-health` evaluates a bounded Bot-scoped snapshot with fingerprints, truncation information and review-only recommendations. `POST /memory-health/consolidate` requires a separate confirmed review. `/documents/{document}/ingest` remains a structured reviewed-memory operation, not arbitrary Markdown replacement and not proof that an independently read Home file was rewritten. A file-only document may have no record mappings. Persona/configuration edits remain separately authorized and must not import file prose as tool policy or resume paused work.
+
+`Correct` records intent; bodyless `/corrections/{correctionID}/reconcile` separately applies it. Only exact `memory:<UUID>` sources are executable. The same scoped disk view, immutable session linkage, current editor, source state and Bot CAS are rechecked. Reconciliation retains the original source and inserts a deterministic replacement with reviewed correction evidence, then records a deduplicated receipt. It no longer relies on old in-place SQL replacement/vector-cache invalidation. HTTP 202 means recorded intent; only successful reconciliation with `memory_applied: true` means applied. Corrections grant no rights, reopen no goals and enable no schedules.
+
+#### File-first validation still required
+
+The production worker now reconciles committed report publications into `MEMORY.md` through `PublicationMemoryResolver` and `MemoryIndex`. The source is the exact Bot/run/report-sequence receipt and settled report status, never the mutable run's latest status or model-authored index JSON. Cancelled/interrupted reports create an `interrupted` unfinished-work entry even with zero artifacts; they never claim delivery. Partial-file paths and immutable artifact IDs are included only after trusted snapshot readback reaches the bounded stream's verified EOF. Absent snapshots are omitted for interruptions; invalid scope, digest, transport and cancellation errors fail closed. A `publish_file` snapshot alone is not a committed publication and cannot become a memory outcome.
+
+Index writes preserve authored notes, deduplicate Bot/run/report-sequence receipts (including archived entries), and use MEMORY.md digest CAS under the existing post-publication commit fence. Conflicts retry only index metadata, with later authenticated reconciliation retaining the same durable receipt after failure; neither model execution nor file generation is replayed. Older index detail is linked before the 12 KiB bootstrap bound. Controlled resolver/index and worker tests cover cancellation, partial retained files, missing snapshots and idempotent retry. Source inspection and controlled tests are not physical backend/remount or full end-to-end acceptance; those evidence tiers remain separately required.
+
+Run `TestBotFileFirstWorkerHTTP` through the production worker in personal/team scopes, then scoped `TestBot.*(Memory|Document|FileFirst|TaskWorkspace|Mandate)` regression tests. Capture the actual provider request after reopen: critical files and bounded `MEMORY.md` must appear, full old deliverables must not, and a later explicit read must retrieve earlier bytes. Include manual/cron/confirmed-title, paused, stale-lease, cancelled, foreign-scope and ordinary-Chat regression cases. Reviewed-memory tests must exercise source/evidence CAS, receipt replay, failure rollback and reopen against disk content, not old SQL-only fixtures.
+
+Physical Docker, dedicated Kubernetes/PostgreSQL, built Studio and native terminal evidence remain separate gates. Inspect raw Bot-owned SQL payloads/indexes for sentinel bodies; exercise file/DB interruption, unsupported capability, backup/restore and cleanup. Missing infrastructure blocks that tier; skipped or controlled package tests are not physical acceptance. No live acceptance was performed for this documentation update.
 
 ### Memory Health Recommendations and Advanced Map
 

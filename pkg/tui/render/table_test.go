@@ -1,6 +1,7 @@
 package render
 
 import (
+	"charm.land/lipgloss/v2"
 	"strings"
 	"testing"
 )
@@ -56,5 +57,36 @@ func TestIsTableSeparator(t *testing.T) {
 	}
 	if isTableSeparator([]string{"Name", "Type"}) {
 		t.Fatal("not a separator")
+	}
+}
+
+func TestFramedTableUnicodeWrapRaggedStreaming(t *testing.T) {
+	st := Styles{NoColor: true, TableLayout: TableLayoutFramed}
+	rows := []string{`| ID | Notes | Extra |`, `| --- | --- | --- |`, `| alpha | **界界** é 👩‍💻 escaped\|pipe longwordABCDEFGHIJKLMN |`, `| beta | incomplete`}
+	for _, width := range []int{120, 40, 20} {
+		out := renderTable(rows, width, st)
+		if !strings.HasPrefix(out, "┌") || !strings.Contains(out, "└") || strings.Contains(out, "…") || strings.Contains(out, "\x1b") {
+			t.Fatalf("invalid frame width %d: %s", width, out)
+		}
+		flat := strings.NewReplacer("\n", "", "│", "", " ", "").Replace(out)
+		for _, want := range []string{"alpha", "beta", "界界", "é", "👩‍💻", "escaped|pipe", "longwordABCDEFGHIJKLMN", "incomplete"} {
+			if !strings.Contains(flat, want) {
+				t.Fatalf("lost %q width %d: %s", want, width, out)
+			}
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("overflow %d > %d: %q", got, width, line)
+			}
+		}
+	}
+	if renderTable(nil, 40, st) != "" {
+		t.Fatal("empty table not empty")
+	}
+	if strings.HasPrefix(renderTable(rows, 120, Styles{NoColor: true}), "┌") {
+		t.Fatal("zero styles changed legacy layout")
+	}
+	if !strings.Contains(renderTable(rows, 20, st), "ID:") {
+		t.Fatal("narrow rows need labels")
 	}
 }

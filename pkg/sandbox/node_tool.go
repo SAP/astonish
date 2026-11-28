@@ -161,6 +161,11 @@ func (nt *NodeTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) erro
 // On the first call, the LazyNodeClient creates the session container and
 // starts the node. The session ID is extracted from tool.Context.SessionID().
 func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	return nt.RunWithTransport(ctx, args, nil, nil)
+}
+
+// RunWithTransport decorates only the ready, security-provisioned client at the transport boundary.
+func (nt *NodeTool) RunWithTransport(ctx tool.Context, args any, decorate func(ToolNodeClient) ToolNodeClient, observe NodeToolObserver) (map[string]any, error) {
 	// Extract session ID from ADK context for container routing
 	var sessionID string
 	if ctx != nil {
@@ -176,43 +181,14 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("tool %q: no session ID and no local fallback", nt.Name())
 	}
 
-	// Convert args to map[string]interface{}
-	argsMap, ok := args.(map[string]interface{})
-	if !ok {
-		// Try JSON round-trip for struct args
-		data, err := json.Marshal(args)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal args: %w", err)
-		}
-		argsMap = make(map[string]interface{})
-		if err := json.Unmarshal(data, &argsMap); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal args to map: %w", err)
-		}
-	}
-
-	// Reject malformed calls before client acquisition or sandbox side effects.
-	if err := common.ValidateToolArguments(nt.Tool, argsMap); err != nil {
+	// Reject malformed calls before pool acquisition or sandbox side effects.
+	argsMap, err := prepareNodeToolArguments(nt.Tool, args)
+	if err != nil {
 		return nil, err
 	}
-
 	client := nt.getClientFromContext(ctx, sessionID)
-	if client == nil {
+	if nilToolClient(client) {
 		return nil, fmt.Errorf("tool %q: no sandbox client available for session %s", nt.Name(), sessionID)
-	}
-
-	// Keep caller-owned arguments unchanged, including when the input is nil.
-	dispatchArgs := make(map[string]any, len(argsMap)+1)
-	for key, value := range argsMap {
-		dispatchArgs[key] = value
-	}
-	argsMap = dispatchArgs
-
-	// Inject caller identity for per-agent cache scoping inside the container.
-	// The container-side node handler extracts and removes this before dispatching.
-	if ctx != nil {
-		if agentName := ctx.AgentName(); agentName != "" {
-			argsMap["_caller"] = agentName
-		}
 	}
 
 	nt.applyNetworkAllowEndpoints(ctx, client)
@@ -233,22 +209,82 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		}
 	}
 
-	// Send to node (lazy init on first call)
-	rawResult, err := client.Call(sessionID, nt.Name(), argsMap)
+	if decorate != nil {
+		client = decorate(client)
+	}
+	return RunNodeTool(ctx, nt.Tool, client, sessionID, ctx.AgentName(), argsMap, observe)
+}
+
+// ContextCallingToolClient optionally supports cancellation during transport.
+// Legacy clients retain their synchronous Call semantics; calls are never retried.
+type ContextCallingToolClient interface {
+	CallContext(context.Context, string, string, map[string]any) (json.RawMessage, error)
+}
+
+// NodeToolObserver receives normalized arguments and the decoded transport outcome.
+// It runs only after dispatch, never for rejected arguments or missing routing.
+type NodeToolObserver func(args, result map[string]any, err error)
+
+// RunNodeTool is the shared Chat/Bot node dispatch contract. The client and session
+// are explicit authority: it never consults a pool, changes session identity,
+// provisions host credentials, or falls back to the original local tool.
+func RunNodeTool(ctx context.Context, original tool.Tool, client ToolNodeClient, sessionID, caller string, args any, observe NodeToolObserver) (map[string]any, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("node tool requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if sessionID == "" || nilToolClient(client) {
+		return nil, fmt.Errorf("tool %q: explicit sandbox client and session required", original.Name())
+	}
+	values, err := prepareNodeToolArguments(original, args)
 	if err != nil {
 		return nil, err
 	}
-
-	// Unmarshal the result
+	dispatchArgs := make(map[string]any, len(values)+1)
+	for key, value := range values {
+		dispatchArgs[key] = value
+	}
+	// Caller metadata is not user authority and must not mutate caller-owned maps.
+	delete(dispatchArgs, "_caller")
+	if caller != "" {
+		dispatchArgs["_caller"] = caller
+	}
+	var raw json.RawMessage
+	if caller, ok := client.(ContextCallingToolClient); ok {
+		raw, err = caller.CallContext(ctx, sessionID, original.Name(), dispatchArgs)
+	} else {
+		raw, err = client.Call(sessionID, original.Name(), dispatchArgs)
+	}
 	var result map[string]any
-	if rawResult != nil {
-		if err := json.Unmarshal(rawResult, &result); err != nil {
-			// If it's not a map, wrap it
-			return map[string]any{"result": json.RawMessage(rawResult)}, nil
+	if err == nil && raw != nil {
+		if json.Unmarshal(raw, &result) != nil {
+			// Preserve Chat's non-object response contract.
+			result = map[string]any{"result": json.RawMessage(raw)}
 		}
 	}
+	if observe != nil {
+		observe(values, result, err)
+	}
+	return result, err
+}
 
-	return result, nil
+func prepareNodeToolArguments(original tool.Tool, args any) (map[string]any, error) {
+	values, ok := args.(map[string]any)
+	if !ok {
+		raw, err := json.Marshal(args)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal args: %w", err)
+		}
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal args to map: %w", err)
+		}
+	}
+	if err := common.ValidateToolArguments(original, values); err != nil {
+		return nil, err
+	}
+	return common.NormalizeFileToolArguments(original.Name(), values)
 }
 
 // networkAllowEndpointSetter is implemented by backendNodeClient so OpenShell

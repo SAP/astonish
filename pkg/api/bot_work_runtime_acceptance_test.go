@@ -1,0 +1,401 @@
+package api_test
+
+import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/SAP/astonish/pkg/store"
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
+)
+
+// pinLegacyHTTPAttempt restores only the protocol pin of a historical queued
+// attempt in this fixture's owned SQLite runtime bytes before the worker starts.
+// Admission, authority, execution, assessment and publication still use production
+// stores and factories. No candidate or verdict is seeded, and production cannot
+// downgrade a run through SaveWork.
+func pinLegacyHTTPAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun) {
+	pinHTTPWorkAttempt(t, f, run, false)
+}
+
+// pinReviewedHTTPAttempt requests an explicit evidence review before execution;
+// it does not forge a candidate, verdict, or runtime effect classification.
+func pinReviewedHTTPAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun) {
+	pinHTTPWorkAttempt(t, f, run, true)
+}
+
+func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun, reviewed bool) {
+	t.Helper()
+	path := filepath.Join(f.dataDir, "orgs", "interactive", "teams", "team.db")
+	if f.scope == store.BotScopePersonal {
+		path = filepath.Join(f.dataDir, "orgs", "interactive", "personal", f.b.OwnerID.String()+".db")
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var raw []byte
+	if err := db.QueryRowContext(f.ctx, "SELECT data FROM bot_runs WHERE id = ? AND bot_id = ? AND status = 'queued'", run.ID.String(), run.BotID.String()).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var storage map[string]string
+	if err := json.Unmarshal(raw, &storage); err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(storage["bot_record_v2"]), &record); err != nil {
+		t.Fatal(err)
+	}
+	var contentBytes []byte
+	if err := json.Unmarshal(record["inline"], &contentBytes); err != nil {
+		t.Fatalf("queued fixture runtime bytes: %v", err)
+	}
+	var size int64
+	var digest string
+	if err := json.Unmarshal(record["size_bytes"], &size); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(record["sha256"], &digest); err != nil {
+		t.Fatal(err)
+	}
+	if size != int64(len(contentBytes)) || digest != fmt.Sprintf("%x", sha256.Sum256(contentBytes)) {
+		t.Fatal("queued fixture runtime integrity mismatch")
+	}
+	var content map[string]json.RawMessage
+	if err := json.Unmarshal(contentBytes, &content); err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(content["stored"], &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope["work"]) != 0 {
+		t.Fatal("fixture attempt already has work")
+	}
+	// This fixture pins queued content before claim. LoadRunInput is intentionally
+	// lease-bound and must not be used to bypass that production boundary.
+	var instructions string
+	if err := json.Unmarshal(envelope["Instructions"], &instructions); err != nil {
+		t.Fatal(err)
+	}
+	version, err := f.repo.GetVersion(f.ctx, run.BotID, run.Version)
+	if err != nil {
+		t.Fatalf("queued fixture version: %v", err)
+	}
+	work := store.NewBotWorkState(store.BotWorkContract{BotID: run.BotID, RunID: run.ID, Version: run.Version, Instructions: instructions, Charter: version.Charter})
+	if reviewed {
+		work = store.NewBotAgentWorkState(work.Contract)
+		work.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
+		work.Criteria = []store.BotWorkCriterion{{ID: "scoped-result", SourceIDs: []string{"assignment", "charter"}, Text: "Use the requested scoped tool and truthfully report its result."}}
+	}
+	if err := work.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the typed codec's field order for its logical digest. Only the work
+	// pin changes; admission authority remains the original SQL control.
+	workJSON, err := json.Marshal(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := strings.Replace(string(content["stored"]), `"ExternalAdmissionValidated":`, `"work":`+string(workJSON)+`,"ExternalAdmissionValidated":`, 1)
+	var control map[string]json.RawMessage
+	if err := json.Unmarshal(record["control"], &control); err != nil {
+		t.Fatal(err)
+	}
+	logical := strings.TrimSuffix(stored, "}")
+	// Reconstruct typed Run coordination exactly as the production codec does;
+	// queued response projections can differ from their stored SQL controls.
+	var logicalRun store.BotRun
+	if err := json.Unmarshal(envelope["Run"], &logicalRun); err != nil {
+		t.Fatal(err)
+	}
+	runValue := reflect.ValueOf(&logicalRun).Elem()
+	for i := 0; i < runValue.NumField(); i++ {
+		name := runValue.Type().Field(i).Name
+		if name == "Work" || name == "Progress" || name == "TitleConfirmation" {
+			continue
+		}
+		if value, ok := control[name]; ok {
+			if err := json.Unmarshal(value, runValue.Field(i).Addr().Interface()); err != nil {
+				t.Fatalf("queued fixture control %s: %v", name, err)
+			}
+		}
+	}
+	runJSON, err := json.Marshal(logicalRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logical = strings.Replace(logical, `"Run":`+string(envelope["Run"]), `"Run":`+string(runJSON), 1)
+	if admitted := control["ExternalAdmissionValidated"]; len(admitted) > 0 {
+		logical = strings.Replace(logical, `"ExternalAdmissionValidated":false`, `"ExternalAdmissionValidated":`+string(admitted), 1)
+	}
+	// Manual autonomous admission has a SQL-only owner pin. Rehydrate it in
+	// codec order for the digest without placing that authority on disk.
+	if owner := control["SkillAdmissionOwner"]; len(owner) > 0 && string(owner) != "null" {
+		logical = strings.Replace(logical, `"work":`, `"skill_admission_owner":`+string(owner)+`,"work":`, 1)
+	}
+	for _, field := range []struct{ sql, json string }{{"MandateRef", "mandate_ref"}, {"CallerCeiling", "caller_ceiling"}} {
+		if value := control[field.sql]; len(value) > 0 && string(value) != "null" {
+			logical += `,"` + field.json + `":` + string(value)
+		}
+	}
+	logical += "}"
+	record["logical_digest"], _ = json.Marshal(fmt.Sprintf("%x", sha256.Sum256([]byte(logical))))
+	control["Work"], _ = json.Marshal(struct {
+		SchemaVersion               int
+		Revision                    int64
+		Protocol                    store.BotWorkProtocol
+		Phase                       store.BotWorkPhase
+		RequirementsDigest          string
+		EmployeeReviewPolicy        store.BotEmployeeReviewPolicy
+		EmployeeReviewAttempts      int
+		EmployeeReviewPending       bool
+		EmployeeRepairPending       bool
+		ResponseOutcome             store.BotWorkResponseOutcome
+		Repairs                     int
+		SkillAuthorityConstraintRef string
+	}{SchemaVersion: work.SchemaVersion, Revision: work.Revision, Protocol: work.Protocol, Phase: work.Phase, RequirementsDigest: work.RequirementsDigest, EmployeeReviewPolicy: work.EmployeeReviewPolicy})
+	record["control"], _ = json.Marshal(control)
+	content["stored"] = json.RawMessage(stored)
+	updated, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record["inline"], _ = json.Marshal(updated)
+	record["size_bytes"], _ = json.Marshal(int64(len(updated)))
+	record["sha256"], _ = json.Marshal(fmt.Sprintf("%x", sha256.Sum256(updated)))
+	updated, err = json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage["bot_record_v2"] = string(updated)
+	updated, err = json.Marshal(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.ExecContext(f.ctx, "UPDATE bot_runs SET data = ? WHERE id = ? AND bot_id = ? AND status = 'queued' AND CAST(data AS TEXT) = ?", string(updated), run.ID.String(), run.BotID.String(), string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("legacy fixture pin: rows=%d err=%v", n, err)
+	}
+	// The production decoder must authenticate the updated runtime bytes immediately;
+	// don't let a malformed test pin masquerade as a worker failure later.
+	if _, err := f.repo.GetRun(f.ctx, run.BotID, run.ID); err != nil {
+		t.Fatalf("queued fixture readback: %v", err)
+	}
+	if strings.Contains(string(updated), `"bot_document"`) {
+		t.Fatal("protocol fixture introduced a workspace document into runtime SQL")
+	}
+}
+
+// Actual HTTP admission/readback, scoped SQLite, production worker, factory and
+// ChatRunner, with an explicit historical protocol pin. No verdicts are seeded.
+func TestBotWorkPublicationHTTPAcceptance(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newInteractiveHTTPFixture(t, "read_file", nil, []string{"chat", "tool:execute"}, scope)
+			defer f.worker.Stop()
+			f.model.qualityMode = "publication"
+			historyPath := f.path + "/sessions/" + f.b.HomeSessionID.String() + "/stream"
+			finalText := "Corrected: the receipt says isolated receipt."
+			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+				if req.Config == nil || req.Config.SystemInstruction == nil {
+					return nil, false
+				}
+				prompt := req.Config.SystemInstruction.Parts[0].Text
+				var output any
+				switch {
+				case strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1"):
+					output = map[string]any{"kind": "no_skill_needed", "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled publication fixture"}
+				case strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1"):
+					output = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "content", SourceIDs: []string{"assignment", "charter"}, Text: "Return the owner supplied receipt text"}}}
+				case strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1"):
+					var work store.BotWorkState
+					if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work); err != nil {
+						t.Fatal(err)
+					}
+					// Read the actual HTTP Home while the producer has finished but
+					// its candidate is still being assessed. Drafts must not be there.
+					history := string(f.request("GET", historyPath, "", 200))
+					if strings.Contains(history, "Defective: the receipt says imaginary.") {
+						t.Fatal("draft leaked before final commit")
+					}
+					verdict := store.BotCriterionFailed
+					if work.Candidate.Text == finalText {
+						verdict = store.BotCriterionSatisfied
+					}
+					output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "content", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Use the supplied exact receipt"}}}
+				default:
+					return nil, false
+				}
+				raw, _ := json.Marshal(output)
+				return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, true
+			}
+			var ids []string
+			for i := 0; i < 3; i++ {
+				f.model.productions = 0
+				var receipt store.BotMessageReceipt
+				raw := f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Report the supplied text: isolated receipt.","idempotency_key":"publication-%d"}`, f.b.Version, i), 202)
+				if err := json.Unmarshal(raw, &receipt); err != nil {
+					t.Fatal(err)
+				}
+				pinLegacyHTTPAttempt(t, f, receipt.Run)
+				if err := f.worker.Poll(f.ctx); err != nil {
+					t.Fatal(err)
+				}
+				var run store.BotRun
+				if err := json.Unmarshal(f.request("GET", f.path+"/runs/"+receipt.Run.ID.String(), "", 200), &run); err != nil {
+					t.Fatal(err)
+				}
+				if run.Status != store.RunSucceeded || run.Report.Quality == nil || run.Report.Quality.Outcome != store.BotWorkAccepted || run.Report.Summary != finalText {
+					t.Fatalf("not assessed: %+v", run)
+				}
+				ids = append(ids, "bot-report:"+run.ID.String())
+			}
+			history := string(f.request("GET", historyPath, "", 200))
+			if strings.Contains(history, "Defective: the receipt says imaginary.") {
+				t.Fatal("rejected candidate restored into Home")
+			}
+			for _, id := range ids {
+				assertCanonicalHTTPReport(t, history, id, finalText)
+			}
+			if canonicalHTTPTextCount(t, history, finalText) != 3 {
+				t.Fatalf("want three distinct final reports, got %d", canonicalHTTPTextCount(t, history, finalText))
+			}
+			// Reconciliation/reload cannot publish the same committed result twice.
+			if err := f.worker.Poll(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			reloaded := string(f.request("GET", historyPath, "", 200))
+			for _, id := range ids {
+				assertCanonicalHTTPReport(t, reloaded, id, finalText)
+			}
+		})
+	}
+}
+
+func TestBotWorkRuntimeHTTPAcceptance(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, mode := range []string{"fail-repair-pass", "limits", "malformed", "forged-verdict", "missing-evidence", "provider-error", "trailing-json", "revoked-during-review"} {
+			t.Run(string(scope)+"/"+mode, func(t *testing.T) {
+				f := newInteractiveHTTPFixture(t, "read_file", nil, []string{"chat", "tool:execute"}, scope)
+				defer f.worker.Stop()
+				f.model.qualityMode = mode
+				f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+					if req.Config == nil || req.Config.SystemInstruction == nil {
+						return nil, false
+					}
+					prompt := req.Config.SystemInstruction.Parts[0].Text
+					var output any
+					if strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1") {
+						output = map[string]any{"kind": "no_skill_needed", "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled quality fixture"}
+					} else if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
+						var source struct {
+							SourceDigest string `json:"source_digest"`
+						}
+						if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &source); err != nil {
+							t.Fatal(err)
+						}
+						output = map[string]any{"source_digest": source.SourceDigest, "choice": 0}
+					} else if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
+						var contract store.BotWorkContract
+						if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &contract); err != nil {
+							t.Fatal(err)
+						}
+						if !strings.Contains(contract.Instructions, "isolated receipt") {
+							t.Fatal("original assignment lost")
+						}
+						output = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "content", SourceIDs: []string{"assignment", "charter"}, Text: "Report the exact supplied receipt, isolated receipt; do not invent content."}}}
+					} else if strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") {
+						f.model.reviews++
+						var work store.BotWorkState
+						if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work); err != nil {
+							t.Fatal(err)
+						}
+						if work.Phase != store.BotWorkReviewing || work.Candidate.Digest != work.Candidate.ContentDigest() {
+							t.Fatal("review not durably bound to captured candidate")
+						}
+						if mode == "revoked-during-review" {
+							f.registry.Close()
+							return &model.LLMResponse{Content: genai.NewContentFromText("{}", "model")}, true
+						}
+						if mode == "provider-error" {
+							return &model.LLMResponse{ErrorCode: "provider_error", ErrorMessage: "review unavailable", Content: genai.NewContentFromText("{}", "model")}, true
+						}
+						if mode == "trailing-json" {
+							return &model.LLMResponse{Content: genai.NewContentFromText("{} {}", "model")}, true
+						}
+						if mode == "malformed" {
+							return &model.LLMResponse{Content: genai.NewContentFromText("not-json", "model")}, true
+						}
+						verdict := store.BotCriterionFailed
+						if work.Candidate.Text == "Corrected: the receipt says isolated receipt." {
+							verdict = store.BotCriterionSatisfied
+						}
+						refs := []string{"candidate:" + work.Candidate.Digest}
+						method := store.BotAssessmentModel
+						if mode == "forged-verdict" {
+							method = store.BotAssessmentMechanical
+						}
+						if mode == "missing-evidence" {
+							verdict = store.BotCriterionSatisfied
+							refs = []string{"observation:999"}
+						}
+						output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "content", Verdict: verdict, Method: method, EvidenceRefs: refs, Explanation: "Replace imaginary with the supplied exact text isolated receipt."}}}
+					} else {
+						return nil, false
+					}
+					raw, _ := json.Marshal(output)
+					return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
+				}
+				var receipt store.BotMessageReceipt
+				raw := f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Inspect and correct the supplied defective draft: imaginary. The correct receipt text supplied by the owner is isolated receipt.","idempotency_key":"quality"}`, f.b.Version), 202)
+				if err := json.Unmarshal(raw, &receipt); err != nil {
+					t.Fatal(err)
+				}
+				pinLegacyHTTPAttempt(t, f, receipt.Run)
+				if err := f.worker.Poll(f.ctx); err != nil {
+					t.Fatal(err)
+				}
+				var run store.BotRun
+				if err := json.Unmarshal(f.request("GET", f.path+"/runs/"+receipt.Run.ID.String(), "", 200), &run); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "fail-repair-pass" {
+					if run.Status != store.RunSucceeded || run.Report.Summary != "Corrected: the receipt says isolated receipt." || run.Report.Quality == nil || run.Report.Quality.Outcome != store.BotWorkAccepted || run.Report.Quality.Repairs != 1 || f.model.productions != 2 || f.model.reviews != 2 {
+						t.Fatalf("repair did not deliver assessed output: %+v productions=%d reviews=%d", run, f.model.productions, f.model.reviews)
+					}
+				} else {
+					if run.Status == store.RunSucceeded || strings.Contains(run.Report.Summary, "Corrected:") || (run.Report.Quality != nil && run.Report.Quality.Outcome == store.BotWorkAccepted) {
+						t.Fatalf("unsafe success: %+v", run)
+					}
+					wantReviews := 1
+					if mode == "malformed" || mode == "trailing-json" {
+						wantReviews = 2
+					}
+					if mode != "limits" && (f.model.productions != 1 || f.model.reviews != wantReviews) {
+						t.Fatalf("invalid review was replayed: productions=%d reviews=%d", f.model.productions, f.model.reviews)
+					}
+					if len(run.Report.Artifacts) != 0 {
+						t.Fatal("unaccepted draft artifacts were published")
+					}
+					if mode == "limits" && (f.model.productions != 3 || f.model.reviews != 3 || run.Report.Quality.Repairs != 2) {
+						t.Fatalf("unbounded repair: %+v", run)
+					}
+				}
+				if f.pool.calls != 0 {
+					t.Fatal("assessment obtained unauthorized tool authority")
+				}
+			})
+		}
+	}
+}

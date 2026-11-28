@@ -94,6 +94,13 @@ func resolvePerplexityAppConfig(ctx context.Context, fallback *config.AppConfig)
 
 // RunPerplexityWebSearch calls the configured Perplexity/Sonar model and normalizes the result.
 func RunPerplexityWebSearch(ctx tool.Context, args PerplexityWebSearchArgs, appCfg *config.AppConfig, llmFactory LLMFactory) (PerplexityWebSearchResult, error) {
+	// Mandated reads must use the concrete controlled-transport adapter, never a
+	// general factory that may resolve host credentials or follow redirects.
+	if ctx != nil {
+		if _, bounded := ctx.Value(routineReadKey{}).(RoutineReadPolicy); bounded {
+			return PerplexityWebSearchResult{}, fmt.Errorf("bounded search requires configured search adapter")
+		}
+	}
 	args.Query = strings.TrimSpace(args.Query)
 	if args.Query == "" {
 		return PerplexityWebSearchResult{}, fmt.Errorf("query is required")

@@ -56,7 +56,7 @@ func NewMultiTenantScheduler(
 	return &MultiTenantScheduler{
 		backend:  backend,
 		executor: executor,
-		deliver:  deliver,
+		deliver:  scheduler.WithoutBotTriggerDelivery(deliver),
 		logger:   logger,
 		running:  make(map[string]struct{}),
 	}
@@ -243,12 +243,18 @@ func (mts *MultiTenantScheduler) executeTeamJob(
 ) {
 	mts.logger.Printf("[scheduler] Executing team job %q (mode: %s)", storeJob.Name, storeJob.Mode)
 
-	execCtx := mts.buildTeamExecContext(ctx, orgStore, teamStore)
+	execCtx := withBotSchedulerScope(ctx, BotSchedulerScope{OrgSlug: orgSlug, TeamSlug: teamSlug})
+	if scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger {
+		execCtx = mts.buildTeamExecContext(ctx, orgStore, teamStore)
+	}
 	job := storeJobToSchedulerJob(storeJob)
 	job.Scope = store.JobScopeTeam
 
+	execCtx, ack := scheduler.WithBotAcknowledgement(execCtx)
 	result, execErr := mts.executor.Execute(execCtx, job)
-	mts.updateJobState(ctx, schedulerStore, storeJob, result, execErr)
+	if job.Mode != scheduler.ModeBotTrigger || *ack != scheduler.BotScheduleAcknowledged {
+		mts.updateJobState(ctx, schedulerStore, storeJob, result, execErr)
+	}
 
 	if mts.deliver != nil && storeJob.Mode != "fleet_poll" {
 		deliverCtx := scheduler.WithDeliveryContext(ctx, &scheduler.DeliveryContext{
@@ -281,15 +287,21 @@ func (mts *MultiTenantScheduler) executePersonalJob(
 		teamStore = orgStore.ForTeam(teamSlug)
 	}
 
-	execCtx := mts.buildPersonalExecContext(ctx, orgStore, teamStore, personalStore, userID)
+	execCtx := withBotSchedulerScope(ctx, BotSchedulerScope{OrgSlug: orgSlug, TeamSlug: teamSlug, UserID: userID})
+	if scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger {
+		execCtx = mts.buildPersonalExecContext(ctx, orgStore, teamStore, personalStore, userID)
+	}
 	job := storeJobToSchedulerJob(storeJob)
 	job.Scope = store.JobScopePersonal
 	if job.OwnerID == "" {
 		job.OwnerID = userID
 	}
 
+	execCtx, ack := scheduler.WithBotAcknowledgement(execCtx)
 	result, execErr := mts.executor.Execute(execCtx, job)
-	mts.updateJobState(ctx, schedulerStore, storeJob, result, execErr)
+	if job.Mode != scheduler.ModeBotTrigger || *ack != scheduler.BotScheduleAcknowledged {
+		mts.updateJobState(ctx, schedulerStore, storeJob, result, execErr)
+	}
 
 	if mts.deliver != nil && storeJob.Mode != "fleet_poll" {
 		// Personal jobs only deliver to the owner.
@@ -439,7 +451,9 @@ func (mts *MultiTenantScheduler) updateJobState(
 			stored.Name, len(result))
 	}
 
-	stored.NextRun = scheduler.ComputeNextRun(stored.Schedule.Cron, stored.Schedule.Timezone)
+	if scheduler.JobMode(stored.Mode) != scheduler.ModeBotTrigger || execErr == nil {
+		stored.NextRun = scheduler.ComputeNextRun(stored.Schedule.Cron, stored.Schedule.Timezone)
+	}
 	if err := schedulerStore.Update(ctx, stored); err != nil {
 		mts.logger.Printf("[scheduler] Failed to update job state for %q: %v", stored.Name, err)
 	}
@@ -500,6 +514,9 @@ func (mts *MultiTenantScheduler) refreshStoreNextRuns(ctx context.Context, ss st
 		if !job.Enabled {
 			continue
 		}
+		if scheduler.JobMode(job.Mode) == scheduler.ModeBotTrigger && job.NextRun != nil {
+			continue
+		}
 		nextRun := scheduler.ComputeNextRun(job.Schedule.Cron, job.Schedule.Timezone)
 		if nextRun != nil && (job.NextRun == nil || !nextRun.Equal(*job.NextRun)) {
 			job.NextRun = nextRun
@@ -518,10 +535,13 @@ func (mts *MultiTenantScheduler) RunNow(ctx context.Context, schedulerStore stor
 	}
 
 	orgStore, _ := mts.orgStoreFromTeam(ctx, teamStore)
-	var execCtx context.Context
-	if orgStore != nil {
+	execCtx := ctx
+	if tc := store.TenantContextFrom(ctx); tc != nil {
+		execCtx = withBotSchedulerScope(ctx, BotSchedulerScope{OrgSlug: tc.OrgSlug, TeamSlug: tc.TeamSlug})
+	}
+	if orgStore != nil && scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger {
 		execCtx = mts.buildTeamExecContext(ctx, orgStore, teamStore)
-	} else {
+	} else if scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger {
 		execCtx = ctx
 		execCtx = store.WithCredentialStore(execCtx, teamStore.Credentials())
 		execCtx = store.WithFlowStore(execCtx, teamStore.Flows())
@@ -542,7 +562,9 @@ func (mts *MultiTenantScheduler) RunNow(ctx context.Context, schedulerStore stor
 		storeJob.LastError = ""
 		storeJob.ConsecutiveFailures = 0
 	}
-	storeJob.NextRun = scheduler.ComputeNextRun(storeJob.Schedule.Cron, storeJob.Schedule.Timezone)
+	if scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger || execErr == nil {
+		storeJob.NextRun = scheduler.ComputeNextRun(storeJob.Schedule.Cron, storeJob.Schedule.Timezone)
+	}
 	_ = schedulerStore.Update(ctx, storeJob)
 
 	return result, execErr
@@ -562,7 +584,13 @@ func (mts *MultiTenantScheduler) RunNowPersonal(
 		return "", nil
 	}
 
-	execCtx := mts.buildPersonalExecContext(ctx, orgStore, teamStore, personalStore, userID)
+	execCtx := ctx
+	if tc := store.TenantContextFrom(ctx); tc != nil {
+		execCtx = withBotSchedulerScope(ctx, BotSchedulerScope{OrgSlug: tc.OrgSlug, TeamSlug: tc.TeamSlug, UserID: userID})
+	}
+	if scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger {
+		execCtx = mts.buildPersonalExecContext(ctx, orgStore, teamStore, personalStore, userID)
+	}
 	job := storeJobToSchedulerJob(storeJob)
 	job.Scope = store.JobScopePersonal
 	if job.OwnerID == "" {
@@ -581,7 +609,9 @@ func (mts *MultiTenantScheduler) RunNowPersonal(
 		storeJob.LastError = ""
 		storeJob.ConsecutiveFailures = 0
 	}
-	storeJob.NextRun = scheduler.ComputeNextRun(storeJob.Schedule.Cron, storeJob.Schedule.Timezone)
+	if scheduler.JobMode(storeJob.Mode) != scheduler.ModeBotTrigger || execErr == nil {
+		storeJob.NextRun = scheduler.ComputeNextRun(storeJob.Schedule.Cron, storeJob.Schedule.Timezone)
+	}
 	_ = schedulerStore.Update(ctx, storeJob)
 
 	return result, execErr

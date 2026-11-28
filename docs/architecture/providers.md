@@ -4,6 +4,99 @@
 
 Astonish supports 12+ LLM providers through a factory pattern that creates ADK-compatible `model.LLM` instances. Each provider adapter handles the specifics of API authentication, request formatting, streaming, and error mapping, while presenting a uniform interface to the rest of the system.
 
+## Startup defaults and scope
+
+`api.EffectiveAppConfigFromContext` and the HTTP helper share one resolution path: explicitly supplied platform → org → team → personal defaults cascade even when no team store exists. Empty fields inherit. Host YAML providers/defaults are a fallback only for trusted file-backed single-tenant deployments; SQLite and PostgreSQL are both multi-user and must not implicitly inherit host credentials when scoped stores are absent. An empty platform installation has no deployable default and Studio pre-warm defers LLM binding; this is not a reason to block serving configuration/auth endpoints. Config resolution never persists its effective result.
+
+## Skill-validation provider isolation
+
+Platform skill validation resolves the request's effective provider cascade even when the global ChatManager is warm. A global/operator model cannot substitute for a missing scoped provider: validation returns HTTP 503 without persisting status or consuming its success cooldown. Non-platform requests retain warm-model reuse. Missing-provider tests isolate host configuration; SQLite/PostgreSQL cases additionally exercise host-only defaults and a warm global model.
+
+## Chat Completions termination evidence
+
+OpenAI-compatible Chat Completions preserve normalized `LLMResponse.FinishReason` in both nonstreaming and final streaming responses: stop/tool-calls → STOP, length → MAX_TOKENS, refusal/content-filter → SAFETY, missing → FINISH_REASON_UNSPECIFIED, and unknown → OTHER. Empty stop, length, refusal/filter, and unknown/missing endings return a payload-free `provider.EmptyCompletionError` alongside the response and its usage; failed tool batches never publish executable calls. Consumers must inspect paired response usage even when the iterator also reports an error. Stream errors retain observed usage; terminal classification waits for the usage-only trailer rather than discarding it on `length`.
+
+`provider.IsRecoverableEmptyCompletion(err)` permits only caller-budgeted, bounded correction of empty stop/length results without tools, refusal, visible text or already-emitted stream output. It does not authorize generic transport retries, perform requests, increase limits, or swallow an independent joined cancellation/settlement failure. Missing choices/finish markers and unknown endings are not recoverable empty completions. Existing typed stream truncation remains separate; refusal evidence never becomes a retryable missing-marker failure. Reasoning parts remain marked `Thought`, never promoted to visible answers or copied into error messages.
+
+OpenAI `completion_tokens` includes `completion_tokens_details.reasoning_tokens`. The adapter splits that subset into ADK `ThoughtsTokenCount` and the remaining `CandidatesTokenCount`, preserving prompt, cached-prompt and total counts without charging reasoning twice. Missing reasoning detail retains the previous completion count. Local HTTP/SSE fixtures cover these contracts, not live provider calls; the Responses API is unchanged.
+
+## Responses API termination evidence
+
+The shared Responses converter validates upstream `status=completed` before returning `TurnComplete=true` and `FinishReason=STOP`. Both ordinary JSON responses and health-monitored SSE `response.completed` use this converter, including SAP AI Core's Responses route. The metadata certifies the provider generation ended, not that requested external effects succeeded. Incomplete, failed, missing-status and malformed-tool responses remain errors; the Bot synthesis completion gate is unchanged. `TestBotSynthesisResponsesCompletedWire` exercises an approximately 40 KB completed answer through loopback HTTP, the actual adapter, budget wrapper and synthesis gate with and without health monitoring, requiring exactly one accepted answer and no correction call.
+
+## Request-local generation health
+
+`streaming.StartHealthMonitor(ctx, HealthOptions{IdleTimeout, CheckInterval, Check})` returns a child context and joined `stop() error`. It has **no total generation-age deadline**. Inherited cancellation remains authoritative. `Check` runs serially on its own worker, independently of upstream reads and the idle watchdog; it must honor cancellation. Stop cancels and joins both workers and returns nil on normal completion or the original authority/cancellation/`*GenerationStalledError` cause. Use stop's return value, not the canceled child context's `Err`, for terminal classification. Zero/nonpositive idle timeout disables silence enforcement; it is not a hidden two-minute default.
+
+Only `ReportUpstreamActivity(ctx)` resets silence: actual response headers, nonempty body reads (including upstream SSE comments), or decoded upstream events. UI `Report` phases/heartbeats never reset it. Before the first evidence, the monitor bounds waiting without claiming remote computation is healthy. No response payload is retained by monitoring. Go's `testing/synctest` virtual clock exercises six hours of factual activity without waiting wall-clock hours.
+
+`httpool.Transport`, `Client`, and `StreamingClient` select a separate immutable shared generation pool only when `HealthEnabled(ctx)` is true. That pool disables `ResponseHeaderTimeout` but retains TCP/TLS establishment safeguards; unmonitored auth/discovery keep their previous header timeout. Explicit `Client(timeout)` limits still apply. Custom clients/transports not using httpool require their own byte observation; decoded Responses events remain observable, but opaque quiet bodies do not prove health.
+
+A monitored OpenAI Responses call internally requests SSE even when ADK requests nonstreaming delivery. Buffered mode emits no partial text, reasoning, or tool arguments and yields only the validated final `response.completed` content with usage. Both modes close immediately after that terminal event, not after a later EOF. Premature EOF, failed/incomplete/missing final payloads and invalid tool arguments fail closed; no uncertain request is replayed. These primitives require a per-generation caller to start/stop the monitor; they do not independently change Bot policy or legacy wrappers.
+
+## Bot per-run budget wrapper
+
+Built-in operator ceilings (`config.DefaultBotMandateConfig`) are **1,000,000 tokens per run** and **1,440,000,000 aggregate tokens**. Aggregate usage is lifetime cumulative on the Bot ledger, not daily. The top-level `bot_mandates` config is a complete-object override, not a per-field merge; explicit lower limits and zero rejection remain authoritative. New authenticated owner turns on existing Bots receive current-policy mandates, but pinned runs, resumes and schedule grants retain stored limits and cumulative usage. This raises neither provider context/output limits nor tool/runtime/action authority. See [configuration and pinned-grant compatibility](../bot-mandates.md#finite-operator-ceilings).
+
+`NewBudgetLLM(inner, budget, BudgetLLMOptions)` is a per-run decorator, never a pooled provider mutation. It reserves conservative input/output/cost before dispatch, clones request output limits and settles cumulative usage maxima (including thought/tool-prompt tokens), not the sum of repeated stream metadata. Missing/incomplete usage, cancellation or interruption retains the conservative reservation. Providers unable to enforce a reduced output allowance fail before dispatch. Parent, delegate, flow and compaction calls share the run ledger; approval continuation restores committed totals, not a new allowance.
+
+Unknown price is not zero cost. Production Bot readiness rejects `MaxModelCostMicros` until a conservative price oracle is supplied. Hidden billable retries beneath the decorator cannot be individually metered; billable retries must re-enter it. Controlled provider tests establish wrapper behavior, not external billing accuracy or every provider's output-limit enforcement. See [Phase 3 boundaries](bots.md).
+
+The default input estimator (`pkg/provider/budget_input.go`) starts with the full request JSON byte bound. After a successfully settled, completely consumed response with non-partial positive prompt usage, that **per-decorator** observation may price the identical prompt prefix again at its full observed input count. This is not a cached-token discount or a learned bytes/token ratio. SHA-256 snapshots require identical model name, request model, serialized non-history configuration (including system instructions and model-facing tool declarations), and every complete prior history message. Appended messages are charged at JSON byte length plus 64 tokens per message and 256 tokens of framing headroom. Changed/compacted history or configuration falls back to the byte bound; explicit `EstimateInput` callbacks remain authoritative and do not learn. One immutable observation is retained behind a mutex, with no prompt text copied into long-lived state. Runtime tool implementations excluded by ADK JSON are not model input.
+
+This assumes the same effective provider's prompt accounting is stable for an identical serialized prefix; it does not establish tokenizer-exact bounds for arbitrary provider-side transformations or hidden same-name model changes. Remote/cached/media requests still require a model-aware estimator, and cold or changed large prompts can still conservatively fail admission. Finite run/mandate token limits, output clamping, actual-usage settlement, unknown-cost rejection and overrun blocking are unchanged. Tests cover the observed 80,920 reservation → 33,018 settlement shape followed by an append-only continuation under the same 100,000-token limit, plus invalidation and concurrent accounting. This is controlled regression evidence, not a live schedule acceptance claim.
+
+## Serial generation for Bot checkpoints
+
+`botApprovalCaptureModel` clones each parent-turn request and sets the typed
+`common.ParallelToolCallsOption` boolean to `false` using ADK's existing
+`GenerateContentConfig.HTTPOptions.ExtraBody` extension carrier. ADK v1.9.0 /
+GenAI v1.76.0 has no native parallel-call configuration field. The shared OpenAI
+adapter explicitly reads this one boolean and emits `parallel_tool_calls: false`
+on both Chat Completions and Responses requests when function tools are present,
+including LiteLLM and positively detected compatible Responses routes. It does
+not enable arbitrary ExtraBody forwarding. Absent values retain provider defaults;
+malformed explicit values fail before HTTP dispatch. Explicit `true` remains
+available to non-checkpoint callers, but checkpoint capture overrides it locally.
+Tool-less requests omit the parameter.
+
+Direct Anthropic's separate request builder and the Bedrock protocol converter
+used by SAP AI Core Claude translate the same explicit boolean to native
+`tool_choice: {"type":"auto", "disable_parallel_tool_use": !parallelToolCalls}`.
+The optional object is emitted only when converted function tools are nonempty;
+explicit `true` emits `disable_parallel_tool_use: false`, while absent options
+leave native defaults untouched. `auto` permits a final answer without forcing a
+tool call. Both builders reject malformed options before HTTP dispatch and do not
+forward arbitrary ExtraBody fields or the top-level OpenAI parameter. SAP uses
+this payload on `/invoke` and `/invoke-with-response-stream`; direct Anthropic
+uses `/v1/messages`. This is SAP-native coverage, not a claim of a separate direct
+AWS Bedrock runtime adapter.
+
+This is per request, not a pooled model setting. Budget clamping, swappable models
+and tool canonicalization preserve it. Ordinary Chat, auxiliary Bot calls and
+provider factory/cache identities are unchanged. Native Google only strips the
+OpenAI-only extension before GenAI dispatch to avoid an unsupported native field;
+it does not translate it into native serial enforcement. The Vertex converter
+still does not forward it. Serial-generation support is not established for
+Google/Vertex. All retain the checkpoint's complete-response batch rejection
+before execution. Servers that reject the option fail normally; there is no retry
+that removes the constraint. Servers that ignore it cannot bypass batch rejection.
+
+`TestBotApprovalCaptureSerialProviderWire` exercises actual serialized requests
+through capture → budget → swappable model → OpenAI/LiteLLM/compatible adapters →
+a loopback HTTP fixture, including compatible Responses discovery. It asserts
+single-action identity, rejects malicious multi-action replies with no forwarded
+response, proves pending checkpoints make no further request, and reuses the same
+provider with ordinary Chat to prove no setting leak. `TestParallelToolCallsWire`
+covers streaming/non-streaming, both endpoints, absent/true/false/malformed options
+and tool-less requests. `TestConvertRequestParallelToolCalls` and
+`TestToAnthropicRequestParallelToolCalls` cover native conversion, explicit option
+validation, source immutability and unchanged non-option fields.
+`TestSAPAnthropicParallelToolCallsWire` and `TestAnthropicParallelToolCallsWire`
+exercise actual loopback HTTP requests in streaming and non-streaming modes,
+including ordinary-request reuse and rejection before HTTP for malformed values.
+These are controlled tests, not external provider or live employee-journey acceptance.
+
 ## Key Design Decisions
 
 ### Why a Factory Pattern
@@ -28,7 +121,7 @@ For SAP AI Core, authoritative capacity comes from the authenticated `GET /v2/lm
 
 Successful catalog maps, including empty maps, and deployment metadata lists use one-hour connection-scoped caches. Connection identity includes normalized base/auth URLs, client ID, client secret and effective resource group in a SHA-256 fingerprint; secret inputs are not logged. Failed catalog requests are not cached, and SAP context resolution bypasses the generic indefinite provider-name/model cache, so credential rotation, overrides and outage recovery are not stranded there. Local Code mode retains environment fallback; confined platform contexts refuse operator environment credentials.
 
-SAP deployment listing and deployment-ID resolution bound both success and error response bodies to 8 MiB, rejecting oversized responses before JSON decoding or diagnostic formatting. The limit does not change the running-deployment-only discovery contract.
+SAP deployment listing and deployment-ID resolution bound both success and error response bodies to 8 MiB, rejecting oversized responses before JSON decoding or diagnostic formatting. The limit does not change the running-deployment-only discovery contract. A provider instance uses the same request-local `sapTransport` for deployment discovery and inference, retaining discovery's valid OAuth token rather than introducing a redundant token exchange before the first generation. Expiration and 401 invalidation still use the existing refresh path; no token cache is shared between provider configurations. `TestProviderReusesDiscoveryTokenForInference` verifies inference succeeds when a redundant exchange would fail.
 
 The platform model metadata response overlays catalog capacity onto **running deployments only**: undeployed catalog models are never added. Catalog failure preserves deployment discovery and static fallback. Independently learned maximum-output and tool-support limits remain intact; capacity enrichment does not alter generation defaults. Existing Studio and terminal formatting display 1,100,000 as `1.1M` without new UI or transport fields.
 

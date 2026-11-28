@@ -117,6 +117,8 @@ type OrgDataStore interface {
 
 // TeamDataStore accesses a specific team's data.
 type TeamDataStore interface {
+	BotTemplates() BotTemplateStore
+	Bots() BotStore
 	Sessions() SessionStore
 	Memories() MemoryStore
 	Credentials() CredentialStore
@@ -149,6 +151,7 @@ type TeamDataStore interface {
 
 // PersonalDataStore accesses a user's private data.
 type PersonalDataStore interface {
+	Bots() BotStore
 	Memories() MemoryStore
 	Apps() AppStore
 	Sessions() SessionStore

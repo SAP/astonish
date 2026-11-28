@@ -282,8 +282,9 @@ func (c *IMAPSMTPClient) ReadMessage(ctx context.Context, id string) (*Message, 
 
 	uidSet := imap.UIDSetNum(imap.UID(uid))
 
-	// Request full body section
-	bodySection := &imap.FetchItemBodySection{}
+	// BODY.PEEK preserves unread state for request-scoped read-only clients.
+	// DefaultConfig keeps the historical mark-read behavior for channel clients.
+	bodySection := &imap.FetchItemBodySection{Peek: !c.cfg.MarkRead}
 
 	fetchOpts := &imap.FetchOptions{
 		Envelope:    true,

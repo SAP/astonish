@@ -8,6 +8,8 @@ import (
 )
 
 type PlatformRestoreOptions struct {
+	FileBackend         func(context.Context) (BotRestoreBackend, error)
+	fileFirst           *fileFirstRestoreState
 	DryRun              bool
 	ResetTarget         bool
 	EnableScheduledJobs bool
@@ -16,11 +18,19 @@ type PlatformRestoreOptions struct {
 	MapOrg              map[string]string
 	MapTeam             map[string]string
 	MapUser             map[string]string
+	// interruptAfterFiles is same-package fault injection. Production restores leave it false.
+	interruptAfterFiles bool
 }
 
 func (s *Store) PlanPlatformRestore(ctx context.Context, archivePath string, opts PlatformRestoreOptions) (*backup.RestorePlan, error) {
 	summary, err := backup.Verify(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase})
 	if err != nil {
+		return nil, err
+	}
+	if err := verifyFileFirstPlatform(ctx, archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase}, summary); err != nil {
+		return nil, err
+	}
+	if err := validateBotWorkspaceArchiveEntries(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase}, summary); err != nil {
 		return nil, err
 	}
 	plan := backup.RestorePlan{
@@ -42,6 +52,22 @@ func (s *Store) PlanPlatformRestore(ctx context.Context, archivePath string, opt
 		return nil, err
 	}
 	plan.TargetEmpty = empty
+	if hasFileFirstArchive(summary.Manifest) {
+		if opts.FileBackend == nil {
+			plan.Blockers = append(plan.Blockers, "file-first restore requires a journaled fresh-Home backend")
+		}
+		if s.dialect == DialectPostgres {
+			if err := s.preflightFileFirstPostgres(ctx, summary.Manifest, opts); err != nil {
+				plan.Blockers = append(plan.Blockers, err.Error())
+			}
+		}
+		if !empty || opts.ResetTarget {
+			plan.Blockers = append(plan.Blockers, "file-first restore requires a fresh empty target; reset-target is not supported")
+		}
+		if err := validateFileFirstMappingKeys(summary.Manifest.Scopes, opts); err != nil {
+			plan.Blockers = append(plan.Blockers, err.Error())
+		}
+	}
 	if !empty && !opts.ResetTarget {
 		plan.Blockers = append(plan.Blockers, "target contains existing platform data; restore requires an empty target or --reset-target")
 	}
@@ -106,6 +132,9 @@ func (s *Store) RestorePlatformBackup(ctx context.Context, archivePath string, o
 	if opts.DryRun {
 		return &backup.RestoreResult{Plan: *plan, Warnings: plan.Warnings}, nil
 	}
+	if hasFileFirstArchive(plan.Archive.Manifest) {
+		return s.restoreFileFirstBackup(ctx, archivePath, opts)
+	}
 	if opts.ResetTarget {
 		if s.dialect != DialectSQLite {
 			return nil, fmt.Errorf("reset-target restore for %s targets is not implemented yet", s.dialect)
@@ -122,11 +151,24 @@ func (s *Store) RestorePlatformBackup(ctx context.Context, archivePath string, o
 }
 
 func restoreActionForEntry(entry backup.Entry, opts PlatformRestoreOptions) (string, string) {
+	if entry.Entity == fileFirstScopeEntity || entry.Entity == fileFirstHomeEntity || entry.Entity == fileFirstContentEntity {
+		return "skip", "installed and verified by file-first Home restore before SQL selection"
+	}
+	if entry.Entity == botWorkspaceArchiveEntity {
+		return "skip", "workspace files require explicit authorized fresh-Home recovery"
+	}
+	switch entry.Entity {
+	case "bots", "bot_runs", "bot_approvals", "bot_outbox":
+		return "restore_quiesced", "Bot execution authority is invalidated; undelivered work requires reconciliation"
+	}
 	if isTransientRestoreEntity(entry.Entity) && !opts.IncludeTransient {
 		return "skip", "transient runtime or security state is skipped by default"
 	}
-	if entry.Entity == "scheduled_jobs" && !opts.EnableScheduledJobs {
-		return "restore_disabled", "scheduled jobs are restored paused by default"
+	if entry.Entity == "scheduled_jobs" {
+		if !opts.EnableScheduledJobs {
+			return "restore_disabled", "scheduled jobs are restored paused by default"
+		}
+		return "restore", "ordinary jobs may be enabled; Bot-owned jobs always restore paused"
 	}
 	return "restore", ""
 }

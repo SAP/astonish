@@ -4,7 +4,43 @@
 
 Astonish provides 60+ built-in tools that give the AI agent the ability to interact with the filesystem, execute commands, manage processes, make HTTP requests, control a browser, send emails, and more. Tools follow a consistent architecture based on Google ADK's tool interface, with a key innovation: most tools execute inside sandbox containers via a transparent proxy layer.
 
+## Bot dispatch boundary
+
+`launcher.NewBotChatAgentFactory` uses `newBotScopedChatRuntime` →
+`NewScopedChatRuntime` for production ordinary Chat capabilities. The shared
+constructor builds the configured catalog, discovery, children, plans, flows and
+drills; Bot injects owner/run binding, authorization/accounting and scoped
+memory/scheduling/publication hooks. `BotCatalogueTools` is a retained helper path,
+not a second production assembly recipe. `botBoundTool` remains the Bot dispatch
+authority: owner scope, live lease/isolation, exact action policy and shared budget
+precede execution in native and progressive views. Sandbox calls pin the run
+session, never a delegate/viewer sandbox or host fallback. HTTP/MCP credentials
+remain scoped and symbolic until authorized node execution.
+
+The production shared factory pins the concrete catalog `web_fetch` NodeTool and
+decorates its ready transport through `RunWithTransport` with the first-party
+`_bot_public_fetch` adapter. Failed HTTP reads can supply exact server-only source-read
+receipts after execution, not name-based safety exemptions or JSON-created authority.
+Node readiness/network provisioning, cancellation, policy and accounting are not
+bypassed. See [canonical construction](bot-production-adapters.md#canonical-construction-and-repair-boundary).
+
+Metadata enumeration requires `BotMetadataOnlyToolset.BotMetadataOnly()`.
+Sanitizing/filtering/shared runtime wrappers forward the underlying attestation;
+only genuinely metadata-only lazy declarations can be enumerated without process
+or credential startup. Wrapped executable identity and all dispatch checks survive
+core-only child selection, discovery and filtering.
+
+Bot runs now have working scoped `memory_save/search/get/delete`, `announce_plan`, `update_plan`, `announce_completion` and `read_task_result` adapters. Memory reads prefilter to the Bot's sessions; mutations require the current run lease and protect prior-run evidence. Plans persist in session state and project `PLAN.md` through the bound sandbox tool; verify commands pass through guarded `shell_command`, not a daemon-host verifier. Delegated results are request-local. The production classifier recognizes constrained memory save/delete and read effects for memory retrieval, plan bookkeeping, result retrieval, `filter_json` and `git_diff_add_line_numbers`; other tools remain unknown unless a trusted classifier proves their constraints. Discoverability is neither implementation nor permission, and plan authorization never authorizes its verification command's effects.
+
+Trusted result evidence uses a per-attempt server-side ledger, not model prose or remote result JSON. ChatRunner consumes observations by actual function-call ID, validates captured report artifact bytes/path/digest and home ownership, and preserves unverified effects explicitly. Scoped Bot notifications require live destination authority immediately before transport: only the owner's enabled, verified private Telegram link is currently supported; Slack rooms fail closed because member/workspace linkage does not prove room authority. See [runtime evidence and notification limits](bots.md#trusted-runtime-evidence) and [exact unsupported tools and fixture limits](bot-production-adapters.md). Ordinary Chat's catalogue is unchanged. The named two-run runtime acceptance and latest main-thread six-package suite passed; final full Phase 3 verification, real sandbox/provider coverage and full Bot Studio/terminal acceptance remain pending.
+
 ## Key Design Decisions
+
+### Bot target and credential snapshot binding
+
+Invocation-local handoffs retain the full classified action digest and are consumed once. Bound and lazy MCP terminal boundaries reclassify the approved credential references (not resolved secrets) and reject changed targets, recipients or effects without consuming the durable grant twice. Email additionally compares the executable adapter's trusted account fingerprint with the approved target; no model-supplied fingerprint supplies authority. After credential-vault provisioning, email checks the current account, cancellation, live lease and isolation again immediately before the node call.
+
+Drill credential injection resolves one static owner-scoped credential snapshot and includes its process-keyed HMAC reference, suite mapping and pinned sandbox in the exact approval. Materialization uses that same snapshot without a credential-store refresh. Rotation before retry requires a new matching approval; rotation after authorization cannot substitute the approved bytes. Pending approval records contain only the opaque keyed reference, never resolved credentials or an unkeyed password hash. Process restart invalidates these payload approvals (a fresh key requires fresh approval); unsupported dynamic fields and environment injection fail closed.
 
 ### Why the ADK FunctionTool Pattern
 

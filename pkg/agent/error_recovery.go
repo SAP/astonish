@@ -74,8 +74,11 @@ func (e *ErrorRecoveryNode) Decide(ctx context.Context, errCtx ErrorContext) (*R
 
 	// Call LLM using GenerateContent (streaming interface)
 	var responseText string
-	for resp, err := range e.LLM.GenerateContent(ctx, req, false) {
+	for resp, err := range auxiliaryLLM(ctx, e.LLM).GenerateContent(ctx, req, false) {
 		if err != nil {
+			if isBotModelContext(ctx) {
+				return nil, fmt.Errorf("Bot error recovery unavailable: %w", err)
+			}
 			slog.Debug("error recovery LLM call failed", "component", "error-recovery", "error", err)
 			// Fallback to simple heuristic
 			return e.fallbackDecision(errCtx), nil

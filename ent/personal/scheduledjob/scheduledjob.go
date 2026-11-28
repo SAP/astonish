@@ -104,9 +104,10 @@ const DefaultMode = ModeRoutine
 
 // Mode values.
 const (
-	ModeRoutine   Mode = "routine"
-	ModeAdaptive  Mode = "adaptive"
-	ModeFleetPoll Mode = "fleet_poll"
+	ModeRoutine    Mode = "routine"
+	ModeAdaptive   Mode = "adaptive"
+	ModeFleetPoll  Mode = "fleet_poll"
+	ModeBotTrigger Mode = "bot_trigger"
 )
 
 func (m Mode) String() string {
@@ -116,7 +117,7 @@ func (m Mode) String() string {
 // ModeValidator is a validator for the "mode" field enum values. It is called by the builders before save.
 func ModeValidator(m Mode) error {
 	switch m {
-	case ModeRoutine, ModeAdaptive, ModeFleetPoll:
+	case ModeRoutine, ModeAdaptive, ModeFleetPoll, ModeBotTrigger:
 		return nil
 	default:
 		return fmt.Errorf("scheduledjob: invalid enum value for mode field: %q", m)

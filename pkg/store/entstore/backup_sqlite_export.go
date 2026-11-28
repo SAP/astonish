@@ -29,6 +29,8 @@ func (s *Store) ExportSQLiteLogicalBackup(ctx context.Context, archivePath strin
 		return fmt.Errorf("sqlite logical backup requires sqlite backend, got %s", s.dialect)
 	}
 	manifest := backup.NewManifest("sqlite", backupModeLogical, []backup.Scope{{Kind: "platform"}})
+	opts.contentDirectory = filepath.Join(s.dataDir, "bot-content")
+	opts.spoolDirectory = filepath.Dir(archivePath)
 	manifest.Features = append(manifest.Features, "sqlite-logical-row-export")
 	if opts.RedactSecrets {
 		manifest.Features = append(manifest.Features, "redacted-secrets")
@@ -152,8 +154,28 @@ func exportSQLiteDBRows(ctx context.Context, writer *backup.Writer, manifest *ba
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	begin := "BEGIN"
+	fileFirst := opts.FileBackend != nil && (dbInfo.Scope.Kind == "personal" || dbInfo.Scope.Kind == "team")
+	if fileFirst {
+		begin = "BEGIN IMMEDIATE"
+	}
+	// An IMMEDIATE transaction excludes every other process's SQL writes, even
+	// new Bot/template/intake rows. All readers use this exact pinned connection.
+	if _, err := conn.ExecContext(ctx, begin); err != nil {
+		return fmt.Errorf("begin %s snapshot: %w", dbInfo.Description, err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
+	if fileFirst {
+		opts.fileInventory = newFileFirstSQLInventory(dbInfo.Scope)
+		ctx = context.WithValue(ctx, fileFirstInventoryKey{}, opts.fileInventory)
+	}
 	return exportLogicalDBRows(ctx, writer, manifest, logicalDB{
-		DB:          db,
+		DB:          conn,
 		Dialect:     DialectSQLite,
 		ArchiveDir:  dbInfo.ArchiveDir,
 		Scope:       dbInfo.Scope,
@@ -162,7 +184,7 @@ func exportSQLiteDBRows(ctx context.Context, writer *backup.Writer, manifest *ba
 	}, opts)
 }
 
-func sqliteUserTables(ctx context.Context, db *sql.DB) ([]string, error) {
+func sqliteUserTables(ctx context.Context, db backupSQLQuery) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%' AND name NOT LIKE '%_fts_%' ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -182,7 +204,7 @@ func sqliteUserTables(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tables, rows.Err()
 }
 
-func sqliteTableColumns(ctx context.Context, db *sql.DB, table string) ([]string, error) {
+func sqliteTableColumns(ctx context.Context, db backupSQLQuery, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quoteSQLiteIdent(table)+")")
 	if err != nil {
 		return nil, err

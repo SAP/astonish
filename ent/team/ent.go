@@ -15,6 +15,21 @@ import (
 	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
+	"github.com/SAP/astonish/ent/team/bot"
+	"github.com/SAP/astonish/ent/team/botapproval"
+	"github.com/SAP/astonish/ent/team/botgoal"
+	"github.com/SAP/astonish/ent/team/botintake"
+	"github.com/SAP/astonish/ent/team/botknowledgeextraction"
+	"github.com/SAP/astonish/ent/team/botknowledgefilehead"
+	"github.com/SAP/astonish/ent/team/botoutbox"
+	"github.com/SAP/astonish/ent/team/botrun"
+	"github.com/SAP/astonish/ent/team/botskill"
+	"github.com/SAP/astonish/ent/team/botskillrevision"
+	"github.com/SAP/astonish/ent/team/bottask"
+	"github.com/SAP/astonish/ent/team/bottaskrevision"
+	"github.com/SAP/astonish/ent/team/bottemplate"
+	"github.com/SAP/astonish/ent/team/bottrackeditem"
+	"github.com/SAP/astonish/ent/team/botversion"
 	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
@@ -102,36 +117,51 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
-			a2aagent.Table:            a2aagent.ValidColumn,
-			app.Table:                 app.ValidColumn,
-			appstate.Table:            appstate.ValidColumn,
-			cachediagnostic.Table:     cachediagnostic.ValidColumn,
-			chatsessionevent.Table:    chatsessionevent.ValidColumn,
-			credential.Table:          credential.ValidColumn,
-			deck.Table:                deck.ValidColumn,
-			deckversion.Table:         deckversion.ValidColumn,
-			drillreport.Table:         drillreport.ValidColumn,
-			fleetmailboxmessage.Table: fleetmailboxmessage.ValidColumn,
-			fleetmonitorstate.Table:   fleetmonitorstate.ValidColumn,
-			fleetplan.Table:           fleetplan.ValidColumn,
-			fleetrunstate.Table:       fleetrunstate.ValidColumn,
-			fleetsetupdraft.Table:     fleetsetupdraft.ValidColumn,
-			fleetsetupprofile.Table:   fleetsetupprofile.ValidColumn,
-			fleettask.Table:           fleettask.ValidColumn,
-			fleettemplate.Table:       fleettemplate.ValidColumn,
-			flow.Table:                flow.ValidColumn,
-			mcpserver.Table:           mcpserver.ValidColumn,
-			memory.Table:              memory.ValidColumn,
-			networkpolicy.Table:       networkpolicy.ValidColumn,
-			sandboxsession.Table:      sandboxsession.ValidColumn,
-			scheduledjob.Table:        scheduledjob.ValidColumn,
-			session.Table:             session.ValidColumn,
-			sessionevent.Table:        sessionevent.ValidColumn,
-			setting.Table:             setting.ValidColumn,
-			skill.Table:               skill.ValidColumn,
-			skillfile.Table:           skillfile.ValidColumn,
-			slide.Table:               slide.ValidColumn,
-			teamauditlog.Table:        teamauditlog.ValidColumn,
+			a2aagent.Table:               a2aagent.ValidColumn,
+			app.Table:                    app.ValidColumn,
+			appstate.Table:               appstate.ValidColumn,
+			bot.Table:                    bot.ValidColumn,
+			botapproval.Table:            botapproval.ValidColumn,
+			botgoal.Table:                botgoal.ValidColumn,
+			botintake.Table:              botintake.ValidColumn,
+			botknowledgeextraction.Table: botknowledgeextraction.ValidColumn,
+			botknowledgefilehead.Table:   botknowledgefilehead.ValidColumn,
+			botoutbox.Table:              botoutbox.ValidColumn,
+			botrun.Table:                 botrun.ValidColumn,
+			botskill.Table:               botskill.ValidColumn,
+			botskillrevision.Table:       botskillrevision.ValidColumn,
+			bottask.Table:                bottask.ValidColumn,
+			bottaskrevision.Table:        bottaskrevision.ValidColumn,
+			bottemplate.Table:            bottemplate.ValidColumn,
+			bottrackeditem.Table:         bottrackeditem.ValidColumn,
+			botversion.Table:             botversion.ValidColumn,
+			cachediagnostic.Table:        cachediagnostic.ValidColumn,
+			chatsessionevent.Table:       chatsessionevent.ValidColumn,
+			credential.Table:             credential.ValidColumn,
+			deck.Table:                   deck.ValidColumn,
+			deckversion.Table:            deckversion.ValidColumn,
+			drillreport.Table:            drillreport.ValidColumn,
+			fleetmailboxmessage.Table:    fleetmailboxmessage.ValidColumn,
+			fleetmonitorstate.Table:      fleetmonitorstate.ValidColumn,
+			fleetplan.Table:              fleetplan.ValidColumn,
+			fleetrunstate.Table:          fleetrunstate.ValidColumn,
+			fleetsetupdraft.Table:        fleetsetupdraft.ValidColumn,
+			fleetsetupprofile.Table:      fleetsetupprofile.ValidColumn,
+			fleettask.Table:              fleettask.ValidColumn,
+			fleettemplate.Table:          fleettemplate.ValidColumn,
+			flow.Table:                   flow.ValidColumn,
+			mcpserver.Table:              mcpserver.ValidColumn,
+			memory.Table:                 memory.ValidColumn,
+			networkpolicy.Table:          networkpolicy.ValidColumn,
+			sandboxsession.Table:         sandboxsession.ValidColumn,
+			scheduledjob.Table:           scheduledjob.ValidColumn,
+			session.Table:                session.ValidColumn,
+			sessionevent.Table:           sessionevent.ValidColumn,
+			setting.Table:                setting.ValidColumn,
+			skill.Table:                  skill.ValidColumn,
+			skillfile.Table:              skillfile.ValidColumn,
+			slide.Table:                  slide.ValidColumn,
+			teamauditlog.Table:           teamauditlog.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

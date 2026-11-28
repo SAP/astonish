@@ -35,7 +35,7 @@ func (CapabilityAuthorizer) Authorize(principal Principal, capability Capability
 	if principal.Kind == PrincipalKindService && (capability == CapabilityMemoryRead || capability == CapabilityMemoryWrite) {
 		return fmt.Errorf("service principals cannot access personal memory")
 	}
-	if principal.Authentication == AuthMethodOAuth && !principal.HasScope(string(capability)) {
+	if (principal.Authentication == AuthMethodOAuth || principal.Authentication == AuthMethodBotMandate) && !principal.HasScope(string(capability)) {
 		return fmt.Errorf("principal lacks required scope %q", capability)
 	}
 	return nil

@@ -7,6 +7,7 @@ import (
 	"github.com/SAP/astonish/pkg/browser"
 	adrill "github.com/SAP/astonish/pkg/drill"
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -87,8 +88,24 @@ func executeInjectDrillCredentials(ctx tool.Context, deps *runDrillDeps, args In
 	suiteName = strings.TrimSuffix(suiteName, ".yaml")
 	suiteName = strings.TrimSuffix(suiteName, ".yml")
 
-	fs := getDrillFlowStore(ctx)
+	scoped := false
+	if ctx != nil {
+		_, present := ctx.Value(drillExecutionContextKey{}).(scopedDrillExecution)
+		scoped = present || requiresScopedFlowDrillExecution(ctx)
+	}
+	var fs store.FlowStore
+	if scoped {
+		if err := ctx.Err(); err != nil {
+			return InjectDrillCredentialsResult{}, err
+		}
+		fs = store.TeamFlowStoreFromContext(ctx)
+	} else {
+		fs = getDrillFlowStore(ctx)
+	}
 	if fs == nil {
+		if scoped {
+			return InjectDrillCredentialsResult{}, fmt.Errorf("%w: scoped drill store is unavailable; filesystem fallback disabled", store.ErrBotUnsupported)
+		}
 		return InjectDrillCredentialsResult{
 			Status:  "error",
 			Message: "Drill credential injection requires platform mode (team-scoped store not available)",
@@ -97,13 +114,24 @@ func executeInjectDrillCredentials(ctx tool.Context, deps *runDrillDeps, args In
 
 	suite, err := adrill.LoadSuiteFromStore(fs, ctx, suiteName)
 	if err != nil {
+		if scoped {
+			return InjectDrillCredentialsResult{}, fmt.Errorf("drill load: %w", err)
+		}
 		return InjectDrillCredentialsResult{
 			Status:  "error",
 			Message: fmt.Sprintf("Suite %q not found: %v", suiteName, err),
 		}, nil
 	}
 
+	if scoped {
+		if err := adrill.ValidateSuite(suite); err != nil {
+			return InjectDrillCredentialsResult{}, fmt.Errorf("drill validation: %w", err)
+		}
+	}
 	if err := injectDrillCredentials(ctx, deps, suiteName, suite); err != nil {
+		if scoped {
+			return InjectDrillCredentialsResult{}, err
+		}
 		return InjectDrillCredentialsResult{
 			Status:  "error",
 			Message: fmt.Sprintf("credential injection failed: %v", err),
@@ -112,6 +140,9 @@ func executeInjectDrillCredentials(ctx tool.Context, deps *runDrillDeps, args In
 
 	sc := suite.Config.SuiteConfig
 	if !adrill.SuiteDeclaresCredentials(sc) {
+		if scoped {
+			return InjectDrillCredentialsResult{Status: "skipped", Message: fmt.Sprintf("Suite %q has no credential injection declared; no credentials were written.", suiteName)}, nil
+		}
 		return InjectDrillCredentialsResult{
 			Status:  "skipped",
 			Message: fmt.Sprintf("Suite %q has no credentials/credential_injection declared (fleet-plan fallback applied if present). Safe to start services.", suiteName),

@@ -26,6 +26,7 @@ import (
 // personalSessionStore implements store.SessionStore for personal scope.
 type personalSessionStore struct {
 	client             *personalent.Client
+	content            *botContentCodec
 	redactFn           func(string) string
 	cacheDiagnosticsMu sync.Mutex
 }
@@ -151,6 +152,30 @@ func (ss *personalSessionStore) Create(ctx context.Context, req *adksession.Crea
 		meta["state"] = state
 	}
 
+	var parent *personalent.Session
+	if parentID != nil {
+		var err error
+		parent, err = ss.client.Session.Get(ctx, *parentID)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := ss.sessionContentBinding(ctx, *parentID); err != nil {
+			return nil, err
+		}
+		if parent.BotID != nil {
+			if req.UserID != "" && req.UserID != uuidPtrToStr(parent.UserID) {
+				return nil, store.ErrBotForbidden
+			}
+			delete(meta, "state")
+			initial := &adksession.Event{ID: "initial-state", Actions: adksession.EventActions{StateDelta: state}}
+			data, err := ss.contentCodec().encodeSessionEvent(ctx, *parent.BotID, id, initial)
+			if err != nil {
+				return nil, err
+			}
+			meta["bot_initial_state"] = data
+		}
+	}
+
 	var userID *uuid.UUID
 	if req.UserID != "" {
 		uid, err := uuid.Parse(req.UserID)
@@ -168,6 +193,9 @@ func (ss *personalSessionStore) Create(ctx context.Context, req *adksession.Crea
 		SetCreatedAt(now).
 		SetUpdatedAt(now)
 
+	if parent != nil && parent.BotID != nil {
+		create.SetNillableBotID(parent.BotID).SetNillableBotRunID(parent.BotRunID).SetPurpose(parent.Purpose).SetRetention(parent.Retention).SetNillableUserID(parent.UserID)
+	}
 	_, err := create.Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -192,19 +220,27 @@ func (ss *personalSessionStore) Get(ctx context.Context, req *adksession.GetRequ
 		return nil, fmt.Errorf("get session: %w", err)
 	}
 
-	// Load events ordered by ID.
+	// Load the same ordered event history as ordinary Chat. Apply requested
+	// history filters only after state replay, so persisted state and pending
+	// tool-call/answer correlation do not depend on an arbitrary row window.
 	events, err := ss.client.SessionEvent.Query().
 		Where(sessionevent.SessionIDEQ(req.SessionID)).
-		Order(sessionevent.ByID()).
-		All(ctx)
+		Order(sessionevent.ByID()).All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load session events: %w", err)
 	}
 
 	adkEvents := make([]*adksession.Event, 0, len(events))
 	for _, ev := range events {
-		adkEv, err := eventDataToADKEvent(ev.EventData)
+		adkEv, err := ss.decodeStoredEvent(ctx, ev.SessionID, ev.EventData)
 		if err != nil {
+			botID, bindingErr := ss.sessionContentBinding(ctx, ev.SessionID)
+			if bindingErr != nil {
+				return nil, bindingErr
+			}
+			if botID != nil {
+				return nil, err
+			}
 			continue
 		}
 		adkEvents = append(adkEvents, adkEv)
@@ -212,6 +248,23 @@ func (ss *personalSessionStore) Get(ctx context.Context, req *adksession.GetRequ
 
 	// Rebuild state from metadata + replaying state deltas.
 	state := extractState(ent.Metadata)
+	if _, err := ss.sessionContentBinding(ctx, ent.ID); err != nil {
+		return nil, err
+	}
+	if ent.BotID != nil {
+		state = make(map[string]any)
+		if raw, exists := ent.Metadata["bot_initial_state"]; exists {
+			data, ok := raw.(map[string]any)
+			if !ok {
+				return nil, store.ErrBotInvalid
+			}
+			initial, err := ss.contentCodec().decodeSessionEvent(ctx, *ent.BotID, ent.ID, data)
+			if err != nil {
+				return nil, err
+			}
+			maps.Copy(state, initial.Actions.StateDelta)
+		}
+	}
 	if state == nil {
 		state = make(map[string]any)
 	}
@@ -249,7 +302,7 @@ func (ss *personalSessionStore) Get(ctx context.Context, req *adksession.GetRequ
 
 func (ss *personalSessionStore) List(ctx context.Context, req *adksession.ListRequest) (*adksession.ListResponse, error) {
 	query := ss.client.Session.Query().
-		Where(session.ParentIDIsNil()).
+		Where(session.ParentIDIsNil(), session.BotIDIsNil(), session.BotRunIDIsNil(), session.PurposeEQ(session.PurposeChat)).
 		Order(session.ByCreatedAt(sql.OrderDesc()))
 
 	if req.UserID != "" {
@@ -282,6 +335,9 @@ func (ss *personalSessionStore) List(ctx context.Context, req *adksession.ListRe
 }
 
 func (ss *personalSessionStore) Delete(ctx context.Context, req *adksession.DeleteRequest) error {
+	if err := ss.allowOrdinarySessionDelete(ctx, req.SessionID); err != nil {
+		return err
+	}
 	_, _ = ss.client.CacheDiagnostic.Delete().
 		Where(cachediagnostic.SessionIDEQ(req.SessionID)).
 		Exec(ctx)
@@ -305,6 +361,9 @@ func (ss *personalSessionStore) AppendEvent(ctx context.Context, sess adksession
 		return nil
 	}
 
+	if err := ss.appendEventInternal(ctx, sess.ID(), event); err != nil {
+		return err
+	}
 	// Update the in-memory session so that subsequent reads (e.g.
 	// ContentsRequestProcessor) see the appended event without a DB round-trip.
 	if ps, ok := sess.(*personalSession); ok {
@@ -323,7 +382,7 @@ func (ss *personalSessionStore) AppendEvent(ctx context.Context, sess adksession
 		ps.mu.Unlock()
 	}
 
-	return ss.appendEventInternal(ctx, sess.ID(), event)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +391,7 @@ func (ss *personalSessionStore) AppendEvent(ctx context.Context, sess adksession
 
 func (ss *personalSessionStore) ListSessionMetas(ctx context.Context, appName, userID string) ([]store.SessionMeta, error) {
 	query := ss.client.Session.Query().
-		Where(session.ParentIDIsNil()).
+		Where(session.ParentIDIsNil(), session.BotIDIsNil(), session.BotRunIDIsNil(), session.PurposeEQ(session.PurposeChat)).
 		Order(session.ByUpdatedAt(sql.OrderDesc()))
 
 	if userID != "" {
@@ -367,6 +426,14 @@ func (ss *personalSessionStore) GetSessionMeta(ctx context.Context, sessionID st
 		return nil, fmt.Errorf("get session meta: %w", err)
 	}
 	m := personalEntSessionToMeta(ent)
+	// Bot Home publication paths do not all maintain the legacy counter.
+	// Count indexed rows without loading or decrypting transcript payloads.
+	if m.Purpose == store.SessionPurposeBotHome {
+		m.MessageCount, err = ss.client.SessionEvent.Query().Where(sessionevent.SessionIDEQ(sessionID)).Count(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get bot home message count: %w", err)
+		}
+	}
 	return &m, nil
 }
 
@@ -401,6 +468,9 @@ func (ss *personalSessionStore) ListChildren(ctx context.Context, parentID strin
 }
 
 func (ss *personalSessionStore) AddSessionMeta(ctx context.Context, meta store.SessionMeta) error {
+	if meta.HasBotLinkage() {
+		return store.ErrBotForbidden
+	}
 	id := meta.ID
 	if id == "" {
 		id = uuid.NewString()
@@ -454,7 +524,11 @@ func (ss *personalSessionStore) UpdateSessionMeta(ctx context.Context, sessionID
 	}
 
 	meta := personalEntSessionToMeta(ent)
+	original := meta
 	fn(&meta)
+	if meta.BotID != original.BotID || meta.BotRunID != original.BotRunID || meta.Purpose != original.Purpose || meta.Retention != original.Retention || (original.HasBotLinkage() && (meta.UserID != original.UserID || meta.ParentID != original.ParentID)) {
+		return store.ErrBotForbidden
+	}
 
 	var userID *uuid.UUID
 	if meta.UserID != "" {
@@ -485,7 +559,24 @@ func (ss *personalSessionStore) UpdateSessionMeta(ctx context.Context, sessionID
 		Exec(ctx)
 }
 
+func (ss *personalSessionStore) allowOrdinarySessionDelete(ctx context.Context, id string) error {
+	row, err := ss.client.Session.Get(ctx, id)
+	if personalent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if row.BotID != nil || row.BotRunID != nil || row.Retention == session.RetentionBot || row.Purpose != session.PurposeChat {
+		return store.ErrBotForbidden
+	}
+	return nil
+}
+
 func (ss *personalSessionStore) RemoveSessionMeta(ctx context.Context, sessionID string) error {
+	if err := ss.allowOrdinarySessionDelete(ctx, sessionID); err != nil {
+		return err
+	}
 	_, _ = ss.client.CacheDiagnostic.Delete().
 		Where(cachediagnostic.SessionIDEQ(sessionID)).
 		Exec(ctx)
@@ -512,8 +603,15 @@ func (ss *personalSessionStore) ReadTranscriptEvents(ctx context.Context, _, _, 
 
 	adkEvents := make([]*adksession.Event, 0, len(events))
 	for _, ev := range events {
-		adkEv, err := eventDataToADKEvent(ev.EventData)
+		adkEv, err := ss.decodeStoredEvent(ctx, ev.SessionID, ev.EventData)
 		if err != nil {
+			botID, bindingErr := ss.sessionContentBinding(ctx, ev.SessionID)
+			if bindingErr != nil {
+				return nil, bindingErr
+			}
+			if botID != nil {
+				return nil, err
+			}
 			continue
 		}
 		adkEvents = append(adkEvents, adkEv)
@@ -653,7 +751,7 @@ func (ss *personalSessionStore) AllSessionIDsStrict(ctx context.Context) (map[st
 func (ss *personalSessionStore) CleanupExpiredSessions(ctx context.Context, maxAgeDays int) []string {
 	cutoff := time.Now().UTC().AddDate(0, 0, -maxAgeDays)
 	ents, err := ss.client.Session.Query().
-		Where(session.CreatedAtLT(cutoff)).
+		Where(session.CreatedAtLT(cutoff), session.RetentionEQ(session.RetentionStandard), session.PurposeEQ(session.PurposeChat), session.BotIDIsNil(), session.BotRunIDIsNil()).
 		Select(session.FieldID).
 		All(ctx)
 	if err != nil {
@@ -689,18 +787,43 @@ func (ss *personalSessionStore) RedactSession(ctx context.Context, _, _, session
 	}
 
 	for _, ev := range events {
-		raw, err := json.Marshal(ev.EventData)
+		botID, err := ss.sessionContentBinding(ctx, sessionID)
 		if err != nil {
+			return err
+		}
+		if botID == nil {
+			raw, err := json.Marshal(ev.EventData)
+			if err != nil {
+				continue
+			}
+			var data map[string]any
+			if err := json.Unmarshal([]byte(ss.redactFn(string(raw))), &data); err != nil {
+				continue
+			}
+			_ = ss.client.SessionEvent.UpdateOneID(ev.ID).SetEventData(data).Exec(ctx)
 			continue
 		}
-		redacted := ss.redactFn(string(raw))
-		var newData map[string]interface{}
-		if err := json.Unmarshal([]byte(redacted), &newData); err != nil {
-			continue
+		event, err := ss.decodeStoredEvent(ctx, sessionID, ev.EventData)
+		if err != nil {
+			return err
 		}
-		_ = ss.client.SessionEvent.UpdateOneID(ev.ID).
-			SetEventData(newData).
-			Exec(ctx)
+		raw, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		var redacted adksession.Event
+		if err := json.Unmarshal([]byte(ss.redactFn(string(raw))), &redacted); err != nil {
+			return err
+		}
+		// Identity is metadata, never editable content.
+		redacted.ID = event.ID
+		newData, err := ss.encodeStoredEvent(ctx, sessionID, &redacted)
+		if err != nil {
+			return err
+		}
+		if err := ss.client.SessionEvent.UpdateOneID(ev.ID).SetEventData(newData).Exec(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -713,14 +836,79 @@ func (ss *personalSessionStore) SetRedactFunc(fn func(string) string) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// sessionContentBinding reads the persisted linkage; caller state cannot choose inline storage.
+func (ss *personalSessionStore) sessionContentBinding(ctx context.Context, id string) (*uuid.UUID, error) {
+	row, err := ss.client.Session.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if row.BotID == nil && (row.BotRunID != nil || row.Retention == session.RetentionBot || row.Purpose != session.PurposeChat) {
+		return nil, store.ErrBotInvalid
+	}
+	if row.BotID != nil {
+		if _, ok := row.Metadata["state"]; ok {
+			return nil, errBotDevelopmentContentFormat
+		}
+	}
+	return row.BotID, nil
+}
+
+func (ss *personalSessionStore) contentCodec() *botContentCodec {
+	return (personalBotDB{client: ss.client, content: ss.content}).contentCodec()
+}
+
+func (ss *personalSessionStore) decodeStoredEvent(ctx context.Context, id string, data map[string]any) (*adksession.Event, error) {
+	botID, err := ss.sessionContentBinding(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if botID != nil {
+		return ss.contentCodec().decodeSessionEvent(ctx, *botID, id, data)
+	}
+	return eventDataToADKEvent(data)
+}
+
+func (ss *personalSessionStore) encodeStoredEvent(ctx context.Context, id string, event *adksession.Event) (map[string]any, error) {
+	botID, err := ss.sessionContentBinding(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if botID != nil {
+		return ss.contentCodec().encodeSessionEvent(ctx, *botID, id, event)
+	}
+	return adkEventToMap(event)
+}
+
 func (ss *personalSessionStore) appendEventInternal(ctx context.Context, sessionID string, event *adksession.Event) error {
-	eventData, err := adkEventToMap(event)
+	botID, err := ss.sessionContentBinding(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if botID != nil {
+		if ss.content == nil {
+			return store.ErrBotUnsupported
+		}
+		exists, err := ss.client.SessionEvent.Query().Where(sessionevent.SessionIDEQ(sessionID), sessionevent.EventIDEQ(event.ID)).Exist(ctx)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+	}
+	eventData, err := ss.encodeStoredEvent(ctx, sessionID, event)
 	if err != nil {
 		return fmt.Errorf("serialize event: %w", err)
 	}
 
 	_, err = ss.client.SessionEvent.Create().
 		SetSessionID(sessionID).
+		SetNillableEventID(func() *string {
+			if botID != nil {
+				return &event.ID
+			}
+			return nil
+		}()).
 		SetEventData(eventData).
 		Save(ctx)
 	if err != nil {
@@ -750,6 +938,18 @@ func personalEntSessionToMeta(e *personalent.Session) store.SessionMeta {
 		IssueNumber:  e.IssueNumber,
 		Repo:         e.Repo,
 		WorkspaceDir: e.WorkspaceDir,
+	}
+	if e.BotID != nil {
+		m.BotID = e.BotID.String()
+	}
+	if e.BotRunID != nil {
+		m.BotRunID = e.BotRunID.String()
+	}
+	if e.Purpose != session.PurposeChat {
+		m.Purpose = store.SessionPurpose(e.Purpose)
+	}
+	if e.Retention != session.RetentionStandard {
+		m.Retention = store.SessionRetention(e.Retention)
 	}
 	if e.UserID != nil {
 		m.UserID = e.UserID.String()

@@ -65,10 +65,7 @@ func NewFlowDistiller(
 	return &FlowDistiller{
 		LLM: func(ctx context.Context, prompt string) (string, error) {
 			// Prefer per-request LLM override (team-specific model) over factory default.
-			effectiveLLM := LLMFromContext(ctx)
-			if effectiveLLM == nil {
-				effectiveLLM = llm
-			}
+			effectiveLLM := auxiliaryLLM(ctx, llm)
 
 			req := &model.LLMRequest{
 				Contents: []*genai.Content{
@@ -122,12 +119,12 @@ type DistillResult struct {
 
 // DistillModifyRequest holds the inputs for modifying a distilled flow.
 type DistillModifyRequest struct {
-	CurrentYAML    string // The current YAML to modify
-	ChangeRequest  string // What the user wants changed
-	OriginalTrace  *ExecutionTrace
-	History        []string // Previous modification requests for context
-	DryRunOutput   string   // Output from last test run (for context)
-	DryRunError    string   // Error from last test run (for diagnosis)
+	CurrentYAML   string // The current YAML to modify
+	ChangeRequest string // What the user wants changed
+	OriginalTrace *ExecutionTrace
+	History       []string // Previous modification requests for context
+	DryRunOutput  string   // Output from last test run (for context)
+	DryRunError   string   // Error from last test run (for diagnosis)
 }
 
 // Distill converts an execution trace into a YAML flow definition.

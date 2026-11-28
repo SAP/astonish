@@ -25,6 +25,8 @@ func NewSanitizedToolset(ts tool.Toolset, debugMode bool) *SanitizedToolset {
 	return &SanitizedToolset{underlying: ts, debugMode: debugMode}
 }
 
+func (s *SanitizedToolset) BotMetadataOnly() bool { return IsBotMetadataOnlyToolset(s.underlying) }
+
 func (s *SanitizedToolset) Name() string {
 	return s.underlying.Name()
 }

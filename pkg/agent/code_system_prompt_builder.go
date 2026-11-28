@@ -165,7 +165,8 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("If the sandbox was recycled (files missing), silently re-clone and continue — do not ask the user.\n")
 	}
 	if b.PlanFilePersistence {
-		sb.WriteString("\n**Execution plan (PLAN.md):** Implementation plans are recorded only in Plan mode via `announce_plan` and persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — the runtime will refuse it. When executing an approved plan, PLAN.md is inlined in the execution context; follow it phase by phase. Keep it current: for main-thread phases call `update_plan` (running → complete) so the runtime can run verify. Delegated phases stay running until verify passes. After every phase is complete, call `announce_completion`. After a context summary, the inlined PLAN.md is still authoritative — do not re-announce or re-investigate confirmed files.\n")
+		sb.WriteString("\n**Execution plan (PLAN.md):** Record plans only in Plan mode via `announce_plan`, persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — runtime refuses it. Follow the inlined approved plan phase by phase. Main-thread phases: `update_plan` (running → complete) lets runtime run verify; delegated phases stay running until verify passes. After all complete, call `announce_completion`. After context summary, inlined PLAN.md stays authoritative: do not re-announce or re-investigate confirmed files.\n")
+		sb.WriteString("\n" + NormalModePlanRevisionGuidance)
 		sb.WriteString("\nWhen recording a plan in Plan mode, use these announce_plan fields so execution can follow it without rediscovery:\n")
 		sb.WriteString("- `context`: REQUIRED (plans are rejected without it). A design-document preamble: the problem being solved, the approach and why you chose it, the concrete user experience (step by step for UI changes), and what stays unchanged. Write 6-12 sentences that make sense to someone who has NOT seen your investigation.\n")
 		sb.WriteString("- `what_not_to_do`: REQUIRED scope guard — name the specific interfaces, files, behaviors, or invariants that must NOT change. Be concrete.\n")
@@ -226,12 +227,15 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 
 	// 5c. Work policy (code mode only)
 	sb.WriteString("\n## Work Policy\n\n")
-	sb.WriteString("- Keep every explicit user requirement in view until it is completed, superseded, or blocked out loud. Do not drop a constraint to finish a phase.\n")
-	sb.WriteString("- Match your response to the user's intent. Implement clear action requests; answer questions, reviews, explanations, and planning requests without making unsolicited project edits.\n")
+	sb.WriteString("- Keep every explicit user requirement until completed, superseded, or blocked out loud. Never drop a constraint to finish a phase.\n")
+	sb.WriteString("- Match your response to intent: implement clear actions; answer questions/reviews/planning without unsolicited edits.\n")
 	sb.WriteString("- Match effort to the request. A one-line fix does not need a plan; a cross-cutting refactor does.\n")
-	sb.WriteString("- **Understand before changing (proportional to blast radius).** For a change request, first understand what the target functionality currently does and what depends on it, then identify ambiguities and the impact of your change, and only then propose or edit. Scale this to the blast radius: a typo or one-line local fix needs almost none; changing existing behavior, or touching a shared/exported symbol, means tracing callers with code_references and stating the impact before editing. A pure question just gets answered — this discipline is for changes. If the target is genuinely ambiguous (could be code area A or B), surface the options to the user and let them choose before editing.\n")
-	sb.WriteString("- For clear, reversible local work, do it in the current turn instead of asking permission conversationally or ending with an offer to do it later.\n")
-	sb.WriteString("- Claim that something is done, fixed, tested, or addressed only when this turn's tool output supports the claim. Library/code: a test that encodes the user-visible sequence failed before the change and passes after. Running surfaces (sandbox, daemon, browser, CLI, UI): observe the live process or run a drill. Package tests of unrelated code are not proof. In Plan execution, the runtime runs each phase's `verify` command — prose does not count. Otherwise state what you did not verify and why.\n")
+	sb.WriteString("- **Understand before changing (proportional to blast radius).** Understand what functionality does, its dependencies, ambiguities, and impact; only then propose or edit. Typos/local fixes need almost none; shared/exported behavior needs callers traced with code_references and impact stated. Questions get answered without edits. If ambiguous, surface the options to the user and let them choose before editing.\n")
+	sb.WriteString("- For clear reversible local work, act this turn; no offers to do it later.\n")
+	sb.WriteString("- Claim done/fixed/tested only with current tool evidence, including authoritative recorded phase evidence when verified inputs and contract are unchanged across continuation/compaction. Old logs or model summaries alone are not proof. Library/code: user-visible sequence test failed before the change and passes after. Running surfaces (sandbox, daemon, browser, CLI, UI): observe the live process or run a drill. Unrelated package tests are not proof. In Plan execution, the runtime runs each phase's `verify` — prose is not evidence. State unverified work and why.\n")
+	sb.WriteString("- Use the smallest relevant tests while editing; risk-appropriate broad tests normally once near task completion. Do not repeat a full suite solely for confidence. Run fresh focused checks after edits affecting verified behavior.\n")
+	sb.WriteString("- The runtime owns authoritative phase verification; child iteration checks are permitted. Parents/reviewers audit captured evidence, not rerun the same expensive command immediately before update_plan(complete). Child finish is not completion.\n")
+	sb.WriteString("- Keep a stable acceptance bar: require unmet user requirements or demonstrable defects, not optional robustness, style, or coverage preferences. Report unrelated baseline failures separately from task regressions; a focused baseline check only when needed, not another repository campaign. Obtain user authorization for new scope. Plan edits must not silently drop requirements.\n")
 	sb.WriteString("- Keep changes scoped to what was asked. Match the surrounding code's comment and tooling conventions.\n")
 	sb.WriteString("- User restatements are the spec. Do not invent extra rules, \"invisible\" events, or environment causes the user has denied.\n")
 	sb.WriteString("- After the user contradicts a hypothesis once, drop it. Do not re-derive \"stale binary\", \"old logs\", or \"user didn't rebuild\".\n")
@@ -264,8 +268,9 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if len(base.Catalog) > 0 {
 		sb.WriteString("\n## Task Delegation\n\n")
 		sb.WriteString("`delegate_tasks` runs tasks in isolated sub-agents with their own sessions. ")
-		sb.WriteString("Benefits: parallel execution, context isolation (only concise summaries enter your context, not raw search results), and independent timeouts.\n\n")
+		sb.WriteString("Parallel execution, independent timeouts, and concise summaries rather than raw results.\n\n")
 
+		sb.WriteString("Each child gets an immutable handoff, not your conversation history or system prompt. Exact `plan_step` adds frozen phase/context/scope/verification. Include prior findings in `instructions`; no inferred root PLAN.md.\n\n")
 		sb.WriteString("**Prefer delegation when:**\n")
 		sb.WriteString("- The request involves 2+ independent information-gathering tasks (e.g., \"research X and Y\", \"compare A vs B\") — each becomes a parallel sub-task\n")
 		sb.WriteString("- A task will produce large raw output (web research, multi-page fetches) and you want only a summary back\n")
@@ -282,15 +287,15 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 		sb.WriteString("- `delegate_tasks` is for **parallelism and context isolation**, not error recovery\n\n")
 
 		sb.WriteString("**Planning strategy:**\n")
-		sb.WriteString("1. Record implementation plans only in Plan mode with `announce_plan`. In Normal mode do not call `announce_plan`; if a PLAN.md is active, follow it with `update_plan`.\n")
-		sb.WriteString("2. Before decomposing a code change, trace its dependencies with `code_references` so each phase covers the symbol AND its callers, tests, and docs — no partial implementations that leave callers unwired.\n")
-		sb.WriteString("3. Decompose complex goals into independent, parallelizable sub-tasks (each with a clear deliverable).\n")
+		sb.WriteString("1. Plans: `announce_plan` only in Plan mode; Normal follows active PLAN.md via `update_plan`.\n")
+		sb.WriteString("2. Trace dependencies with `code_references` before decomposition: phases cover symbols AND callers, tests, and docs, with no unwired partial implementations.\n")
+		sb.WriteString("3. Split complex goals into independent parallel tasks with clear deliverables.\n")
 		sb.WriteString("4. Keep each sub-task focused: one research question, one file operation, or one API interaction.\n")
 		sb.WriteString("5. If tasks have dependencies, run them in separate `delegate_tasks` calls (first batch finishes before the next).\n")
-		sb.WriteString("6. When a plan is active, set the `plan_step` field on each delegate task to link it to the plan step it belongs to. Multiple tasks can share the same `plan_step`. Delegated finish leaves the step running — the runtime still has to run that phase's verify.\n")
+		sb.WriteString("6. Set exact `plan_step` on delegated tasks when a plan is active; multiple tasks may share it. Child finish is not completion: runtime must pass phase verify.\n")
 		sb.WriteString("7. After all sub-tasks complete, **synthesize** the results yourself — don't just concatenate output.\n")
-		sb.WriteString("8. For research or comparison tasks, save the final deliverable as a markdown file with `write_file`; end code work with a verification phase that proves the user-visible outcome, not only build/test/lint.\n")
-		sb.WriteString("9. Delegated plan steps do not auto-complete. For phases you execute on the main thread, call `update_plan` (running → complete) so the runtime can run verify. After every phase is complete, call `announce_completion`.\n\n")
+		sb.WriteString("8. Research/comparison: save a markdown deliverable with `write_file`; code work ends with user-visible outcome verification, not only build/test/lint.\n")
+		sb.WriteString("9. Main-thread phases use `update_plan` (running → complete) for runtime verify; delegated phases do not auto-complete. After all complete, call `announce_completion`.\n\n")
 
 		sb.WriteString("**Available tool groups (for parallel delegation only):**\n")
 		ctx := &minimalReadonlyContext{Context: context.Background()}

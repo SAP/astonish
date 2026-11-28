@@ -13,6 +13,8 @@ import (
 
 // chatFlags holds the parsed CLI flag values for `astonish chat`.
 type chatFlags struct {
+	Bot         string
+	BotScope    string
 	Provider    string
 	Model       string
 	AutoApprove bool
@@ -25,6 +27,8 @@ type chatFlags struct {
 func parseChatFlags(args []string) (chatFlags, error) {
 	chatCmd := flag.NewFlagSet("chat", flag.ContinueOnError)
 
+	botRef := chatCmd.String("bot", "", "Watch a remote Bot UUID or unique name")
+	botScope := chatCmd.String("bot-scope", "personal", "Bot scope: personal or team")
 	providerName := chatCmd.String("provider", "", "AI provider to pin on the session (with --resume or after first turn via chat model)")
 	modelName := chatCmd.String("model", "", "Model name to pin on the session")
 	autoApprove := chatCmd.Bool("auto-approve", false, "Auto-approve all tool executions")
@@ -40,7 +44,14 @@ func parseChatFlags(args []string) (chatFlags, error) {
 		return chatFlags{}, err
 	}
 
+	if *botRef != "" && (*resumeSession != "" || *providerName != "" || *modelName != "" || *clearModel || *autoApprove) {
+		return chatFlags{}, fmt.Errorf("--bot cannot be combined with session/model/auto-approve flags")
+	}
+	if *botScope != "personal" && *botScope != "team" {
+		return chatFlags{}, fmt.Errorf("invalid --bot-scope")
+	}
 	return chatFlags{
+		Bot: *botRef, BotScope: *botScope,
 		Provider:    *providerName,
 		Model:       *modelName,
 		AutoApprove: *autoApprove,
@@ -91,6 +102,7 @@ func handleChatCommand(args []string) error {
 	}
 
 	cfg := &launcher.ChatConfig{
+		Bot: flags.Bot, BotScope: flags.BotScope,
 		AutoApprove: flags.AutoApprove,
 		SessionID:   flags.Resume,
 		DebugMode:   flags.Debug,

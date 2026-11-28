@@ -12,6 +12,48 @@ func planModeToolBlocked(name string) bool {
 	return name == "delegate_tasks" || !IsToolSafe(name)
 }
 
+func TestPlanRevisionModeGate(t *testing.T) {
+	for _, po := range []*PromptOverrides{{AskMode: true}, {Bot: &BotPromptContext{}}} {
+		if RevisionToolBlocked(po, "update_plan", map[string]any{"action": "revise"}) == "" {
+			t.Fatal("restricted mode admitted revision")
+		}
+		if RevisionToolBlocked(po, "update_plan", map[string]any{"step": "phase", "status": "running"}) != "" {
+			t.Fatal("action gate blocked legacy status")
+		}
+	}
+	for _, po := range []*PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}} {
+		if got := RevisionToolBlocked(po, "update_plan", map[string]any{"action": "revise"}); got != "" {
+			t.Fatalf("planning must permit definition revisions: %s", got)
+		}
+		for _, status := range []string{"running", "complete", "failed"} {
+			if got := RevisionToolBlocked(po, "update_plan", map[string]any{"step": "phase", "status": status}); got != "blocked_plan_execution" {
+				t.Fatalf("planning admitted status %s: %s", status, got)
+			}
+		}
+		if got := RevisionToolBlocked(po, "announce_completion", nil); got != "blocked_plan_execution" {
+			t.Fatalf("planning admitted completion: %s", got)
+		}
+	}
+	if RevisionToolBlocked(nil, "update_plan", map[string]any{"action": "revise"}) != "" {
+		t.Fatal("Normal mode blocked")
+	}
+	for _, name := range []string{"announce_plan", "update_plan", "announce_completion", "gplan_finalize"} {
+		if !IsPlanManagementTool(name) {
+			t.Fatalf("%s can auto-start a phase", name)
+		}
+	}
+}
+
+func TestPlanningPromptsAllowDefinitionRevisions(t *testing.T) {
+	for name, prompt := range map[string]string{"plan": PlanModeSystemContext, "graph": GraphPlanModeSystemContext} {
+		for _, want := range []string{`update_plan(action="revise"`, "without leaving Plan mode", "Status updates and announce_completion are blocked until Normal mode"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt missing %q", name, want)
+			}
+		}
+	}
+}
+
 func TestPlanModeGate_BlocksMutatingTools(t *testing.T) {
 	blocked := []string{
 		"write_file",
@@ -125,6 +167,19 @@ func TestApprovedPlanExecutionResearch_AllowsReadsCapsDiscovery(t *testing.T) {
 	}
 	if approvedExecutionResearchLimit("read") != 0 {
 		t.Fatal("read must have no execution research limit")
+	}
+}
+
+func TestPlanExecutionSystemContext_FocusedValidationPolicy(t *testing.T) {
+	ctx := BuildPlanExecutionSystemContext("")
+	for _, want := range []string{
+		"failure investigation stays scoped", "unrelated baseline failures", "focused baseline check only when needed",
+		"runtime owns authoritative phase verification", "audit captured evidence", "immediately before update_plan(complete)",
+		"continuation or compaction", "authoritative recorded phase evidence", "verified inputs and contract are unchanged",
+		"fresh focused checks", "user authorization for new scope", "Do not mark the phase complete",
+		"does not run new commands", "research caps", "are lifted", "run_drill",
+	} {
+		assertContains(t, ctx, want, "execution focus must retain verification gates")
 	}
 }
 

@@ -13,9 +13,63 @@ import (
 
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 )
+
+func TestLazyMCPToolset_RemoteNodeScopesAndDenials(t *testing.T) {
+	for _, transport := range []string{"sse", "streamableHTTP"} {
+		for _, scenario := range []string{"success", "cancelled", "denied", "disabled", "missing-session", "readiness", "uncertain"} {
+			t.Run(transport+"/"+scenario, func(t *testing.T) {
+				l, pool := lazyMCPRoutingFixture(t)
+				l.serverCfg = config.MCPServerConfig{Transport: transport, URL: "https://example.invalid/mcp", Env: map[string]string{"Authorization": "{{CREDENTIAL:remote:token}}"}}
+				ctx, cancel := context.WithCancel(store.WithSandboxTemplate(context.Background(), "scoped-template"))
+				defer cancel()
+				var callCtx context.Context = ctx
+				id := "child"
+				switch scenario {
+				case "cancelled":
+					cancel()
+				case "denied":
+					callCtx = store.WithMCPServerStores(ctx, &store.MCPServerStores{})
+				case "disabled":
+					disabled := false
+					l.serverCfg.Enabled = &disabled
+				case "missing-session":
+					id = ""
+				case "readiness":
+					pool.client.readyErr = errors.New("not ready")
+				case "uncertain":
+					pool.client.nodeErr = io.EOF
+				}
+				proxy := &lazyProxyTool{toolset: l, entry: &cache.ToolEntry{Name: "echo"}}
+				result, err := proxy.Run(&minimalReadonlyContext{Context: callCtx, sessionID: id}, map[string]any{"message": "hello"})
+				wantCalls := 0
+				if scenario == "success" || scenario == "uncertain" {
+					wantCalls = 1
+					if pool.template != "scoped-template" || pool.client.nodeID != "child" || pool.client.readyIDs[0] != "parent" || pool.client.callContext == nil {
+						t.Fatalf("lost context/owner routing: pool=%+v client=%+v", pool, pool.client)
+					}
+					raw, _ := json.Marshal(pool.client.nodeRequest)
+					var request mcp.NodeRequest
+					if e := json.Unmarshal(raw, &request); e != nil || pool.client.nodeName != mcp.NodeOperation || request.Action != mcp.NodeCall || request.Tool != "echo" || request.Config.Env["Authorization"] != "{{CREDENTIAL:remote:token}}" {
+						t.Fatalf("invalid symbolic node request: %s (%v)", raw, e)
+					}
+				}
+				if scenario == "success" && (err != nil || result["content"] == nil) {
+					t.Fatalf("remote call: %v %v", result, err)
+				}
+				if scenario != "success" && err == nil && result["error"] == nil {
+					t.Fatal("failure was accepted")
+				}
+				if pool.client.nodeCalls != wantCalls || l.manager != nil || l.started || len(pool.backend.owners) != 0 {
+					t.Fatal("unexpected dispatch, retry or host/stdio fallback")
+				}
+			})
+		}
+	}
+}
 
 func TestIsTransientMCPError(t *testing.T) {
 	t.Parallel()
@@ -285,9 +339,21 @@ func TestLazyMCPToolset_SuccessResetsRetryCount(t *testing.T) {
 // accepting a host fallback or a different pool routing path.
 type lazyMCPTestClient struct {
 	sandbox.ToolNodeClient
-	owner    string
-	readyIDs []string
-	readyErr error
+	owner       string
+	readyIDs    []string
+	readyErr    error
+	nodeCalls   int
+	nodeID      string
+	nodeName    string
+	nodeRequest map[string]any
+	nodeErr     error
+	callContext context.Context
+}
+
+func (c *lazyMCPTestClient) CallContext(ctx context.Context, id, name string, args map[string]any) (json.RawMessage, error) {
+	c.nodeCalls++
+	c.nodeID, c.nodeName, c.nodeRequest, c.callContext = id, name, args, ctx
+	return json.RawMessage(`{"content":[{"type":"text","text":"remote-ok"}]}`), c.nodeErr
 }
 
 func (c *lazyMCPTestClient) SandboxSessionID() string { return c.owner }

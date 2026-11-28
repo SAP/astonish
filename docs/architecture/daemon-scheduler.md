@@ -41,6 +41,48 @@ Different use cases need different execution models:
 - **Adaptive**: Sends instructions as a chat message to the shared ChatAgent. The agent decides how to handle it, can use any tool, and adapts to the current situation. Best for tasks that need judgment.
 - **Fleet poll**: Delegates to the PlanActivator for GitHub Issues monitoring. Not a direct execution mode but a scheduling trigger for fleet activation.
 
+### Bot-Trigger Admission Boundary (Not Yet Daemon-Wired)
+
+`ModeBotTrigger` (`bot_trigger`) extends the existing executor, not the cron
+engine. Trusted composition can persist a scheduled row with `payload.bot_id`,
+`payload.bot_version`, and `payload.bot_trigger_id`, then install
+`Executor.BotTrigger`. The callback receives a typed `BotTriggerRequest` for the
+row's persisted, due `NextRun`; it must resolve the saved Bot configuration and
+revalidate the live owner/scope, active lifecycle, version/trigger binding,
+authorization, and admission budgets. Row owner/scope fields are hints, not a
+principal. Executable flow/instruction/parameter payloads are rejected.
+
+Occurrence identity is `bot-schedule-v1:` plus SHA-256 over canonical Bot UUID,
+version, trigger UUID, and UTC scheduled instant. Dispatch time and scheduler row
+ID are deliberately excluded: replaying the same occurrence, including from a
+duplicate row, must reach the same atomic admission record. Different occurrences,
+versions, triggers and Bots have different keys. The callback owns durable
+idempotency and dispatch intent; the scheduler does **not** claim durable
+exactly-once execution from its in-memory in-flight map.
+
+`BotAdmission` distinguishes admitted/duplicate (requiring the durable run ID)
+from skipped (no run ID). The executor returns no report text. A scheduler
+`LastStatus=success` means only that admission was handled; it is **not** evidence
+of successful Bot execution. Failed/missing callbacks, invalid receipts and
+cancellation fail closed, retaining the existing timeout and failure accounting.
+`RunNow` cannot invent an occurrence or advance a future one. No automatic catch-up
+or retry of lost occurrences is added; existing scheduler next-run/startup semantics
+remain unchanged, and production recovery must reconcile durable intent.
+
+Composition **must** wrap the legacy delivery callback with
+`WithoutBotTriggerDelivery` (including multi-tenant lanes). It suppresses both
+Bot admission successes and failures without changing legacy delivery behavior.
+This wrapper is supplied but is **not installed in production daemon wiring** in
+this slice. No API/tools mode acceptance, activation path, service-principal
+adapter, store admission transaction or Bot supervisor scheduling is enabled.
+The existing Bot repository still rejects non-manual admission. Installing a
+callback alone is not a production-ready scheduler integration.
+
+Behavior harness: `go test ./pkg/scheduler -run TestBotTrigger -count=1` exercises
+real scheduler ticks, persisted rows, controlled admission/replay, runtime-state
+updates, suppression of delivery, and routine/adaptive/fleet compatibility.
+Adaptive compatibility covers its missing-agent failure route, not a live LLM run.
+
 ### Why Dual-Scope Jobs (Personal vs Team)
 
 Platform mode has **two scheduler lanes**, mirroring credentials:

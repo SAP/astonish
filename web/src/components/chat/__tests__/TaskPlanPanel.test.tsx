@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { fetchSubtaskEvents } from '../../../api/studioChat'
 vi.mock('../../../api/studioChat', () => ({ fetchSubtaskEvents: vi.fn() }))
@@ -94,6 +94,79 @@ describe('TaskPlanPanel', () => {
     } as unknown as SubTaskExecutionMessage
 
     expect(() => render(<TaskPlanPanel data={data} />)).not.toThrow()
+  })
+
+  it('refreshes persisted handoff and activity when an expanded running attempt finishes', async () => {
+    vi.mocked(fetchSubtaskEvents).mockResolvedValueOnce([{ type: 'task_text', text: 'snapshot while running' }]).mockResolvedValueOnce([{ type: 'task_text', text: 'durable final detail' }])
+    const data: SubTaskExecutionMessage = { type: 'subtask_execution', batch_id: 'b', status: 'running', tasks: [{ task_id: 't', name: 'worker', description: '' }], events: [
+      { type: 'task_start', task_id: 't', attempt: 1, child_session_id: 'child' },
+      { type: 'task_text', task_id: 't', attempt: 1, child_session_id: 'child', text: 'live detail' },
+    ] }
+    const { rerender } = render(<TaskPlanPanel sessionId="parent" data={data} />)
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    await waitFor(() => expect(screen.queryByText('Loading execution detail...')).not.toBeInTheDocument())
+    expect(screen.getByText('live detail')).toBeInTheDocument()
+    rerender(<TaskPlanPanel sessionId="parent" data={{ ...data, status: 'complete', events: [...data.events, { type: 'task_complete', task_id: 't', attempt: 1, child_session_id: 'child' }] }} />)
+    await waitFor(() => expect(screen.getByText('durable final detail')).toBeInTheDocument())
+    expect(screen.queryByText('live detail')).not.toBeInTheDocument()
+    expect(screen.queryByText('snapshot while running')).not.toBeInTheDocument()
+  })
+
+  it('refreshes a running snapshot after the task finishes while collapsed', async () => {
+    const fetchEvents = vi.mocked(fetchSubtaskEvents)
+    fetchEvents.mockClear()
+    fetchEvents.mockResolvedValueOnce([{ type: 'task_text', text: 'partial persisted detail' }])
+      .mockResolvedValueOnce([{ type: 'task_text', text: 'completed persisted result' }])
+    const running: SubTaskExecutionMessage = { type: 'subtask_execution', batch_id: 'b', status: 'running', tasks: [{ task_id: 't', name: 'worker', description: '' }], events: [
+      { type: 'task_start', task_id: 't', attempt: 1, child_session_id: 'child' },
+    ] }
+    const complete: SubTaskExecutionMessage = { ...running, status: 'complete', events: [...running.events,
+      { type: 'task_complete', task_id: 't', attempt: 1, child_session_id: 'child' },
+    ] }
+    const { rerender } = render(<TaskPlanPanel sessionId="parent" data={running} />)
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    await screen.findByText('partial persisted detail')
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    rerender(<TaskPlanPanel sessionId="parent" data={complete} />)
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    await screen.findByText('completed persisted result')
+    expect(screen.queryByText('partial persisted detail')).not.toBeInTheDocument()
+    rerender(<TaskPlanPanel sessionId="parent" data={{ ...complete }} />)
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    expect(fetchEvents).toHaveBeenCalledTimes(2)
+    expect(fetchEvents).toHaveBeenLastCalledWith('parent', { child_session_id: 'child' }, expect.any(AbortSignal))
+  })
+
+  it('discards a late running response after collapsed completion and preserves retry', async () => {
+    const fetchEvents = vi.mocked(fetchSubtaskEvents)
+    fetchEvents.mockClear()
+    let resolveRunning!: (events: Awaited<ReturnType<typeof fetchSubtaskEvents>>) => void
+    fetchEvents.mockImplementationOnce(() => new Promise(resolve => { resolveRunning = resolve }))
+      .mockRejectedValueOnce(new Error('Final detail temporarily unavailable'))
+      .mockResolvedValueOnce([{ type: 'task_text', text: 'retried final detail' }])
+    const running: SubTaskExecutionMessage = { type: 'subtask_execution', batch_id: 'b', status: 'running', tasks: [{ task_id: 't', name: 'worker', description: '' }], events: [
+      { type: 'task_start', task_id: 't', attempt: 1, child_session_id: 'child' },
+    ] }
+    const complete: SubTaskExecutionMessage = { ...running, status: 'complete', events: [...running.events,
+      { type: 'task_complete', task_id: 't', attempt: 1, child_session_id: 'child' },
+    ] }
+    const { rerender } = render(<TaskPlanPanel sessionId="parent" data={running} />)
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    const signal = fetchEvents.mock.calls[0][2]!
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    rerender(<TaskPlanPanel sessionId="parent" data={complete} />)
+    expect(signal.aborted).toBe(true)
+    expect(fetchEvents).toHaveBeenCalledTimes(1)
+    await act(async () => { resolveRunning([{ type: 'task_text', text: 'late partial detail' }]) })
+    fireEvent.click(screen.getByRole('button', { name: /worker/ }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Final detail temporarily unavailable'))
+    expect(screen.queryByText('late partial detail')).not.toBeInTheDocument()
+    rerender(<TaskPlanPanel sessionId="parent" data={{ ...complete }} />)
+    expect(fetchEvents).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await screen.findByText('retried final detail')
+    expect(fetchEvents).toHaveBeenCalledTimes(3)
   })
 
   it('renders task names from a well-formed message', () => {

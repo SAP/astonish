@@ -2,12 +2,12 @@ package tools
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -131,6 +131,8 @@ type ProcessSession struct {
 	lastWrite time.Time // last time output was received from the process
 	done      chan struct{}
 	readDone  chan struct{} // closed when readLoop exits (all output drained)
+	killMu    sync.Mutex    // serialize termination and group ownership retirement
+	ownedPGID int           // verified private PTY group, never the caller's group
 }
 
 // IsRunning returns true if the process is still alive.
@@ -214,6 +216,7 @@ func (pm *ProcessManager) Start(command, workDir string, rows, cols uint16) (*Pr
 		cmd:       cmd,
 		lastWrite: time.Now(),
 		done:      make(chan struct{}),
+		ownedPGID: ownedProcessGroup(cmd.Process),
 		readDone:  make(chan struct{}),
 	}
 
@@ -249,40 +252,48 @@ func (pm *ProcessManager) List() []*ProcessSession {
 	return list
 }
 
-// Kill sends a signal to a process. Default is SIGTERM, with SIGKILL fallback after 5s.
+// Kill terminates the owned PTY group, escalating after a bounded grace period.
+// Descendants that deliberately leave that group are outside this guarantee.
 func (pm *ProcessManager) Kill(id string) error {
 	pm.mu.RLock()
 	sess := pm.sessions[id]
 	pm.mu.RUnlock()
-
 	if sess == nil {
 		return nil
 	}
-
-	if !sess.IsRunning() {
+	sess.killMu.Lock()
+	defer sess.killMu.Unlock()
+	if !sess.IsRunning() && !processGroupAlive(sess.ownedPGID) {
+		sess.ownedPGID = 0
 		return nil
 	}
-
-	// Send SIGTERM
-	if sess.cmd.Process != nil {
-		_ = sess.cmd.Process.Signal(syscall.SIGTERM)
+	if err := signalOwnedProcess(sess.cmd.Process, sess.ownedPGID, false); err != nil {
+		return err
 	}
-
-	// Wait up to 5s for exit, then SIGKILL
-	select {
-	case <-sess.done:
-		return nil
-	case <-time.After(5 * time.Second):
-		if sess.cmd.Process != nil {
-			_ = sess.cmd.Process.Signal(syscall.SIGKILL)
-		}
-		// Wait for the kill to take effect
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for sess.IsRunning() || processGroupAlive(sess.ownedPGID) {
 		select {
-		case <-sess.done:
-		case <-time.After(2 * time.Second):
+		case <-ticker.C:
+		case <-deadline.C:
+			if err := signalOwnedProcess(sess.cmd.Process, sess.ownedPGID, true); err != nil {
+				return err
+			}
+			// The leader's waiter includes a bounded output drain. Orphaned
+			// zombie descendants may remain visible until their adopter reaps.
+			select {
+			case <-sess.done:
+				sess.ownedPGID = 0
+				return nil
+			case <-time.After(3 * time.Second):
+				return fmt.Errorf("process %s did not exit after termination", id)
+			}
 		}
-		return nil
 	}
+	sess.ownedPGID = 0
+	return nil
 }
 
 // Cleanup kills all running sessions and stops the background cleaner.
@@ -381,6 +392,13 @@ func (s *ProcessSession) waitLoop() {
 	s.pty.Close()
 
 	close(s.done)
+	// Retire a naturally completed empty group promptly rather than keeping
+	// its numeric identity for the session history TTL (PID reuse).
+	s.killMu.Lock()
+	if !processGroupAlive(s.ownedPGID) {
+		s.ownedPGID = 0
+	}
+	s.killMu.Unlock()
 }
 
 // Write sends data to the process's stdin via the PTY.

@@ -1,11 +1,196 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"google.golang.org/genai"
 )
+
+// planToolSchema mirrors only the schema structure needed by these contract tests.
+type planToolSchema struct {
+	Properties  map[string]planToolSchema `json:"properties"`
+	Items       *planToolSchema           `json:"items"`
+	Required    []string                  `json:"required"`
+	Description string                    `json:"description"`
+}
+
+func TestUpdatePlanStepPatchSchema(t *testing.T) {
+	got, err := NewUpdatePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared, ok := got.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok {
+		t.Fatal("update_plan is missing its declaration")
+	}
+	decl := declared.Declaration()
+	if decl == nil || decl.ParametersJsonSchema == nil {
+		t.Fatal("missing input schema")
+	}
+	raw, err := json.Marshal(decl.ParametersJsonSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema planToolSchema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	revision := schema.Properties["revision"]
+	for _, required := range revision.Required {
+		if required == "steps" || required == "step_patches" {
+			t.Fatalf("revision requires %s: %s", required, raw)
+		}
+	}
+	patches, ok := revision.Properties["step_patches"]
+	if !ok || patches.Items == nil {
+		t.Fatalf("missing step_patches array: %s", raw)
+	}
+	patch := *patches.Items
+	if len(patch.Required) != 1 || patch.Required[0] != "name" {
+		t.Fatalf("patch requires more than its target: %+v", patch.Required)
+	}
+	for _, field := range []string{"name", "description", "details", "summary", "files", "outcome", "verify", "verify_kind", "parallel_group"} {
+		if _, ok := patch.Properties[field]; !ok {
+			t.Errorf("patch missing definition field %s", field)
+		}
+	}
+	for _, forbidden := range []string{"status", "evidence", "results", "lifecycle", "plan_id", "revision", "sequence", "pending_revision"} {
+		if _, ok := patch.Properties[forbidden]; ok {
+			t.Errorf("patch admits runtime field %s", forbidden)
+		}
+	}
+	for _, guidance := range []string{revision.Description, got.Description()} {
+		for _, phrase := range []string{"step_patches", "steps", "mutually exclusive", "omitted"} {
+			if !strings.Contains(guidance, phrase) {
+				t.Errorf("guidance missing %q: %s", phrase, guidance)
+			}
+		}
+	}
+	var args UpdatePlanArgs
+	if err := json.Unmarshal([]byte(`{"action":"revise","revision":{"plan_id":"owned","base_revision":1,"step_patches":[{"name":"final","verify":"printf revised","status":"complete","evidence":"forged"}]}}`), &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.Revision == nil || args.Revision.Steps != nil || len(args.Revision.StepPatches) != 1 || args.Revision.StepPatches[0].Verify == nil {
+		t.Fatalf("patch decoding: %+v", args)
+	}
+	raw, err = json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"status"`, `"evidence"`} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("decoded patch admitted %s: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestUpdatePlanAnnounceValidationBudgetGuidance(t *testing.T) {
+	got, err := NewAnnouncePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"scoped commands", "runtime budget", "broad regressions", "Do not manually repeat", "not only go test/go build", "complete is rejected unless verify exits 0"} {
+		if !strings.Contains(got.Description(), phrase) {
+			t.Errorf("announce_plan guidance missing %q", phrase)
+		}
+	}
+}
+
+func TestUpdatePlanRevisionModesAndArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		po   *agent.PromptOverrides
+		want string
+	}{
+		{"normal", &agent.PromptOverrides{}, "applied"},
+		{"plan", &agent.PromptOverrides{PlanMode: true}, "applied"},
+		{"graph", &agent.PromptOverrides{GraphPlanMode: true}, "applied"},
+		{"ask", &agent.PromptOverrides{AskMode: true}, "blocked_revision_mode"},
+		{"bot", &agent.PromptOverrides{Bot: &agent.BotPromptContext{}}, "unsupported_bot_revision"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			base := WithPlanCallbacks(context.Background(), PlanCallbacks{
+				Snapshot: func() agent.PlanSnapshot { return agent.PlanSnapshot{PlanID: "owned", Revision: 2} },
+				Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+					calls++
+					return agent.PlanRevisionResult{Kind: agent.PlanRevisionResultApplied}, nil
+				},
+			})
+			ctx := scopedBasicContext{base: agent.WithPromptOverrides(base, tc.po)}
+			result, err := updatePlan(ctx, UpdatePlanArgs{Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}})
+			if err != nil || result.Status != tc.want || result.Snapshot == nil || result.Snapshot.PlanID != "owned" {
+				t.Fatalf("%+v %v", result, err)
+			}
+			if (calls == 1) != (tc.want == "applied") {
+				t.Fatalf("unexpected revise calls: %d", calls)
+			}
+		})
+	}
+	ctx := scopedBasicContext{base: WithPlanCallbacks(context.Background(), PlanCallbacks{Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+		t.Fatal("invalid call dispatched")
+		return agent.PlanRevisionResult{}, nil
+	}})}
+	for _, args := range []UpdatePlanArgs{
+		{Action: UpdatePlanRevise},
+		{Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}, Step: "phase"},
+		{Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}, Status: "running"},
+		{Step: "phase", Status: "running", Revision: &agent.PlanRevisionRequest{}},
+		{Action: "approve"},
+	} {
+		result, err := updatePlan(ctx, args)
+		if err != nil || result.Status != "invalid_arguments" {
+			t.Fatalf("%+v: %+v %v", args, result, err)
+		}
+	}
+}
+
+func TestPlanningBlocksExecutionCallbacks(t *testing.T) {
+	for _, po := range []*agent.PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}} {
+		ctx := scopedBasicContext{base: agent.WithPromptOverrides(WithPlanCallbacks(context.Background(), PlanCallbacks{
+			Update: func(string, string) agent.PlanStepApplyResult {
+				t.Fatal("planning reached phase execution")
+				return agent.PlanStepApplyResult{}
+			},
+			Complete: func(string, string) agent.PlanCompletionResult {
+				t.Fatal("planning reached completion")
+				return agent.PlanCompletionResult{}
+			},
+		}), po)}
+		for _, status := range []string{"running", "complete", "failed"} {
+			result, err := updatePlan(ctx, UpdatePlanArgs{Step: "phase", Status: status})
+			if err != nil || result.Status != "blocked_plan_execution" {
+				t.Fatalf("%s: %+v %v", status, result, err)
+			}
+		}
+		result, err := announceCompletion(ctx, AnnounceCompletionArgs{OutcomeObserved: "not executed"})
+		if err != nil || result.Status != "blocked_plan_execution" {
+			t.Fatalf("%+v %v", result, err)
+		}
+	}
+}
+
+func TestUpdatePlanRevisionDefinitionOnly(t *testing.T) {
+	var args UpdatePlanArgs
+	if err := json.Unmarshal([]byte(`{"action":"revise","revision":{"plan_id":"owned","base_revision":1,"steps":[{"name":"phase","status":"complete","evidence":"forged"}],"results":"forged","pending_revision":{}}}`), &args); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"evidence", "status", "results", "pending_revision"} {
+		if strings.Contains(string(raw), `"`+forbidden+`"`) {
+			t.Fatalf("definition admitted %s: %s", forbidden, raw)
+		}
+	}
+}
 
 func TestUpdatePlanTool_DrivesCallbackAndEmitsEvent(t *testing.T) {
 	// Save and restore package-level callbacks.

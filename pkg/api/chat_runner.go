@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SAP/astonish/pkg/question"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -15,8 +16,10 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/docs/slides"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	"github.com/SAP/astonish/pkg/provider/streaming"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
@@ -25,11 +28,16 @@ import (
 	"github.com/google/uuid"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+// chatDelegationPending reserves Studio's persisted call position, not a worker
+// lifecycle start. Terminal clients ignore it and retain their existing lifecycle.
+const chatDelegationPending = "delegation_pending"
 
 // ChatEvent represents a single event produced by a background chat runner.
 // It mirrors the SSE events that were previously emitted inline.
@@ -38,6 +46,21 @@ type ChatEvent struct {
 	Type      string         `json:"type"` // text, tool_call, tool_result, image, flow_output, approval, auto_approved, thinking, retry, error, error_info, session, done
 	Data      map[string]any `json:"data"`
 	Timestamp time.Time      `json:"timestamp"`
+}
+
+// ChatCompletion is execution evidence, independent of the transport's done event.
+// A final model answer is required; a tool result or closed stream is not success.
+type ChatCompletion struct {
+	FinalText       string
+	FinalEventID    string
+	Err             error
+	Blocked         bool
+	Final           bool
+	Usage           store.BotUsage
+	Report          store.BotReport
+	reportBodies    map[string]string
+	toolResponses   int64
+	pendingControls []botWorkPendingControl
 }
 
 // ChatRunner manages a single background agent execution for a Studio chat session.
@@ -101,6 +124,115 @@ type ChatRunner struct {
 	// uiTools preserves the underlying catalog tool identity for UI events while
 	// provider-visible history continues to use the fixed execute_tool bridge.
 	uiTools *uiToolTracker
+
+	// Optional synchronous durable sink. Installed before Run; serialized before
+	// buffering/publication. A sink failure cancels execution and is never success.
+	emitMu       sync.Mutex
+	eventSink    func(context.Context, ChatEvent) error
+	sinkErr      error
+	completionMu sync.RWMutex
+	completion   ChatCompletion
+}
+
+// SetEventSink installs a persist-before-publish hook. It must not call back into
+// emitEvent and must be installed before Run. Ordinary Chat leaves this nil.
+func (cr *ChatRunner) SetEventSink(sink func(context.Context, ChatEvent) error) { cr.eventSink = sink }
+
+// Completion returns typed execution evidence, not an interpretation of done.
+func (cr *ChatRunner) Completion() ChatCompletion {
+	cr.completionMu.RLock()
+	defer cr.completionMu.RUnlock()
+	return cr.completion
+}
+
+func (cr *ChatRunner) recordRunError(err error) {
+	if err == nil {
+		return
+	}
+	cr.completionMu.Lock()
+	defer cr.completionMu.Unlock()
+	cr.completion.Err = errors.Join(cr.completion.Err, err)
+}
+
+func (cr *ChatRunner) observeCompletion(event *session.Event) {
+	if event == nil || event.Partial || agent.IsTurnContextEvent(event) {
+		return
+	}
+	cr.completionMu.Lock()
+	defer cr.completionMu.Unlock()
+	if event.ErrorCode != "" || event.ErrorMessage != "" {
+		cr.completion.Err = errors.Join(cr.completion.Err, fmt.Errorf("model response: %s %s", event.ErrorCode, event.ErrorMessage))
+	}
+	if usage := event.UsageMetadata; usage != nil {
+		input, output := bot.ModelUsageTokens(usage)
+		cr.completion.Usage.InputTokens += input
+		cr.completion.Usage.OutputTokens += output
+	}
+	content := event.Content
+	if content == nil {
+		return
+	}
+	var text strings.Builder
+	toolPart := false
+	for _, part := range content.Parts {
+		if part == nil {
+			continue
+		}
+		if part.FunctionCall != nil {
+			cr.completion.Usage.ToolCalls++
+		}
+		if part.FunctionCall != nil || part.FunctionResponse != nil {
+			toolPart = true
+		}
+		if part.Text != "" && !part.Thought {
+			text.WriteString(part.Text)
+		}
+		if part.FunctionResponse != nil {
+			observation := cr.observeBotToolOutcome(content.Role, part.FunctionResponse)
+			recoverableReadFailure := observation.Recoverable
+			result := part.FunctionResponse.Response
+			var state agent.ProgressiveResultState
+			switch value := result["state"].(type) {
+			case string:
+				state = agent.ProgressiveResultState(value)
+			case agent.ProgressiveResultState:
+				state = value
+			}
+			// Native errors include policy, cancellation and shared-budget stops.
+			// Never turn those into source feedback, even with an access receipt.
+			if _, nativeError := result["error"].(error); (nativeError && !observation.KnownNonexecution) || (state != "" && state != agent.ProgressiveStateExecutionError) {
+				recoverableReadFailure = false
+			}
+			switch state {
+			case agent.ProgressiveStateAuthorizationDenied, agent.ProgressiveStateApprovalRequired:
+				cr.completion.Blocked = true
+			case agent.ProgressiveStateExecutionError, agent.ProgressiveStateContextRequired, agent.ProgressiveStateContextStale:
+				if !recoverableReadFailure {
+					cr.completion.Err = errors.Join(cr.completion.Err, &botToolFeedbackError{cause: fmt.Errorf("tool did not complete: %s", state), recoverable: state == agent.ProgressiveStateExecutionError})
+				}
+			}
+			if failure, ok := result["error"]; !recoverableReadFailure && ok && failure != nil && failure != "" {
+				// ADK can return native callback errors in FunctionResponse. Keep
+				// their identity so the Bot adapter can classify policy decisions;
+				// matching their text would confuse ordinary errors with policy.
+				var toolErr error
+				if cause, ok := failure.(error); ok {
+					toolErr = fmt.Errorf("tool execution failed: %w", cause)
+				} else {
+					toolErr = fmt.Errorf("tool execution failed: %v", failure)
+				}
+				_, nativeError := failure.(error)
+				cr.completion.Err = errors.Join(cr.completion.Err, &botToolFeedbackError{cause: toolErr, recoverable: !nativeError})
+			}
+		}
+	}
+	if content.Role == "model" {
+		cr.completion.Final = !toolPart && strings.TrimSpace(text.String()) != ""
+		if cr.completion.Final {
+			cr.completion.FinalText = text.String()
+			cr.completion.FinalEventID = event.ID
+		}
+	}
 }
 
 // newChatRunner creates a new ChatRunner with a background context.
@@ -591,6 +723,7 @@ func (cr *ChatRunner) Run(
 		// title-refine goroutine (if any) before closing subscriber
 		// channels — this lets a polished session_title reach the browser
 		// before the stream ends. A provisional title was already emitted.
+		cr.recordRunError(cr.ctx.Err())
 		cr.emitEvent("done", map[string]any{"done": true})
 		// Observing IsDone must imply that completion is already in history.
 		cr.doneMu.Lock()
@@ -616,6 +749,10 @@ func (cr *ChatRunner) Run(
 		}
 	}()
 
+	// Preserve an explicitly bound nil runtime; never borrow another session's plan.
+	if runtime, bound := agent.PlanRuntimeFromContext(cr.ctx); bound {
+		defer chatAgent.BindSessionPlanRuntime(cr.SessionID, runtime)()
+	}
 	// Send session info first
 	cr.emitEvent("session", map[string]any{
 		"sessionId": cr.SessionID,
@@ -638,10 +775,35 @@ func (cr *ChatRunner) Run(
 		return
 	}
 
+	var plugins []*plugin.Plugin
+	if _, botRun := execution.BotRunIdentityFromContext(cr.ctx); botRun {
+		// ADK serializes callback errors into text-only tool responses. Observe
+		// policy evidence before that conversion, without recovering the error
+		// or overriding the normal tool callbacks/results. Ordinary Chat has no
+		// observer, and model/tool-supplied error text grants no policy identity.
+		observer, err := plugin.New(plugin.Config{
+			Name: "bot_policy_outcomes",
+			OnToolErrorCallback: func(_ adktool.Context, _ adktool.Tool, _ map[string]any, err error) (map[string]any, error) {
+				var policyErr *agent.BotPolicyError
+				_, budgetFailure := bot.BudgetFailureMessage(err)
+				if errors.As(err, &policyErr) || budgetFailure {
+					cr.recordRunError(err)
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			cr.recordRunError(err)
+			cr.emitEvent("error", map[string]any{"error": fmt.Sprintf("Failed to create policy observer: %v", err)})
+			return
+		}
+		plugins = append(plugins, observer)
+	}
 	rnr, err := runner.New(runner.Config{
 		AppName:        getAppNameFromContext(cr.ctx),
 		Agent:          adkAgent,
 		SessionService: sessionService,
+		PluginConfig:   runner.PluginConfig{Plugins: plugins},
 	})
 	if err != nil {
 		cr.emitEvent("error", map[string]any{"error": fmt.Sprintf("Failed to create runner: %v", err)})
@@ -757,6 +919,9 @@ func (cr *ChatRunner) Run(
 	var representedDelegations sync.Map
 	pendingLiveDelegations := make(map[string]*pendingDelegation)
 	chatAgent.RegisterSubTaskProgress(cr.SessionID, func(evt agent.SubTaskProgressEvent) {
+		if _, bound := agent.PlanRuntimeFromContext(cr.ctx); bound && (evt.Type == "plan_announced" || evt.Type == "plan_step_update") {
+			return
+		}
 		if evt.BatchID != "" {
 			representedDelegations.Store(evt.BatchID, true)
 		}
@@ -960,12 +1125,25 @@ runLoop:
 		}
 
 		if runErr != nil {
+			cr.recordRunError(runErr)
 			lastRunErr = runErr
-			cr.emitEvent("error", map[string]any{"error": runErr.Error()})
-			persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
+			_, botRun := execution.BotRunIdentityFromContext(cr.ctx)
+			_, budgetFailure := bot.BudgetFailureMessage(runErr)
+			_, checkpointFailure := bot.CheckpointFailureMessage(runErr)
+			// Native typed stops are published once from the committed report.
+			// Text lookalikes retain ordinary sanitized Chat error signaling.
+			if !botRun || (!budgetFailure && !checkpointFailure) {
+				text := runErr.Error()
+				if shouldRetryTruncatedStream(runErr, hasContent) && cr.ctx.Err() == nil {
+					text = publicChatTruncatedStream
+				}
+				cr.emitEvent("error", map[string]any{"error": text})
+				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
+			}
 			break
 		}
 
+		cr.observeCompletion(event)
 		// Process state delta for tool approval, spinner, retry, errors
 		if event.Actions.StateDelta != nil {
 			cr.processStateDelta(event.Actions.StateDelta)
@@ -988,7 +1166,11 @@ runLoop:
 						hasContent = true
 					}
 					if !suppressAggregateText {
-						cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
+						data := map[string]any{"text": part.Text, "invocationId": event.InvocationID}
+						if _, botRun := execution.BotRunIdentityFromContext(cr.ctx); botRun && !event.Partial {
+							data["sourceEventId"] = event.ID
+						}
+						cr.emitEvent("text", data)
 					}
 				}
 				if part.FunctionCall != nil {
@@ -998,6 +1180,10 @@ runLoop:
 						pd := extractDelegationPlan(uiTool.args)
 						pd.batchID = part.FunctionCall.ID
 						pendingLiveDelegations[part.FunctionCall.ID] = pd
+						// Reserve the same position as eventsToMessages before parallel
+						// workers can publish in scheduler order. Omit tasks/sequence:
+						// the real start supplies exact identities and its own sequence.
+						cr.emitEvent("subtask_progress", map[string]any{"event_type": chatDelegationPending, "batch_id": pd.batchID})
 						continue
 					}
 					// Suppress plan tool calls — their effect is visible via the PlanPanel,
@@ -1068,8 +1254,9 @@ runLoop:
 						cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 						continue
 					}
-					// Suppress plan tool results — no useful info for the user.
-					if toolName == "announce_plan" {
+					// Accepted plans are represented by their durable snapshot. Rejected
+					// announcements must remain visible rather than silently disappearing.
+					if toolName == "announce_plan" && (part.FunctionResponse.Response["status"] == "ok" || part.FunctionResponse.Response["status"] == "announced") {
 						continue
 					}
 
@@ -1193,14 +1380,7 @@ runLoop:
 
 		// Emit usage event when the provider reports token counts.
 		// Only for non-partial responses to avoid duplicate emissions.
-		if event.LLMResponse.UsageMetadata != nil && !event.LLMResponse.Partial {
-			um := event.LLMResponse.UsageMetadata
-			cr.emitEvent("usage", map[string]any{
-				"input_tokens":  um.PromptTokenCount,
-				"output_tokens": um.CandidatesTokenCount,
-				"total_tokens":  um.TotalTokenCount,
-			})
-		}
+		cr.emitUsage(event)
 	}
 
 	// Safety net: if the run loop exited due to a stream truncation error
@@ -1240,6 +1420,7 @@ runLoop:
 				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
 				break
 			}
+			cr.observeCompletion(event)
 			if event.Actions.StateDelta != nil {
 				cr.processStateDelta(event.Actions.StateDelta)
 			}
@@ -1261,6 +1442,10 @@ runLoop:
 							pd := extractDelegationPlan(uiTool.args)
 							pd.batchID = part.FunctionCall.ID
 							pendingLiveDelegations[part.FunctionCall.ID] = pd
+							// Reserve the same position as eventsToMessages before parallel
+							// workers can publish in scheduler order. Omit tasks/sequence:
+							// the real start supplies exact identities and its own sequence.
+							cr.emitEvent("subtask_progress", map[string]any{"event_type": chatDelegationPending, "batch_id": pd.batchID})
 							continue
 						}
 						if uiTool.name == "announce_plan" {
@@ -1304,7 +1489,7 @@ runLoop:
 							cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 							continue
 						}
-						if toolName == "announce_plan" {
+						if toolName == "announce_plan" && (part.FunctionResponse.Response["status"] == "ok" || part.FunctionResponse.Response["status"] == "announced") {
 							continue
 						}
 						resp := part.FunctionResponse.Response
@@ -1335,14 +1520,7 @@ runLoop:
 			finishResponse(event)
 
 			// Emit usage event for retry loop too.
-			if event.LLMResponse.UsageMetadata != nil && !event.LLMResponse.Partial {
-				um := event.LLMResponse.UsageMetadata
-				cr.emitEvent("usage", map[string]any{
-					"input_tokens":  um.PromptTokenCount,
-					"output_tokens": um.CandidatesTokenCount,
-					"total_tokens":  um.TotalTokenCount,
-				})
-			}
+			cr.emitUsage(event)
 		}
 	} else if lastRunErr == nil && !hasContent && cr.ctx.Err() == nil {
 		// The run loop exited cleanly but produced no content at all.
@@ -1363,6 +1541,21 @@ runLoop:
 	// flips an artifact's "is this a report?" gate so the frontend embeds it
 	// inline as EmbeddedFileViewer instead of showing a small artifact card.
 	cr.detectAndEmitReportMarkers(sessionService)
+}
+
+// emitUsage publishes one completed model call, never cumulative partial snapshots.
+// Match completion accounting so reasoning and tool prompts are included and the
+// total remains the sum of the two reported components, even without a raw total.
+func (cr *ChatRunner) emitUsage(event *session.Event) {
+	if event == nil || event.Partial || event.UsageMetadata == nil || agent.IsTurnContextEvent(event) {
+		return
+	}
+	input, output := bot.ModelUsageTokens(event.UsageMetadata)
+	cr.emitEvent("usage", map[string]any{
+		"input_tokens":  input,
+		"output_tokens": output,
+		"total_tokens":  input + output,
+	})
 }
 
 // processStateDelta extracts approval, retry, error, and thinking events from state deltas.
@@ -1487,7 +1680,7 @@ func (cr *ChatRunner) maybeEmitChatQuestion(sessionService session.Service, tool
 	}
 	kind, _ := resp["kind"].(string)
 	prompt, _ := resp["prompt"].(string)
-	if prompt == "" || (kind != "yesno" && kind != "select") {
+	if prompt == "" || (question.Kind(kind) != question.YesNo && question.Kind(kind) != question.Select && question.Kind(kind) != question.Text) {
 		return false
 	}
 	questionID, _ := resp["questionId"].(string)
@@ -1521,11 +1714,27 @@ func (cr *ChatRunner) maybeEmitChatQuestion(sessionService session.Service, tool
 		return false
 	}
 
+	var custom *bool
+	if raw, exists := resp["allow_custom_answer"]; exists {
+		value, ok := raw.(bool)
+		if !ok {
+			return false
+		}
+		custom = &value
+	}
+	validation := question.Question{Kind: question.Kind(kind), Prompt: prompt, AllowCustomAnswer: custom}
+	for _, o := range options {
+		validation.Options = append(validation.Options, question.Option{ID: o.ID, Label: o.Label})
+	}
+	if validation.Validate() != nil {
+		return false
+	}
 	payload := chatQuestionPayload{
-		QuestionID: questionID,
-		Kind:       kind,
-		Prompt:     prompt,
-		Options:    options,
+		AllowCustomAnswer: custom,
+		QuestionID:        questionID,
+		Kind:              kind,
+		Prompt:            prompt,
+		Options:           options,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -2084,11 +2293,34 @@ func numberAsInt(value any) (int, bool) {
 
 // emitEvent creates a ChatEvent and sends it to all subscribers.
 func (cr *ChatRunner) emitEvent(eventType string, data map[string]any) {
+	cr.emitMu.Lock()
+	defer cr.emitMu.Unlock()
+	switch eventType {
+	case "error", "error_info":
+		cr.recordRunError(fmt.Errorf("chat %s: %v", eventType, data))
+	case "approval", "network_denial_hint", "tutorial_blueprint_preview", "chat_question":
+		cr.completionMu.Lock()
+		cr.completion.Blocked = true
+		cr.completionMu.Unlock()
+	}
+	data = publicChatErrorData(eventType, data)
+	if cr.sinkErr != nil {
+		return
+	}
 	event := ChatEvent{
 		ID:        fmt.Sprintf("%s-%d", eventType, time.Now().UnixNano()),
 		Type:      eventType,
 		Data:      data,
 		Timestamp: time.Now(),
+	}
+
+	if cr.eventSink != nil {
+		if err := cr.eventSink(cr.ctx, event); err != nil {
+			cr.sinkErr = err
+			cr.recordRunError(fmt.Errorf("persist chat event: %w", err))
+			cr.cancel()
+			return
+		}
 	}
 
 	// Buffer the event

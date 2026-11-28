@@ -5,8 +5,9 @@ import (
 	"iter"
 	"strings"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/SAP/astonish/pkg/provider/httpool"
 	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
+	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
 )
 
@@ -22,6 +23,7 @@ func NewProvider(apiKey, baseURL, modelName string) model.LLM {
 		apiKey = "litellm"
 	}
 	config := openai.DefaultConfig(apiKey)
+	config.HTTPClient = httpool.StreamingClient()
 
 	// Ensure baseURL has /v1 suffix, but don't duplicate it
 	if !strings.HasSuffix(baseURL, "/v1") {

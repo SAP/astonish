@@ -215,8 +215,93 @@ func buildTurnContextContent(overrides *PromptOverrides, relevantTools, relevant
 	return buildTurnContextContentForMode(overrides, relevantTools, relevantKnowledge, false)
 }
 
-// buildTurnContextContentForMode selects knowledge policy from the trusted builder
-// mode, without changing persisted history or any other context sections.
+// projectCompletedCodePlanRequest changes only provider copies of proven hidden
+// context. Stored events and user-authored lookalikes remain untouched.
+func projectCompletedCodePlanRequest(ctx context.Context, req *model.LLMRequest, s PlanSnapshot) {
+	if req == nil {
+		return
+	}
+	reference := CompletedCodePlanReference(s, "session PLAN.md")
+	if path, _ := ctx.Value(delegationPlanSourceKey{}).(string); path != "" {
+		reference = CompletedCodePlanReference(s, path)
+	}
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		cfg := *req.Config
+		content := *cfg.SystemInstruction
+		content.Parts = nil
+		for _, p := range cfg.SystemInstruction.Parts {
+			if p != nil && (strings.HasPrefix(p.Text, "\nCode execution runtime:") || strings.HasPrefix(p.Text, "The user is reviewing phase ") || strings.HasPrefix(p.Text, "The previous response ended before the approved work")) {
+				continue
+			}
+			content.Parts = append(content.Parts, p)
+		}
+		cfg.SystemInstruction = &content
+		req.Config = &cfg
+	}
+	// CallbackContext embeds context but only invocation contexts expose Session.
+	type sessionContext interface{ Session() session.Session }
+	sc, ok := ctx.(sessionContext)
+	if !ok || sc.Session() == nil {
+		return
+	}
+	contents := append([]*genai.Content(nil), req.Contents...)
+	for i, c := range contents {
+		proven, ambiguous := false, false
+		for e := range sc.Session().Events().All() {
+			if e == nil || e.Content == nil || !(c == e.Content || reflect.DeepEqual(c, e.Content)) {
+				continue
+			}
+			marked, _ := e.Actions.StateDelta[turnContextStateKey].(bool)
+			if e.Author == "user" && IsTurnContextContent(e.Content) && (marked || strings.HasPrefix(e.ID, "turn-context-") || strings.HasPrefix(e.ID, "compact-")) {
+				proven = true
+			} else {
+				ambiguous = true
+			}
+		}
+		if !proven || ambiguous {
+			continue
+		}
+		copy := *c
+		copy.Parts = nil
+		for _, part := range c.Parts {
+			if part == nil {
+				copy.Parts = append(copy.Parts, part)
+				continue
+			}
+			p := *part
+			// Session Task is the generated full plan, followed by the native Runtime
+			// Mode boundary. Keep unrelated sections before and after these two.
+			start := strings.Index(p.Text, "## Session Task\n\n")
+			mode := strings.Index(p.Text, "\n\n## Runtime Mode\n\n")
+			end := mode
+			if start >= 0 {
+				if skill := strings.Index(p.Text[start:], "\n\n## Available Skills For This Request\n\n"); skill >= 0 && (end < 0 || start+skill < end) {
+					end = start + skill
+				}
+			}
+			if start >= 0 && end > start {
+				body := p.Text[start+len("## Session Task\n\n") : end]
+				activePrefix, _, _ := strings.Cut(PlanExecutionSystemContext, "__PLAN_BODY__")
+				completedPrefix, _, _ := strings.Cut(PlanCompletedSystemContext, "__PLAN_BODY__")
+				if strings.HasPrefix(body, activePrefix) || strings.HasPrefix(body, completedPrefix) || strings.HasPrefix(body, completedCodePlanPrefix) {
+					p.Text = p.Text[:start] + "## Session Task\n\n" + reference + p.Text[end:]
+				}
+			}
+			p.Text = strings.ReplaceAll(p.Text, "An approved plan is being executed. Follow it without replacing it.", "The earlier plan is historical. Ordinary Normal mode is active.")
+			copy.Parts = append(copy.Parts, &p)
+		}
+		contents[i] = &copy
+	}
+	req.Contents = contents
+}
+
+const completedCodePlanPrefix = "Completed Code plan (historical reference only): "
+
+// CompletedCodePlanReference keeps identity and location, not execution instructions.
+func CompletedCodePlanReference(s PlanSnapshot, path string) string {
+	return fmt.Sprintf("%s%q (plan_id=%s, revision=%d). History: %s. Ordinary Normal mode is active; this plan does not constrain new work or delegation.", completedCodePlanPrefix, s.Goal, s.PlanID, s.Revision, path)
+}
+
 func buildTurnContextContentForMode(overrides *PromptOverrides, relevantTools, relevantKnowledge string, codeMode bool) *genai.Content {
 	var sections []string
 	add := func(title, body string) {
@@ -227,8 +312,12 @@ func buildTurnContextContentForMode(overrides *PromptOverrides, relevantTools, r
 
 	if overrides != nil {
 		add("Output Constraints", overrides.ChannelHints)
-		add("Execution Context", overrides.SchedulerHints)
-		add("Session Task", overrides.SessionContext)
+		// Bot execution hints/persona belong only to the cloned system prompt.
+		// Do not persist them as user-role events, including external rendering.
+		if overrides.Bot == nil {
+			add("Execution Context", overrides.SchedulerHints)
+			add("Session Task", overrides.SessionContext)
+		}
 		add("Available Skills For This Request", overrides.SkillIndex)
 		var modes []string
 		if overrides.PlanMode {

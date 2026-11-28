@@ -17,6 +17,7 @@ interface InvocationScopedMessage {
 
 export interface UserMessage extends InvocationScopedMessage {
   type: 'user'
+  eventId?: string
   content: string
   attachments?: AttachmentInfo[]
 }
@@ -29,10 +30,15 @@ export interface AttachmentInfo {
   data?: string       // base64 data (included for images to render thumbnails)
 }
 
-export interface AgentMessage {
+export interface AgentMessage extends InvocationScopedMessage {
   type: 'agent'
   content: string
+  // Authoritative server delivery time (RFC3339), never a browser receipt time.
+  timestamp?: string
   _streaming?: boolean
+  // Durable Bot publication identity; never merged into incremental text.
+  operationId?: string
+  operationReplay?: boolean
 }
 
 export interface ToolCallMessage {
@@ -174,6 +180,15 @@ export interface FleetEvent {
   [key: string]: unknown
 }
 
+export interface FileAccessAdapter {
+  identity: string
+  freshness: string
+  preview: boolean
+  readPreview(signal: AbortSignal): Promise<{ content: string; truncated: boolean }>
+  download(signal: AbortSignal): Promise<void>
+}
+export interface BotFilePublicationMessage { type: 'bot_file_publication'; publication: import('@/api/botFiles').BotFilePublication }
+
 export interface ArtifactMessage {
   type: 'artifact'
   path: string
@@ -261,12 +276,65 @@ export function slidesHarnessLabel(update: Pick<DocsUpdateMessage, 'description'
 // ---- Execution plan (announce_plan / update_plan) ----
 
 export interface PlanMessage {
+  snapshot?: PlanSnapshot     // Canonical source; never infer approval or completion from prose
+  revision?: number
   type: 'plan'
   goal: string                // Plan title (e.g., "Source-Level GitHub Comparison")
   steps: PlanStepInfo[]       // Ordered list of plan steps
   context?: string            // Optional WHY narrative section
   whatNotToDo?: string        // Optional scope guard section
   verification?: string       // Optional end-to-end smoke test section
+}
+
+export const PlanLifecycle = { Approved: 'approved', Executing: 'executing', Completed: 'completed' } as const
+
+export interface PlanStepDefinition {
+  name: string
+  description: string
+  details?: string
+  summary?: string
+  files?: PlanFileInfo[] | null
+  outcome?: string
+  verify?: string
+  verify_kind?: string
+  parallel_group?: string
+}
+export interface PlanDocumentDefinition {
+  context?: string
+  what_not_to_do?: string
+  verification?: string
+}
+export interface PlanDefinition {
+  goal: string
+  document: PlanDocumentDefinition
+  steps: PlanStepDefinition[]
+}
+export interface PlanRevisionProposal {
+  id: string
+  base_revision: number
+  reason: string
+  candidate: PlanDefinition
+  diff: {
+    goal_changed?: boolean
+    document_changed?: boolean
+    structure_changed?: boolean
+    changed_steps?: string[]
+    added_steps?: string[]
+    removed_steps?: string[]
+  }
+}
+export interface PlanSnapshot extends Omit<PlanDefinition, 'steps'> {
+  plan_id: string
+  revision: number
+  sequence: number
+  document: PlanDocumentDefinition & {
+    lifecycle?: string
+    results?: string
+    revision_note?: string
+    graph_acceptance?: string
+  }
+  steps: (PlanStepDefinition & { status?: PlanStepInfo['status']; evidence?: string })[]
+  pending_revision?: PlanRevisionProposal | null
 }
 
 export interface PlanFileInfo {
@@ -334,7 +402,8 @@ export interface ChatQuestionOption {
 export interface ChatQuestionMessage {
   type: 'chat_question'
   questionId: string
-  kind: 'yesno' | 'select'
+  kind: 'yesno' | 'select' | 'text'
+  allow_custom_answer?: boolean
   prompt: string
   options: ChatQuestionOption[]
   answered?: boolean
@@ -419,7 +488,13 @@ export interface NetworkDenialMessage {
   sandbox_name: string
 }
 
+export interface BotOperationMessage { type: 'bot_operation'; operationId: string; eventId: string }
+export interface BotReviewMessage { type: 'bot_review'; kind: 'proposal' | 'approval'; reviewId: string; eventId: string; question?: import('@/api/questions').Question }
+
 export type ChatMsg = InvocationScopedMessage & (
+  | BotFilePublicationMessage
+  | BotOperationMessage
+  | BotReviewMessage
   | FleetMessageItem
   | UserMessage
   | AgentMessage

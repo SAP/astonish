@@ -44,7 +44,7 @@ func Execute() error {
 	// Check for updates — skip for non-interactive / structured-stdout
 	// subcommands where stdout is a protocol channel (e.g. "node" emits
 	// NDJSON) or already handles its own output ("version").
-	if os.Args[1] != "version" && os.Args[1] != "node" {
+	if os.Args[1] != "version" && os.Args[1] != "node" && os.Args[1] != "bots" {
 		checkForUpdates()
 	}
 
@@ -60,6 +60,8 @@ func Execute() error {
 		return handleOrgCommand(os.Args[2:])
 	case "team":
 		return handleTeamCommand(os.Args[2:])
+	case "bots":
+		return handleBotsCommand(os.Args[2:])
 	case "chat":
 		return handleChatCommand(os.Args[2:])
 	case "code":
@@ -143,6 +145,7 @@ func printUsage() {
 	fmt.Println("                        Astonish CLI commands")
 	fmt.Println("    code                Local coding tool (in-process, host filesystem) [default]")
 	fmt.Println("    chat                Start an interactive chat session (requires login)")
+	fmt.Println("    bots                Manage remote Bots and watch durable logs (requires login)")
 	fmt.Println("    login               Connect to a remote Astonish server")
 	fmt.Println("    logout              Disconnect from the remote server")
 	fmt.Println("    status              Show connection mode and status")

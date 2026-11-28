@@ -13,6 +13,16 @@ It does **not** iframe Studio Chat and does **not** import `web/src/components/S
 
 Follow-up messages reuse the `sessionId` from the SSE `session` event (`data.sessionId`, fallback `data.id`). That id is stored in `chrome.storage.local` (`astonishExtensionChat`) together with the list of sessions **this extension created**. Studio Chat still lists every session; the panel picker is filtered client-side to extension ids only. **New** clears the current id so the next Send mints a fresh chat. Reloading the panel restores the last-used extension session and its history.
 
+## Additive Bot event compatibility
+
+`extension/src/lib/astonish-client.ts` forwards `transcript` and `replay_complete` to its existing `onEvent(type, data)` callback, alongside ordinary chat events. These are the production envelopes emitted by `pkg/api/bot_event_stream.go`: an SSE `id: <session UUID>:<cursor>`, `event: transcript`, and JSON-encoded ADK event; initial catch-up ends with `event: replay_complete` and `{"persisted":true}`. There are no separate `bot_metadata` or `approval_state` wire events in that endpoint. Metadata and approval state within the envelope are preserved verbatim, including `Actions.StateDelta.bot_runtime_event`; additive fields on ordinary `session` events are likewise retained.
+
+The parser accepts LF/CRLF frames across arbitrary network chunks, optional spaces after field colons, comments, and multiline JSON data. Unknown event types and malformed/non-object payloads remain ignored without preventing subsequent valid events. Empty replay emits only its marker; replay completion is not chat completion.
+
+This is **transport compatibility, not a Bot viewer or subscription**. `connectChat` still only posts to `/api/studio/chat`; it does not attach to the read-only Bot endpoint, retain/resume Bot cursors, or unwrap persisted transcript events into `text`, `tool_call`, or `approval`. In particular, replayed approvals cannot trigger page tools, approval resolution, or continuation requests. The side panel does not render these additional envelopes, and live chat `approval` still uses the existing “Finish this in Studio” notice. Bot management and Bot approval decisions remain in Studio; authentication, extension session filtering, and explicit Apply behavior are unchanged.
+
+Coverage: `extension/src/lib/__tests__/astonish-client.test.ts` exercises production-shaped Bot envelopes, nested approval state, empty replay, chunked LF/CRLF, malformed payload recovery, legacy chat events, and absence of extra requests or implicit auto-approval. Run `cd extension && npm test && npm run typecheck`.
+
 ## Three contexts
 
 | Context | Role |

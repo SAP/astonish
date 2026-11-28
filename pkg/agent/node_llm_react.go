@@ -8,7 +8,10 @@ import (
 	"strings"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/planner"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -34,6 +37,9 @@ func (a *AstonishAgent) executeReActFallback(ctx context.Context, node *config.N
 	if len(a.Toolsets) > 0 {
 		minimalCtx := &minimalReadonlyContext{Context: ctx}
 		for _, ts := range a.Toolsets {
+			if err := botSafeToolset(ctx, ts); err != nil {
+				return false, err
+			}
 			tsTools, err := ts.Tools(minimalCtx)
 			if err != nil {
 				continue
@@ -115,6 +121,42 @@ func (a *AstonishAgent) executeReActFallback(ctx context.Context, node *config.N
 		reactPlanner = planner.NewReActPlannerWithApproval(a.LLM, allTools, approvalCallback, state, a.DebugMode)
 	} else {
 		reactPlanner = planner.NewReActPlanner(a.LLM, allTools)
+	}
+
+	reactPlanner.BotDispatch = func(ctx tool.Context, target tool.Tool, args map[string]any) (map[string]any, error) {
+		identity := botExecutableIdentity(target)
+		var authorizedAction execution.ActionDescriptor
+		if err := authorizeBotTool(ctx, identity, args, &authorizedAction); err != nil {
+			return nil, err
+		}
+		resolver := a.CredentialStore
+		if cs := store.CredentialStoreFromContext(ctx); cs != nil {
+			resolver = credentials.NewStoreAdapter(cs)
+		}
+		if resolver != nil {
+			credentials.RegisterResolvedWithRedactor(args, resolver, a.Redactor)
+			var shellFields []string
+			if target.Name() == "shell_command" || target.Name() == "process_write" {
+				shellFields = []string{"command"}
+			}
+			defer credentials.SubstituteAndRestore(args, resolver, shellFields...)()
+		}
+		if a.PendingSecrets != nil {
+			defer a.PendingSecrets.SubstituteAndRestore(args)()
+		}
+		dispatchCtx, err := botAuthorizedInvocationContext(ctx, identity, args, authorizedAction)
+		if err != nil {
+			return nil, err
+		}
+		runnable, ok := target.(RunnableTool)
+		if !ok {
+			return nil, fmt.Errorf("tool is not runnable")
+		}
+		out, err := runnable.Run(dispatchCtx, args)
+		if a.Redactor != nil && out != nil {
+			out = a.Redactor.RedactMap(out)
+		}
+		return out, err
 	}
 
 	// Strip output_model instructions from system instruction for ReAct

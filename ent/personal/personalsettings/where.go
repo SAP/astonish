@@ -320,6 +320,16 @@ func BrandThemeContainsFold(v string) predicate.PersonalSettings {
 	return predicate.PersonalSettings(sql.FieldContainsFold(FieldBrandTheme, v))
 }
 
+// BotEmailIsNil applies the IsNil predicate on the "bot_email" field.
+func BotEmailIsNil() predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldIsNull(FieldBotEmail))
+}
+
+// BotEmailNotNil applies the NotNil predicate on the "bot_email" field.
+func BotEmailNotNil() predicate.PersonalSettings {
+	return predicate.PersonalSettings(sql.FieldNotNull(FieldBotEmail))
+}
+
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.
 func CreatedAtEQ(v time.Time) predicate.PersonalSettings {
 	return predicate.PersonalSettings(sql.FieldEQ(FieldCreatedAt, v))

@@ -21,6 +21,14 @@ type Session struct {
 	ID string `json:"id,omitempty"`
 	// UserID holds the value of the "user_id" field.
 	UserID *uuid.UUID `json:"user_id,omitempty"`
+	// BotID holds the value of the "bot_id" field.
+	BotID *uuid.UUID `json:"bot_id,omitempty"`
+	// BotRunID holds the value of the "bot_run_id" field.
+	BotRunID *uuid.UUID `json:"bot_run_id,omitempty"`
+	// Purpose holds the value of the "purpose" field.
+	Purpose session.Purpose `json:"purpose,omitempty"`
+	// Retention holds the value of the "retention" field.
+	Retention session.Retention `json:"retention,omitempty"`
 	// Title holds the value of the "title" field.
 	Title string `json:"title,omitempty"`
 	// MessageCount holds the value of the "message_count" field.
@@ -100,13 +108,13 @@ func (*Session) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case session.FieldUserID:
+		case session.FieldUserID, session.FieldBotID, session.FieldBotRunID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case session.FieldMetadata:
 			values[i] = new([]byte)
 		case session.FieldMessageCount, session.FieldIssueNumber, session.FieldLastSeq:
 			values[i] = new(sql.NullInt64)
-		case session.FieldID, session.FieldTitle, session.FieldParentID, session.FieldFleetKey, session.FieldFleetName, session.FieldRepo, session.FieldWorkspaceDir, session.FieldProviderName, session.FieldModelName:
+		case session.FieldID, session.FieldPurpose, session.FieldRetention, session.FieldTitle, session.FieldParentID, session.FieldFleetKey, session.FieldFleetName, session.FieldRepo, session.FieldWorkspaceDir, session.FieldProviderName, session.FieldModelName:
 			values[i] = new(sql.NullString)
 		case session.FieldCreatedAt, session.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -137,6 +145,32 @@ func (_m *Session) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.UserID = new(uuid.UUID)
 				*_m.UserID = *value.S.(*uuid.UUID)
+			}
+		case session.FieldBotID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field bot_id", values[i])
+			} else if value.Valid {
+				_m.BotID = new(uuid.UUID)
+				*_m.BotID = *value.S.(*uuid.UUID)
+			}
+		case session.FieldBotRunID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field bot_run_id", values[i])
+			} else if value.Valid {
+				_m.BotRunID = new(uuid.UUID)
+				*_m.BotRunID = *value.S.(*uuid.UUID)
+			}
+		case session.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = session.Purpose(value.String)
+			}
+		case session.FieldRetention:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field retention", values[i])
+			} else if value.Valid {
+				_m.Retention = session.Retention(value.String)
 			}
 		case session.FieldTitle:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -282,6 +316,22 @@ func (_m *Session) String() string {
 		builder.WriteString("user_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	if v := _m.BotID; v != nil {
+		builder.WriteString("bot_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.BotRunID; v != nil {
+		builder.WriteString("bot_run_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("purpose=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Purpose))
+	builder.WriteString(", ")
+	builder.WriteString("retention=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Retention))
 	builder.WriteString(", ")
 	builder.WriteString("title=")
 	builder.WriteString(_m.Title)

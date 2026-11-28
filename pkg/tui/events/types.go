@@ -3,6 +3,17 @@
 // events into transcript state; it never talks to ADK or HTTP directly.
 package events
 
+import (
+	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/store"
+)
+
+const KindPlanSnapshot Kind = "plan_snapshot"
+
+const KindBotOperation Kind = "bot_operation"
+const KindBotRunState Kind = "bot_run_state"
+const KindBotReport Kind = "bot_report"
+
 // Kind identifies a chat event. Values mirror Studio SSE types where possible
 // so the remote backend can map 1:1 and soft-degrade unknown kinds.
 type Kind string
@@ -99,6 +110,12 @@ type DelegationTask struct {
 
 // Event is one unit of chat progress. Fields are optional by Kind.
 type Event struct {
+	BotFilePublication       *store.BotFilePublication
+	PlanSnapshot             *agent.PlanSnapshot
+	InvocationID             string // canonical publication identity for KindBotReport
+	EventID                  string // stable persisted publication row
+	BotOperation             *store.BotOperationView
+	BotRunState              *store.BotRunState
 	DelegationBatchID        string
 	DelegationTaskID         string
 	DelegationChildSessionID string
@@ -254,6 +271,18 @@ func NewAuthorizationApproval(name string, args map[string]any, options []string
 	}
 }
 
+// Initial plan approval labels are shared by events, rendering and keyboard dispatch.
+const (
+	PlanOptionApprove        = "Approve & implement"
+	PlanOptionRequestChanges = "Request changes"
+	PlanOptionDecline        = "Decline"
+)
+
+// PlanApprovalOptions returns a fresh ordered list, with implementation selected by default.
+func PlanApprovalOptions() []string {
+	return []string{PlanOptionApprove, PlanOptionRequestChanges, PlanOptionDecline}
+}
+
 // NewPlan returns one atomic plan document and approval-lifecycle event.
 func NewPlan(content string, status PlanStatus) Event {
 	if status == "" {
@@ -263,7 +292,7 @@ func NewPlan(content string, status PlanStatus) Event {
 		Kind:         KindPlan,
 		Text:         content,
 		ToolName:     "announce_plan",
-		Options:      []string{"Approve & implement", "Request changes", "Decline"},
+		Options:      PlanApprovalOptions(),
 		ApprovalKind: "plan",
 		PlanStatus:   status,
 	}

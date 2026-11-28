@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { waitFor, fireEvent } from '@testing-library/react'
+import { waitFor, fireEvent, within } from '@testing-library/react'
 import './scenarioSetup'
 import { renderChat } from '../helpers/renderChat'
 import type { RenderChatResult } from '../helpers/renderChat'
@@ -34,26 +34,23 @@ describe('Harness Panel Layout', () => {
       scenarioEvents: appGenerated.events as FixtureEvent[],
     })
 
-    // Expanded sidebar shows "Conversations" header
+    const chat = within(result.container)
+    // Expanded sidebar shows both section headings and the collapse control.
     await waitFor(() => {
-      expect(result.container.textContent).toContain('Conversations')
-      expect(
-        Array.from(result.container.querySelectorAll('button')).some(
-          b => b.getAttribute('title') === 'Hide sidebar',
-        ),
-      ).toBe(true)
+      expect(chat.getByText('Bots', { exact: true })).toBeVisible()
+      expect(chat.getByText('Chats', { exact: true })).toBeVisible()
+      expect(chat.getByTitle('Hide sidebar')).toBeVisible()
     })
 
     await result.sendMessage('Generate a dashboard')
 
     await waitFor(() => {
       expect(result.container.querySelector('[data-testid="harness-panel"]')).toBeTruthy()
-      // Collapsed strip exposes expand control
-      expect(
-        Array.from(result.container.querySelectorAll('button')).some(
-          b => b.getAttribute('title') === 'Show sidebar',
-        ),
-      ).toBe(true)
+      // Collapsed strip hides both headings and exposes the expand control.
+      expect(chat.queryByText('Bots', { exact: true })).not.toBeInTheDocument()
+      expect(chat.queryByText('Chats', { exact: true })).not.toBeInTheDocument()
+      expect(chat.queryByTitle('Hide sidebar')).not.toBeInTheDocument()
+      expect(chat.getByTitle('Show sidebar')).toBeVisible()
     }, { timeout: 10000 })
   })
 

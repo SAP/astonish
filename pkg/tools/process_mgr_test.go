@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +159,68 @@ func TestLooksLikePrompt(t *testing.T) {
 }
 
 // --- Process Manager Tests ---
+
+func TestCodeWorkspaceHandoffCleansOwnedProcesses(t *testing.T) {
+	pm, other := NewProcessManager(), NewProcessManager()
+	defer pm.Cleanup()
+	defer other.Cleanup()
+	startHeartbeat := func(manager *ProcessManager, dir string) *ProcessSession {
+		// Both shell and child ignore TERM and HUP: only group KILL stops
+		// the heartbeat, even if the leader exits or the master PTY closes.
+		s, err := manager.Start("trap '' TERM HUP; sh -c 'trap \"\" TERM HUP; while :; do echo beat >> heartbeat; sleep 0.05; done' & wait", dir, 24, 80)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if data, _ := os.ReadFile(filepath.Join(dir, "heartbeat")); len(data) > 0 {
+				return s
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatal("heartbeat did not start")
+		return nil
+	}
+	dir, otherDir := t.TempDir(), t.TempDir()
+	s := startHeartbeat(pm, dir)
+	if s.ownedPGID == 0 {
+		t.Skip("private Unix PTY process groups unavailable")
+	}
+	untouched := startHeartbeat(other, otherDir)
+	before := time.Now()
+	if err := pm.Kill(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(before) > 9*time.Second {
+		t.Fatal("termination exceeded bounded grace period")
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "heartbeat"))
+	otherData, _ := os.ReadFile(filepath.Join(otherDir, "heartbeat"))
+	time.Sleep(300 * time.Millisecond)
+	after, _ := os.ReadFile(filepath.Join(dir, "heartbeat"))
+	otherAfter, _ := os.ReadFile(filepath.Join(otherDir, "heartbeat"))
+	if len(after) != len(data) {
+		t.Fatal("owned child survived group cleanup")
+	}
+	if len(otherAfter) <= len(otherData) || !untouched.IsRunning() {
+		t.Fatal("other workspace was stopped")
+	}
+	if err := pm.Kill(s.ID); err != nil {
+		t.Fatalf("repeated kill: %v", err)
+	}
+}
+
+func TestProcessSignalRejectsParentGroup(t *testing.T) {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Using this process as a supposed group leader must never authorize
+	// signaling our own group. Verification must return no owned group.
+	if pgid := ownedProcessGroup(p); pgid != 0 {
+		t.Fatalf("claimed parent group %d", pgid)
+	}
+}
 
 func TestProcessManager_StartAndWait(t *testing.T) {
 	pm := NewProcessManager()

@@ -95,6 +95,10 @@ type JobSchedule struct {
 
 // JobPayload defines what a job executes.
 type JobPayload struct {
+	// Bot binding identifiers are revalidated against the immutable Bot version.
+	BotID        string            `json:"bot_id,omitempty"`
+	BotVersion   int64             `json:"bot_version,omitempty"`
+	BotTriggerID string            `json:"bot_trigger_id,omitempty"`
 	Flow         string            `json:"flow,omitempty"`
 	Params       map[string]string `json:"params,omitempty"`
 	Instructions string            `json:"instructions,omitempty"`

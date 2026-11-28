@@ -35,6 +35,26 @@ func FromContext(ctx context.Context) *Services {
 	return svc
 }
 
+// BotStoreFromContext selects only the explicitly requested scope. There is no
+// private-to-team fallback and no implicit default for an unknown scope.
+func BotStoreFromContext(ctx context.Context, scope BotScope) BotStore {
+	if ctx == nil {
+		return nil
+	}
+	svc := FromContext(ctx)
+	if svc == nil {
+		return nil
+	}
+	switch scope {
+	case BotScopePersonal:
+		return svc.PersonalBots
+	case BotScopeTeam:
+		return svc.Bots
+	default:
+		return nil
+	}
+}
+
 // FromRequest retrieves the Services instance from an HTTP request's context.
 // This is a convenience wrapper for handler functions.
 func FromRequest(r *http.Request) *Services {

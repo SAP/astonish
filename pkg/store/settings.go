@@ -85,18 +85,18 @@ type PlatformTelegramConfig struct {
 
 // PlatformEmailConfig holds non-secret Email channel settings.
 type PlatformEmailConfig struct {
-	Enabled           bool   `json:"enabled"`
-	Provider          string `json:"provider,omitempty"`            // "imap" (default), "gmail", or "msgraph"
-	IMAPServer        string `json:"imap_server"`                   // e.g. "imap.gmail.com:993"
-	SMTPServer        string `json:"smtp_server"`                   // e.g. "smtp.gmail.com:587"
-	Address           string `json:"address"`                       // agent's email address
-	Username          string `json:"username,omitempty"`            // login username (defaults to address)
-	Credential        string `json:"credential,omitempty"`          // credential store name (for msgraph provider)
-	PollInterval      int    `json:"poll_interval,omitempty"`       // seconds, default 30
-	Folder            string `json:"folder,omitempty"`              // default "INBOX"
-	MarkRead          *bool  `json:"mark_read,omitempty"`           // default true
-	MaxBodyChars      int    `json:"max_body_chars,omitempty"`      // default 50000
-	SenderAuthMode    string `json:"sender_auth_mode,omitempty"`  // "strict" (default) or "provider-trust"
+	Enabled        bool   `json:"enabled"`
+	Provider       string `json:"provider,omitempty"`         // "imap" (default), "gmail", or "msgraph"
+	IMAPServer     string `json:"imap_server"`                // e.g. "imap.gmail.com:993"
+	SMTPServer     string `json:"smtp_server"`                // e.g. "smtp.gmail.com:587"
+	Address        string `json:"address"`                    // agent's email address
+	Username       string `json:"username,omitempty"`         // login username (defaults to address)
+	Credential     string `json:"credential,omitempty"`       // credential store name (for msgraph provider)
+	PollInterval   int    `json:"poll_interval,omitempty"`    // seconds, default 30
+	Folder         string `json:"folder,omitempty"`           // default "INBOX"
+	MarkRead       *bool  `json:"mark_read,omitempty"`        // default true
+	MaxBodyChars   int    `json:"max_body_chars,omitempty"`   // default 50000
+	SenderAuthMode string `json:"sender_auth_mode,omitempty"` // "strict" (default) or "provider-trust"
 	// RequireSenderAuth is a legacy compatibility setting; prefer SenderAuthMode.
 	RequireSenderAuth *bool  `json:"require_sender_auth,omitempty"`
 	TrustedAuthservID string `json:"trusted_authserv_id,omitempty"` // receiver authserv-id required in strict mode
@@ -128,6 +128,10 @@ type OrgSettings struct {
 // that can be independently configured per-team in platform mode.
 // These settings are stored in the teams.settings JSONB column.
 type TeamSettings struct {
+	// BotEmail is a team-scoped mailbox, separate from the platform channel.
+	// Secrets remain named credentials in the owner's run credential scope.
+	BotEmail *BotEmailSettings `json:"bot_email,omitempty"`
+
 	// Providers maps provider instance names to their configuration.
 	Providers map[string]ProviderConfig `json:"providers,omitempty"`
 
@@ -203,6 +207,9 @@ type SettingsStore interface {
 // is often NULL, uuid.Nil (all-zeros) is used as a sentinel for the single
 // local user (see DECISION-1 in .omo/plans/per-chat-app-model-pin.md).
 type PersonalSettings struct {
+	// BotEmail never inherits a team or platform mailbox when absent.
+	BotEmail *BotEmailSettings `json:"bot_email,omitempty"`
+
 	// DefaultProvider is the user-preferred provider instance name.
 	// Empty string means "inherit from the enclosing scope" (team/org/platform).
 	DefaultProvider string `json:"default_provider,omitempty"`

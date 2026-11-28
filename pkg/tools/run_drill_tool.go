@@ -37,6 +37,36 @@ type RunDrillResult struct {
 	ArtifactPaths []string `json:"artifact_paths,omitempty"` // scene MP4s + manifest for Studio Files
 }
 
+// ScopedDrillExecution supplies only invocation-local authority. NewExecutor must
+// dispatch through the runtime's guarded catalog, and LLM must carry its budget.
+// Nil callbacks never select host resources. Credential mappings require an
+// explicit injector; report persistence is optional and never falls back to disk.
+type ScopedDrillExecution struct {
+	CapturedSuite     *adrill.LoadedSuite
+	NewExecutor       func(tool.Context) (adrill.ToolExecutor, error)
+	LLM               adrill.LLMProvider
+	InjectCredentials func(tool.Context, *adrill.LoadedSuite) error
+	SaveReport        func(tool.Context, *adrill.SuiteReport) error
+}
+
+func DrillExecutionFromContext(ctx context.Context) *ScopedDrillExecution {
+	binding, _ := ctx.Value(drillExecutionContextKey{}).(scopedDrillExecution)
+	return binding.execution
+}
+
+type drillExecutionContextKey struct{}
+type scopedDrillExecution struct{ execution *ScopedDrillExecution }
+
+// WithDrillExecutionContext shadows constructor dependencies, including with nil.
+func WithDrillExecutionContext(ctx context.Context, execution *ScopedDrillExecution) context.Context {
+	var snapshot *ScopedDrillExecution
+	if execution != nil {
+		copy := *execution
+		snapshot = &copy
+	}
+	return context.WithValue(ctx, drillExecutionContextKey{}, scopedDrillExecution{snapshot})
+}
+
 // runDrillDeps holds sandbox dependencies for the run_drill tool.
 // For chat sessions, nodePool is set and lazyClient is resolved at runtime.
 // For fleet sessions, lazyClient and sessionID are set directly.
@@ -126,6 +156,19 @@ func newRunDrillToolFromDeps(deps *runDrillDeps) (tool.Tool, error) {
 }
 
 func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (RunDrillResult, error) {
+	var scoped *ScopedDrillExecution
+	if ctx != nil {
+		binding, present := ctx.Value(drillExecutionContextKey{}).(scopedDrillExecution)
+		if present || requiresScopedFlowDrillExecution(ctx) {
+			scoped = binding.execution
+			if err := ctx.Err(); err != nil {
+				return RunDrillResult{}, err
+			}
+			if scoped == nil || scoped.NewExecutor == nil {
+				return RunDrillResult{}, fmt.Errorf("scoped drill execution is unavailable")
+			}
+		}
+	}
 	suiteName := strings.TrimSpace(args.SuiteName)
 	if suiteName == "" {
 		return RunDrillResult{
@@ -140,8 +183,18 @@ func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (R
 
 	// Discover the suite from the team-scoped flow store (drills are team-only).
 	var suite *adrill.LoadedSuite
-	fs := getDrillFlowStore(ctx)
+	var fs store.FlowStore
+	if scoped != nil {
+		// The general store can include personal flows. It is not authority to
+		// load a team drill, even when no team store was configured.
+		fs = store.TeamFlowStoreFromContext(ctx)
+	} else {
+		fs = getDrillFlowStore(ctx)
+	}
 	if fs == nil {
+		if scoped != nil {
+			return RunDrillResult{}, fmt.Errorf("%w: scoped drill store is unavailable; filesystem fallback disabled", store.ErrBotUnsupported)
+		}
 		return RunDrillResult{
 			Status:  "error",
 			Summary: "Drill management requires platform mode (team-scoped store not available)",
@@ -149,8 +202,25 @@ func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (R
 	}
 
 	var loadErr error
-	suite, loadErr = adrill.LoadSuiteFromStore(fs, ctx, suiteName)
+	if scoped != nil && scoped.CapturedSuite != nil {
+		// Execute a detached copy of the approved snapshot, never the mutable store.
+		raw, err := json.Marshal(scoped.CapturedSuite)
+		if err != nil {
+			return RunDrillResult{}, err
+		}
+		if err := json.Unmarshal(raw, &suite); err != nil {
+			return RunDrillResult{}, err
+		}
+		if suite.Name != suiteName {
+			return RunDrillResult{}, store.ErrBotForbidden
+		}
+	} else {
+		suite, loadErr = adrill.LoadSuiteFromStore(fs, ctx, suiteName)
+	}
 	if loadErr != nil {
+		if scoped != nil {
+			return RunDrillResult{}, fmt.Errorf("drill load: %w", loadErr)
+		}
 		return RunDrillResult{
 			Status:  "error",
 			Summary: fmt.Sprintf("Suite %q not found: %v", suiteName, loadErr),
@@ -165,8 +235,12 @@ func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (R
 		}, nil
 	}
 
-	// Inject suite (or fleet-plan fallback) credentials before tests.
-	if err := injectDrillCredentials(ctx, deps, suiteName, suite); err != nil {
+	// Both entry points use the same scoped injection dispatch.
+	injectionErr := injectDrillCredentials(ctx, deps, suiteName, suite)
+	if err := injectionErr; err != nil {
+		if scoped != nil {
+			return RunDrillResult{}, err
+		}
 		return RunDrillResult{
 			Status:  "error",
 			Summary: fmt.Sprintf("credential injection failed: %v", err),
@@ -209,6 +283,10 @@ func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (R
 			Summary: fmt.Sprintf("Suite %q has no tests", suiteName),
 			Report:  fmt.Sprintf("Suite: %s\n(no tests)\n", suiteName),
 		}, nil
+	}
+
+	if scoped != nil {
+		return executeScopedDrillSuite(ctx, scoped, suite, tests, args.Verbose)
 	}
 
 	// Build the executor based on sandbox availability
@@ -326,6 +404,105 @@ func executeRunDrill(ctx tool.Context, deps *runDrillDeps, args RunDrillArgs) (R
 		ManifestPath:  report.ManifestPath,
 		ArtifactPaths: CollectRunDrillArtifactPaths(report),
 	}, nil
+}
+
+// executeScopedDrillSuite uses the same suite engine without ambient executors,
+// model lookup, visual baselines, recordings, or daemon report directories.
+func executeScopedDrillSuite(ctx tool.Context, deps *ScopedDrillExecution, suite *adrill.LoadedSuite, tests []adrill.LoadedTest, verbose bool) (RunDrillResult, error) {
+	for _, test := range tests {
+		for _, node := range test.Config.Nodes {
+			if node.Assert != nil && node.Assert.Type == "visual_match" {
+				return RunDrillResult{}, fmt.Errorf("%w: visual baselines require a scoped artifact adapter; filesystem fallback disabled", store.ErrBotUnsupported)
+			}
+		}
+	}
+	executor, err := deps.NewExecutor(ctx)
+	if err != nil {
+		return RunDrillResult{}, err
+	}
+	if executor == nil {
+		return RunDrillResult{}, fmt.Errorf("scoped drill executor is unavailable")
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	guard := &scopedDrillExecutor{ToolExecutor: executor, cancel: cancel}
+	runner := adrill.NewSuiteRunner(guard, nil, verbose)
+	runner.SetVars(map[string]string{"CONTAINER_IP": "localhost"})
+	runner.SetLLMProvider(&scopedDrillLLM{provider: deps.LLM, guard: guard})
+	report, err := runner.RunSuite(runCtx, suite, tests)
+	if guard.terminal != nil {
+		return RunDrillResult{}, guard.terminal
+	}
+	if err != nil {
+		return RunDrillResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return RunDrillResult{}, err
+	}
+	if deps.SaveReport != nil {
+		if err := deps.SaveReport(ctx, report); err != nil {
+			return RunDrillResult{}, err
+		}
+	}
+	var buf bytes.Buffer
+	adrill.PrintReport(report, &buf)
+	if report.Status != "passed" {
+		enrichReportWithFailureContext(&buf, report)
+	}
+	return RunDrillResult{Status: report.Status, Summary: report.Summary, Report: buf.String()}, nil
+}
+
+// Executor failures (including policy and budget refusal) stop the whole suite,
+// even in tutorial/continue/retry modes. Assertion failures retain drill semantics.
+type scopedDrillExecutor struct {
+	adrill.ToolExecutor
+	cancel   context.CancelFunc
+	terminal error
+}
+
+func (e *scopedDrillExecutor) TerminalError() error { return e.terminal }
+func (e *scopedDrillExecutor) Execute(ctx context.Context, name string, args map[string]any) (any, error) {
+	if e.terminal != nil {
+		return nil, e.terminal
+	}
+	if err := ctx.Err(); err != nil {
+		e.terminal = err
+		e.cancel()
+		return nil, err
+	}
+	out, err := e.ToolExecutor.Execute(ctx, name, args)
+	if err != nil {
+		e.terminal = err
+		e.cancel()
+	}
+	return out, err
+}
+
+// Semantic assertion errors can otherwise be flattened into assertion failures
+// and retried. Share the executor's terminal latch for model policy/budget errors.
+type scopedDrillLLM struct {
+	provider adrill.LLMProvider
+	guard    *scopedDrillExecutor
+}
+
+func (m *scopedDrillLLM) EvaluateText(ctx context.Context, prompt string) (string, error) {
+	if m.guard.terminal != nil {
+		return "", m.guard.terminal
+	}
+	err := ctx.Err()
+	var text string
+	if err == nil {
+		if m.provider == nil {
+			err = fmt.Errorf("scoped drill model is unavailable")
+		} else {
+			text, err = m.provider.EvaluateText(ctx, prompt)
+		}
+	}
+	if err != nil {
+		m.guard.terminal = err
+		m.guard.cancel()
+	}
+	return text, err
 }
 
 // CollectRunDrillArtifactPaths returns absolute paths for Studio session
@@ -1153,6 +1330,25 @@ func injectDrillCredentials(ctx tool.Context, deps *runDrillDeps, suiteName stri
 		return nil
 	}
 	sc := suite.Config.SuiteConfig
+	if ctx != nil {
+		binding, present := ctx.Value(drillExecutionContextKey{}).(scopedDrillExecution)
+		if present || requiresScopedFlowDrillExecution(ctx) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if binding.execution != nil && binding.execution.InjectCredentials != nil {
+				return binding.execution.InjectCredentials(ctx, suite)
+			}
+			spec, err := adrill.SpecFromSuite(suite.Name, sc)
+			if err != nil {
+				return err
+			}
+			if spec == nil || !spec.HasWork() {
+				return nil
+			}
+			return fmt.Errorf("scoped drill credential injector is unavailable")
+		}
+	}
 	goCtx := context.Background()
 	if ctx != nil {
 		goCtx = ctx

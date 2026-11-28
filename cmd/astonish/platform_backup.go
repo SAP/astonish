@@ -9,6 +9,8 @@ import (
 
 	"github.com/SAP/astonish/pkg/backup"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 )
 
@@ -55,7 +57,30 @@ func handlePlatformBackupCreate(args []string) error {
 	}
 	defer es.Close()
 
-	if err := es.ExportPlatformBackup(ctx, opts.output, entstore.PlatformBackupExportOptions{Backend: backend, Compression: opts.compression, RedactSecrets: opts.redactSecrets, Passphrase: opts.passphrase, OrgSlug: opts.orgSlug, TeamSlug: opts.teamSlug, UserID: opts.userID}); err != nil {
+	var cleanup func()
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+	var files entstore.BotBackupBackend
+	fileBackend := func(context.Context) (entstore.BotBackupBackend, error) {
+		if files != nil {
+			return files, nil
+		}
+		b, closeBackend, err := sandbox.BackendFromAppConfig(appCfg)
+		cleanup = closeBackend
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		files, ok = b.(entstore.BotBackupBackend)
+		if !ok {
+			return nil, fmt.Errorf("configured sandbox backend cannot archive retained Bot Homes: %w", store.ErrBotUnsupported)
+		}
+		return files, nil
+	}
+	if err := es.ExportPlatformBackup(ctx, opts.output, entstore.PlatformBackupExportOptions{FileBackend: fileBackend, Backend: backend, Compression: opts.compression, RedactSecrets: opts.redactSecrets, Passphrase: opts.passphrase, OrgSlug: opts.orgSlug, TeamSlug: opts.teamSlug, UserID: opts.userID}); err != nil {
 		return err
 	}
 	fmt.Printf("Created backup archive: %s\n", opts.output)
@@ -87,7 +112,7 @@ func handlePlatformBackupVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	summary, err := backup.Verify(archivePath, backup.ReaderOptions{Passphrase: passphrase})
+	summary, err := entstore.VerifyPlatformBackup(context.Background(), archivePath, backup.ReaderOptions{Passphrase: passphrase})
 	if err != nil {
 		return err
 	}
@@ -191,6 +216,7 @@ func backupEntstoreConfig(appCfg *config.AppConfig) (entstore.Config, string, er
 	case "postgres":
 		return entstore.Config{
 			DSN:             appCfg.Storage.Postgres.GetPlatformDSN(),
+			DataDir:         appCfg.Storage.SQLite.DataDir, // explicit durable content/journal root; no host fallback
 			InstanceSuffix:  appCfg.Storage.Postgres.InstanceSuffix,
 			MaxOpenConns:    appCfg.Storage.Postgres.GetMaxOpenConns(),
 			MaxIdleConns:    appCfg.Storage.Postgres.GetMaxIdleConns(),
@@ -295,7 +321,7 @@ func printPlatformBackupUsage() {
 	fmt.Println("commands:")
 	fmt.Println("  create --output <archive>    Export platform data to a compressed logical backup archive")
 	fmt.Println("  inspect <archive> [--json]   Show backup archive metadata")
-	fmt.Println("  verify <archive> [--json]    Validate archive manifest and checksums")
+	fmt.Println("  verify <archive> [--json]    Validate archive integrity and supported platform content")
 	fmt.Println("")
 	fmt.Println("examples:")
 	fmt.Println("  astonish platform backup create --output backup.astonish-backup")
@@ -321,5 +347,5 @@ func printPlatformBackupInspectUsage() {
 func printPlatformBackupVerifyUsage() {
 	fmt.Println("usage: astonish platform backup verify <archive> [--json] [--passphrase <secret>]")
 	fmt.Println("")
-	fmt.Println("Validate manifest metadata and SHA-256 checksums for an Astonish backup archive.")
+	fmt.Println("Validate manifest metadata, SHA-256 checksums, and SQL/file closure. Restore requires a fresh target and a journaled retained-Home backend.")
 }

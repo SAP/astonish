@@ -14,7 +14,7 @@ import (
 )
 
 func TestUsageMetadataMapsCachedPromptTokens(t *testing.T) {
-	usage := usageMetadata(100, 20, 120, &openailib.PromptTokensDetails{CachedTokens: 75})
+	usage := usageMetadata(openailib.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, PromptTokensDetails: &openailib.PromptTokensDetails{CachedTokens: 75}})
 	if usage.CachedContentTokenCount != 75 {
 		t.Fatalf("CachedContentTokenCount = %d, want 75", usage.CachedContentTokenCount)
 	}
@@ -955,13 +955,13 @@ func TestNonStreamingReasoningRoundTrip(t *testing.T) {
 
 func TestPatchMissingReasoningContent(t *testing.T) {
 	tests := []struct {
-		name              string
-		messages          []openailib.ChatCompletionMessage
-		providerThinking  bool   // simulates p.thinkingMode.Load()
-		expectLen         int    // message count should never change
-		expectToolCalls   int    // total tool_calls remaining
-		expectPatched     int    // number of messages that get a synthetic reasoning
-		expectReasoning0  string // reasoning on first assistant message with tool_calls (empty = don't check)
+		name             string
+		messages         []openailib.ChatCompletionMessage
+		providerThinking bool   // simulates p.thinkingMode.Load()
+		expectLen        int    // message count should never change
+		expectToolCalls  int    // total tool_calls remaining
+		expectPatched    int    // number of messages that get a synthetic reasoning
+		expectReasoning0 string // reasoning on first assistant message with tool_calls (empty = don't check)
 	}{
 		{
 			name: "no thinking mode (provider=false, history=none) — unchanged",
@@ -978,9 +978,9 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				{Role: openailib.ChatMessageRoleAssistant, Content: "Done"},
 			},
 			providerThinking: false,
-			expectLen:         4,
-			expectToolCalls:   1,
-			expectPatched:     0,
+			expectLen:        4,
+			expectToolCalls:  1,
+			expectPatched:    0,
 		},
 		{
 			name: "thinking mode with valid reasoning — unchanged",
@@ -998,9 +998,9 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				{Role: openailib.ChatMessageRoleAssistant, ReasoningContent: "Got the data", Content: "AAPL is at 185"},
 			},
 			providerThinking: true,
-			expectLen:         4,
-			expectToolCalls:   1,
-			expectPatched:     0,
+			expectLen:        4,
+			expectToolCalls:  1,
+			expectPatched:    0,
 		},
 		{
 			name: "missing reasoning detected via history fallback",
@@ -1028,10 +1028,10 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				{Role: openailib.ChatMessageRoleAssistant, ReasoningContent: "Got it", Content: "GOOG is at 175"},
 			},
 			providerThinking: false, // provider flag not set, but history has reasoning
-			expectLen:         8,
-			expectToolCalls:   2,
-			expectPatched:     1,
-			expectReasoning0:  ".",
+			expectLen:        8,
+			expectToolCalls:  2,
+			expectPatched:    1,
+			expectReasoning0: ".",
 		},
 		{
 			name: "first-turn: no reasoning in history but provider flag set",
@@ -1050,10 +1050,10 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				{Role: openailib.ChatMessageRoleTool, ToolCallID: "call_2", Content: "credential resolved"},
 			},
 			providerThinking: true, // provider saw reasoning during first streaming
-			expectLen:         4,
-			expectToolCalls:   2,
-			expectPatched:     1,
-			expectReasoning0:  ".",
+			expectLen:        4,
+			expectToolCalls:  2,
+			expectPatched:    1,
+			expectReasoning0: ".",
 		},
 		{
 			name: "first-turn: no reasoning anywhere and provider=false — no patch",
@@ -1069,9 +1069,9 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				{Role: openailib.ChatMessageRoleTool, ToolCallID: "call_1", Content: "ok"},
 			},
 			providerThinking: false,
-			expectLen:         3,
-			expectToolCalls:   1,
-			expectPatched:     0,
+			expectLen:        3,
+			expectToolCalls:  1,
+			expectPatched:    0,
 		},
 		{
 			name: "multiple missing reasoning turns with provider flag",
@@ -1098,9 +1098,9 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				{Role: openailib.ChatMessageRoleAssistant, Content: "all done"},
 			},
 			providerThinking: true,
-			expectLen:         8,
-			expectToolCalls:   2,
-			expectPatched:     2,
+			expectLen:        8,
+			expectToolCalls:  2,
+			expectPatched:    2,
 		},
 		{
 			name: "assistant without tool_calls and no reasoning — not patched",
@@ -1115,9 +1115,9 @@ func TestPatchMissingReasoningContent(t *testing.T) {
 				},
 			},
 			providerThinking: true,
-			expectLen:         4,
-			expectToolCalls:   0,
-			expectPatched:     0,
+			expectLen:        4,
+			expectToolCalls:  0,
+			expectPatched:    0,
 		},
 	}
 

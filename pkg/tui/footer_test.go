@@ -8,9 +8,119 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestCodePermissionIndicatorsStateMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		setup      func(*model)
+	}{
+		{"unknown", "Folders ?  Tools ?", func(m *model) { m.permissions.known = false }},
+		{"welcome nil transcript", "Folders ?  Tools ?", func(m *model) { m.tr = nil }},
+		{"loading unknown", "Folders ?  Tools ?", func(m *model) { m.permissions.known = false; m.permissions.loading = true }},
+		{"failed read", "Folders ?  Tools ?", func(m *model) {
+			m.permissions.err = "read failed"
+			m.permissions.snapshot.SessionAllFolders = true
+			m.permissions.snapshot.AllToolsSession = true
+		}},
+		{"owner mismatch", "Folders ?  Tools ?", func(m *model) { m.permissionOwner = events.NewTranscript() }},
+		{"session mismatch", "Folders ?  Tools ?", func(m *model) { m.permissionSession = "other" }},
+		{"snapshot mismatch", "Folders ?  Tools ?", func(m *model) { m.permissions.snapshot.SessionID = "other" }},
+		{"current approvals", "Folders ○  Tools ○", func(m *model) {}},
+		{"pending full highlight", "Folders ○  Tools ○", func(m *model) { m.tr.Apply(events.NewPlan("Pending", events.PlanPending)); m.tr.ApprovalCursor = 1 }},
+		{"session folders", "Folders ✓  Tools ○", func(m *model) { m.permissions.snapshot.SessionAllFolders = true }},
+		{"session tools", "Folders ○  Tools ✓", func(m *model) { m.permissions.snapshot.AllToolsSession = true }},
+		{"both session", "Folders ✓  Tools ✓", func(m *model) {
+			m.permissions.snapshot.SessionAllFolders = true
+			m.permissions.snapshot.AllToolsSession = true
+		}},
+		{"active matching plan", "Folders ✓  Tools ✓", func(m *model) { m.permissions.snapshot.PlanFullAccess = true; m.permissions.snapshot.PlanID = "active" }},
+		{"stale plan", "Folders ○  Tools ○", func(m *model) { m.permissions.snapshot.PlanFullAccess = true; m.permissions.snapshot.PlanID = "other" }},
+		{"completed plan", "Folders ○  Tools ○", func(m *model) {
+			m.permissions.snapshot.PlanFullAccess = true
+			m.permissions.snapshot.PlanID = "active"
+			s := m.tr.Items[0].PlanSnapshot
+			s.Steps[0].Status = "complete"
+			s.Document.Results = "Verified"
+		}},
+		{"snapshot CLI override", "Folders ✓  Tools ✓", func(m *model) { m.permissions.snapshot.CLIOverride = true }},
+		{"known CLI override before snapshot", "Folders ✓  Tools ✓", func(m *model) { m.info.AutoApprove = true; m.permissions.known = false; m.tr = nil }},
+		{"platform", "", func(m *model) { m.info.Mode = "platform"; m.info.AutoApprove = true }},
+		{"bot mode", "", func(m *model) { m.info.Mode = "bot"; m.info.AutoApprove = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestComposerModel(110)
+			defer m.cancel()
+			m.info.Mode = "code"
+			m.tr.SessionID = "session"
+			s := agent.PlanSnapshot{PlanID: "active", Revision: 1, Sequence: 1, Document: agent.PlanDocumentInfo{Lifecycle: agent.PlanLifecycleApproved, CodeExecutionMode: agent.CodePlanRunToCompletion}, Steps: []agent.PlanStepInfo{{Name: "one", Status: "pending"}}}
+			m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+			m.syncCodePermissions()
+			m.permissions.known = true
+			m.permissions.snapshot = backend.CodePermissionsSnapshot{SessionID: "session"}
+			tc.setup(&m)
+			if got := m.codePermissionFooter(); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderFooterMetaNarrowIndicators(t *testing.T) {
+	for _, width := range []int{20, 24, 30, 40, 60, 120} {
+		for _, state := range []string{"unknown", "current", "folders", "tools", "both"} {
+			m := newTestComposerModel(width)
+			m.info.Mode = "code"
+			m.info.Provider = "very-long-provider"
+			m.info.Model = "very-long-concrete-model-name"
+			m.info.WorkingDir = "/tmp/very/deep/project-path"
+			m.syncCodePermissions()
+			m.permissions.known = state != "unknown"
+			m.permissions.snapshot.SessionAllFolders = state == "folders" || state == "both"
+			m.permissions.snapshot.AllToolsSession = state == "tools" || state == "both"
+			out := stripANSI(m.renderFooterMeta())
+			want := map[string]string{
+				"unknown": "Folders ?  Tools ?", "current": "Folders ○  Tools ○",
+				"folders": "Folders ✓  Tools ○", "tools": "Folders ○  Tools ✓", "both": "Folders ✓  Tools ✓",
+			}[state]
+			if !strings.Contains(out, want) || strings.Contains(out, "\n") || lipgloss.Width(out) > width {
+				t.Fatalf("width=%d state=%s footer=%q", width, state, out)
+			}
+			m.cancel()
+		}
+	}
+}
+
+func TestCodePermissionsFooterExpiresPlanButKeepsSessionGrant(t *testing.T) {
+	m := newTestComposerModel(110)
+	defer m.cancel()
+	m.info.Mode = "code"
+	s := agent.PlanSnapshot{PlanID: "active", Revision: 1, Sequence: 1, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+	s.Document.Lifecycle = agent.PlanLifecycleApproved
+	s.Document.CodeExecutionMode = agent.CodePlanRunToCompletion
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.syncCodePermissions()
+	m.permissions.known = true
+	m.permissions.snapshot = backend.CodePermissionsSnapshot{PlanID: "active", PlanFullAccess: true, SessionAllFolders: true}
+	if !strings.Contains(m.codePermissionFooter(), "Folders ✓  Tools ✓") {
+		t.Fatal("active lease missing")
+	}
+	s.Sequence++
+	s.Steps[0].Status = "complete"
+	s.Document.Results = "Verified"
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.syncCodePermissions()
+	if got := m.codePermissionFooter(); got != "Folders ✓  Tools ○" {
+		t.Fatalf("completed permission footer = %q", got)
+	}
+	m.tr.ApprovalCursor = 1
+	if strings.Contains(m.codePermissionFooter(), "Full access") {
+		t.Fatal("selection claimed effective authority")
+	}
+}
 
 func TestModelFooterTextShowsProviderAndConcreteModel(t *testing.T) {
 	got := modelFooterText("sap-ai-core", "anthropic--claude-3.7-sonnet")
@@ -144,7 +254,7 @@ func TestRenderFooterMetaShowsFolderBetweenModelAndAutoApprove(t *testing.T) {
 	out := stripANSI(m.renderFooterMeta())
 	modelIdx := strings.Index(out, "sap-ai-core / anthropic--claude-3.7-sonnet")
 	folderIdx := strings.Index(out, "/tmp/my-project")
-	autoIdx := strings.Index(out, "auto-approve")
+	autoIdx := strings.Index(out, "Folders ✓  Tools ✓")
 	if modelIdx < 0 || folderIdx < 0 || autoIdx < 0 {
 		t.Fatalf("footer missing one of model/folder/auto-approve: %q", out)
 	}
@@ -168,8 +278,8 @@ func TestRenderFooterMetaDropsOrTruncatesFolderWhenNarrow(t *testing.T) {
 	if strings.Contains(out, "\n") {
 		t.Fatalf("footer should stay on one line: %q", out)
 	}
-	if !strings.Contains(out, "sap-ai-core / anthropic--claude-3.7-sonnet") {
-		t.Fatalf("model must remain visible on a narrow footer: %q", out)
+	if !strings.Contains(out, "Folders ?  Tools ?") {
+		t.Fatalf("complete indicators must remain visible on a narrow footer: %q", out)
 	}
 	if strings.Contains(out, "/tmp/very/deep/nested/path/astonish") {
 		t.Fatalf("full long path should not leak on a narrow footer: %q", out)

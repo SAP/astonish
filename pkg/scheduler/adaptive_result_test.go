@@ -9,6 +9,16 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestResolveAdaptiveReportBody(t *testing.T) {
+	marker := "Fallback\n```astonish-report\npath: reports/check.md\n```"
+	if got := ResolveAdaptiveReportBody(marker, map[string]string{"reports/check.md": "Observed report"}); got != "Observed report" {
+		t.Fatal(got)
+	}
+	if got := ResolveAdaptiveReportBody(marker, nil); got != "Fallback" {
+		t.Fatal(got)
+	}
+}
+
 func TestExtractUserFacingText_SkipsThoughtAndTools(t *testing.T) {
 	parts := []*genai.Part{
 		{Thought: true, Text: "secret chain of thought"},

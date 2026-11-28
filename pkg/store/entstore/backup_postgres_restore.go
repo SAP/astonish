@@ -152,7 +152,16 @@ func checkPostgresScopeSchemaCompatible(ctx context.Context, manifest backup.Man
 	if err != nil {
 		return fmt.Errorf("read target schema for %s: %w", backupScopeKey(scope), err)
 	}
-	return checkSchemaCompatible(archiveVersion, targetVersion)
+	if mismatch := checkSchemaCompatible(archiveVersion, targetVersion); mismatch != nil {
+		compatible, err := postgresPreBotBackupCompatible(ctx, db, manifest, scope, archiveVersion)
+		if err != nil {
+			return fmt.Errorf("read pre-Bot target schema for %s: %w", backupScopeKey(scope), err)
+		}
+		if !compatible {
+			return mismatch
+		}
+	}
+	return nil
 }
 
 func postgresTableExists(ctx context.Context, db *sql.DB, schema, table string) (bool, error) {

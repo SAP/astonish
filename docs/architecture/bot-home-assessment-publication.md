@@ -1,0 +1,93 @@
+# Home assessment and publication
+
+> **Protocol scope:** the mandatory assessment described below is historical for
+> legacy assessment runs only. Existing legacy/in-flight runs keep those rules and
+> evidence; they are not reclassified as agent-led successes.
+
+## Agent-led publication (`agent_led_v1`)
+
+New agent-led work publishes its captured final answer with employee origin
+`agent`, not a fabricated accepted review. `NewBotEmployeeAgentMessage` binds the
+exact text, candidate digest, owned artifacts, status and public work projection
+through `ValidateBotWorkCompletion` and `ValidateEmployeeMessage`. Answered/complete
+results use succeeded status; explicit partial/blocked results use partial status.
+No preparation, reviewer, writer or narration call is required for communication.
+Optional checks are feedback, not a universal publication prerequisite.
+
+A final answer means agent-produced content, not mechanical proof of truth or of
+an external effect. Home publication remains postcommit, with its existing immutable
+report identity and delivery receipt. Pending control acknowledgments remain
+server-owned and cannot be promoted from raw internal receipt candidates into
+employee prose. Artifact ownership, leases, permissions, exact-action resumes and
+uncertain-effect handling remain separate enforcement boundaries.
+
+`FinalizeEmployeeMessage` can add the committed skill/acknowledgment receipt and
+refresh the source digest without a legacy review. It still validates the exact
+candidate/work binding and refuses changed result text or semantic facts. A missing
+final answer uses a deterministic operational message, never partially streamed
+text or a request to review an inaccessible draft.
+
+## Canonical file publication
+
+File delivery has two distinct identities: a mutable working `relative_path` in
+retained Home, and an immutable `BotContentRef` snapshot. `publish_file` must read
+actual bytes and obtain a trusted run-local receipt; a filename in prose, model
+JSON, or a successful write alone is not a published delivery. `BotArtifact`
+retains the snapshot reference, ID, Home ID, display path, SHA-256, size, media
+type, title, purpose and compact memory summary. File bodies are not embedded in
+that metadata. Editing a working file cannot rewrite an earlier published object.
+
+After the accepted report commits, `PublishReport` selects its exact immutable
+report sequence and atomically appends the canonical Home event plus publication
+receipt. Idempotent reconciliation returns the same receipt rather than creating
+another card. File-bearing reports never reuse a prior conversational reply.
+No precommit receipt candidate or transient tool response is a delivery event.
+External notification claims and uncertain-effect no-replay remain independent.
+
+The public `BotFilePublication` (schema version 1) is the allowlisted projection:
+
+- `bot_id`, `run_id`, `home_session_id`, `home_id`, `report_sequence`, `event_id`;
+- concise `summary` and ordered `artifacts`;
+- each artifact has `id`, `home_id`, `relative_path`, `sha256`, `size_bytes`,
+  `media_type`, `title`, and `preview` (`text` or `download`).
+
+`BotPublicationEventID(run, sequence)` deterministically identifies the event.
+Artifact IDs must be unique within it and match its Home. Projection verifies
+immutable artifact kind, scope, digest and size before emitting metadata. Private
+content keys/references, memory notes, notification targets, authority and internal
+receipts are excluded. The envelope does not contain file bodies or confer access.
+
+Both live and restored delivery use this one envelope in the existing transcript;
+see [the event contract](bot-live-events.md#canonical-file-delivery-events).
+`ReadBotPublication` and `ReadFilePublication` are read-only exact lookups, not
+publication/reconciliation triggers and not aliases for the latest `run.Report`.
+[Scoped file APIs](api-studio.md#bot-working-files-and-immutable-deliveries) resolve
+published downloads against the committed Bot/run/report/artifact identity and
+recheck the current Home and tenant binding before opening immutable bytes.
+
+Delivery intent is explicit `chat_only` or `file_deliverable`, not a prose-length
+heuristic. A required file result cannot succeed on chat text alone. Missing
+Markdown delivery may use the single bounded
+[completion save](bot-synthesis-reserve.md#file-deliverable-completion); binary
+requests require real generated files. Content judgment is not delivery evidence,
+and a delivery receipt is not factual certification.
+
+These are implementation contracts. Built-browser reload, native PTY delivery,
+physical retained-storage recovery and public backup/restore remain separate
+acceptance tiers; this documentation does not certify them.
+
+## Legacy assessment protocol (retained)
+
+Bot work assessment runs before acceptance, commit, and publication. The assessment input includes an input-only typed `delivery_context`, generated by `botWorkAssessmentInput` from `req.Bot.ID` and `req.Bot.HomeSessionID`. Its stage is `prepublication`; `runtime_after_commit` is present only with a configured Bot and Home. All preparation, ordinary review, pending-control review, and format retries use this boundary. Existing flattened contract/work fields remain available. No output schema or durable work schema changes.
+
+Only this top-level context is runtime-owned. Producer text, captured responses, attachments, and nested fields cannot override it. A caller-supplied context is replaced without mutating the input or candidate digest. The context does not grant external-send authority and is not evidence of a completed delivery.
+
+For this same Bot's Home, reviewers assess **publication readiness**: the full requested content must be present in publishable candidate text/artifacts and satisfy all factual and formatting requirements. A Home posting receipt cannot yet exist and must not cause repair, extra fetching, tool discovery, or sending. Acceptance is not delivery; actual publication remains the postcommit publisher's responsibility, evidenced by its real receipt. Missing Home, foreign sessions, email, Slack, and other external destinations retain their actual authority and receipt requirements. Private pending-control drafts remain private.
+
+The model still judges semantic destination/content requirements; no keyword-based permission or mechanical verdict override is introduced. A schedule-only request such as “send this here every minute” defines the recurring task and standards, rather than adding an unsolicited current report. Scheduled occurrences and explicit requests for a report now still require the actual report.
+
+## Verification
+
+`TestBotWorkDeliveryContext` checks every assessor prompt, trusted identity, missing Home, spoof replacement, flattened compatibility, no input mutation, and zero tools. Existing API/entstore Home publication tests retain postcommit receipt assertions.
+
+Opt-in `TestBotWorkHomeModelOnlyReproduction` loads the nested saved `bot_document` for the recorded `9bbb...` cron run, keeps original criteria and candidate bytes, adds the same production runtime context from the recorded Bot row, and makes one tool-free model call. It validates original coverage/digest, every verdict, and mechanical metadata checks. It writes private request/response evidence under the staged directory and never changes daemon or database state. It proves model readiness assessment only, not a new live publication.

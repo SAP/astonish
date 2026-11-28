@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/SAP/astonish/ent/personal/personalsettings"
 	"github.com/SAP/astonish/ent/personal/predicate"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // PersonalSettingsUpdate is the builder for updating PersonalSettings entities.
@@ -67,6 +68,18 @@ func (_u *PersonalSettingsUpdate) SetNillableBrandTheme(v *string) *PersonalSett
 	if v != nil {
 		_u.SetBrandTheme(*v)
 	}
+	return _u
+}
+
+// SetBotEmail sets the "bot_email" field.
+func (_u *PersonalSettingsUpdate) SetBotEmail(v *store.BotEmailSettings) *PersonalSettingsUpdate {
+	_u.mutation.SetBotEmail(v)
+	return _u
+}
+
+// ClearBotEmail clears the value of the "bot_email" field.
+func (_u *PersonalSettingsUpdate) ClearBotEmail() *PersonalSettingsUpdate {
+	_u.mutation.ClearBotEmail()
 	return _u
 }
 
@@ -135,6 +148,12 @@ func (_u *PersonalSettingsUpdate) sqlSave(ctx context.Context) (_node int, err e
 	if value, ok := _u.mutation.BrandTheme(); ok {
 		_spec.SetField(personalsettings.FieldBrandTheme, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.BotEmail(); ok {
+		_spec.SetField(personalsettings.FieldBotEmail, field.TypeJSON, value)
+	}
+	if _u.mutation.BotEmailCleared() {
+		_spec.ClearField(personalsettings.FieldBotEmail, field.TypeJSON)
+	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(personalsettings.FieldUpdatedAt, field.TypeTime, value)
 	}
@@ -197,6 +216,18 @@ func (_u *PersonalSettingsUpdateOne) SetNillableBrandTheme(v *string) *PersonalS
 	if v != nil {
 		_u.SetBrandTheme(*v)
 	}
+	return _u
+}
+
+// SetBotEmail sets the "bot_email" field.
+func (_u *PersonalSettingsUpdateOne) SetBotEmail(v *store.BotEmailSettings) *PersonalSettingsUpdateOne {
+	_u.mutation.SetBotEmail(v)
+	return _u
+}
+
+// ClearBotEmail clears the value of the "bot_email" field.
+func (_u *PersonalSettingsUpdateOne) ClearBotEmail() *PersonalSettingsUpdateOne {
+	_u.mutation.ClearBotEmail()
 	return _u
 }
 
@@ -294,6 +325,12 @@ func (_u *PersonalSettingsUpdateOne) sqlSave(ctx context.Context) (_node *Person
 	}
 	if value, ok := _u.mutation.BrandTheme(); ok {
 		_spec.SetField(personalsettings.FieldBrandTheme, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.BotEmail(); ok {
+		_spec.SetField(personalsettings.FieldBotEmail, field.TypeJSON, value)
+	}
+	if _u.mutation.BotEmailCleared() {
+		_spec.ClearField(personalsettings.FieldBotEmail, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(personalsettings.FieldUpdatedAt, field.TypeTime, value)

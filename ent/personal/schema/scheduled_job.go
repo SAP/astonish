@@ -26,7 +26,7 @@ func (ScheduledJob) Fields() []ent.Field {
 		field.String("schedule").
 			NotEmpty(),
 		field.Enum("mode").
-			Values("routine", "adaptive", "fleet_poll").
+			Values("routine", "adaptive", "fleet_poll", "bot_trigger").
 			Default("routine"),
 		field.JSON("payload", map[string]any{}).
 			Default(map[string]any{}),

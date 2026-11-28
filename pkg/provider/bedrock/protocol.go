@@ -18,12 +18,24 @@ import (
 
 // Request represents the Bedrock request payload for Anthropic models.
 type Request struct {
-	AnthropicVersion string    `json:"anthropic_version"`
-	MaxTokens        int       `json:"max_tokens"`
-	Messages         []Message `json:"messages"`
-	System           string    `json:"system,omitempty"`
-	Temperature      *float64  `json:"temperature,omitempty"`
-	Tools            []Tool    `json:"tools,omitempty"`
+	AnthropicVersion string      `json:"anthropic_version"`
+	MaxTokens        int         `json:"max_tokens"`
+	Messages         []Message   `json:"messages"`
+	System           string      `json:"system,omitempty"`
+	Temperature      *float64    `json:"temperature,omitempty"`
+	Tools            []Tool      `json:"tools,omitempty"`
+	ToolChoice       *ToolChoice `json:"tool_choice,omitempty"`
+}
+
+// ToolChoiceType is the native Anthropic tool-selection mode.
+type ToolChoiceType string
+
+const ToolChoiceAuto ToolChoiceType = "auto"
+
+// ToolChoice permits a final answer without requiring a tool invocation.
+type ToolChoice struct {
+	Type                   ToolChoiceType `json:"type"`
+	DisableParallelToolUse bool           `json:"disable_parallel_tool_use"`
 }
 
 // Message represents a message in the Bedrock conversation.
@@ -77,6 +89,10 @@ type Response struct {
 // ConvertRequest converts an ADK LLMRequest to a Bedrock Request.
 // maxTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) (*Request, error) {
+	parallelToolCalls, err := common.ParallelToolCalls(req)
+	if err != nil {
+		return nil, err
+	}
 	canonicalReq, err := common.CanonicalizeRequestTools(req)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize tools: %w", err)
@@ -291,6 +307,13 @@ func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) 
 		}
 	}
 
+	// Translate only the explicit per-request option; preserve ordinary defaults.
+	if parallelToolCalls != nil && len(bedrockReq.Tools) > 0 {
+		bedrockReq.ToolChoice = &ToolChoice{
+			Type:                   ToolChoiceAuto,
+			DisableParallelToolUse: !*parallelToolCalls,
+		}
+	}
 	return bedrockReq, nil
 }
 
@@ -355,6 +378,7 @@ func ParseResponse(body []byte) (*model.LLMResponse, error) {
 	}
 
 	resp.UsageMetadata = usageMetadata(bedrockResp.Usage)
+	resp.FinishReason, resp.TurnComplete = terminationMetadata(streamStopReason(bedrockResp.StopReason))
 
 	return resp, nil
 }
@@ -367,7 +391,22 @@ const (
 	streamStopToolUse      streamStopReason = "tool_use"
 	streamStopMaxTokens    streamStopReason = "max_tokens"
 	streamStopContextLimit streamStopReason = "model_context_window_exceeded"
+	streamStopRefusal      streamStopReason = "refusal"
 )
+
+// Only explicit successful termination certifies final-answer completion.
+func terminationMetadata(reason streamStopReason) (genai.FinishReason, bool) {
+	switch reason {
+	case streamStopEndTurn, streamStopSequence:
+		return genai.FinishReasonStop, true
+	case streamStopMaxTokens, streamStopContextLimit:
+		return genai.FinishReasonMaxTokens, false
+	case streamStopRefusal:
+		return genai.FinishReasonSafety, false
+	default:
+		return genai.FinishReasonOther, false
+	}
+}
 
 // ParseStream parses a Bedrock SSE stream without progress notifications.
 func ParseStream(reader io.Reader) iter.Seq2[*model.LLMResponse, error] {
@@ -574,7 +613,8 @@ func ParseStreamWithProgress(reader io.Reader, onProgress func(streaming.Progres
 					flushText()
 					metadata := usageMetadata(usage)
 					if len(parts) > 0 || metadata != nil {
-						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: metadata}, nil)
+						finish, complete := terminationMetadata(stopReason)
+						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: metadata, FinishReason: finish, TurnComplete: complete}, nil)
 					}
 					return
 				}

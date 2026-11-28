@@ -21,11 +21,16 @@ const VerifyFailedFollowupContext = `The last plan phase verify command failed. 
 // DefaultPlanVerify runs command in workdir with a wall-clock cap. Output is
 // truncated so PLAN.md and the tool result stay bounded.
 func DefaultPlanVerify(workdir, command string) (exitCode int, output string, err error) {
+	return defaultPlanVerify(workdir, command, planVerifyTimeout)
+}
+
+// defaultPlanVerify accepts a shorter deadline for subprocess regression tests.
+func defaultPlanVerify(workdir, command string, timeout time.Duration) (exitCode int, output string, err error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return -1, "", fmt.Errorf("empty verify command")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), planVerifyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -37,10 +42,22 @@ func DefaultPlanVerify(workdir, command string) (exitCode int, output string, er
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
-	out, runErr := cmd.CombinedOutput()
-	trimmed := truncateVerifyOutput(out)
+	configurePlanVerifyProcess(cmd)
+	cmd.Cancel = func() error { return killPlanVerifyProcess(cmd) }
+	// Bound inherited output pipes even if a child escapes the process group.
+	cmd.WaitDelay = time.Second
+	var out planVerifyOutputWriter
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	if runErr != nil {
+		// Also clean descendants after a failed shell: Wait may return an
+		// ExitError instead of ErrWaitDelay when inherited pipes timed out.
+		_ = killPlanVerifyProcess(cmd)
+	}
+	trimmed := truncateVerifyOutput(out.data[:out.used])
 	if ctx.Err() == context.DeadlineExceeded {
-		return -1, trimmed, fmt.Errorf("verify timed out after %s", planVerifyTimeout)
+		return -1, trimmed, fmt.Errorf("verify timed out after %s", timeout)
 	}
 	if runErr == nil {
 		return 0, trimmed, nil
@@ -49,6 +66,19 @@ func DefaultPlanVerify(workdir, command string) (exitCode int, output string, er
 		return ee.ExitCode(), trimmed, nil
 	}
 	return -1, trimmed, runErr
+}
+
+// planVerifyOutputWriter retains only the prefix while accepting every byte so
+// noisy commands cannot grow memory or fail with a short write. os/exec serializes
+// writes when Stdout and Stderr are the same comparable writer.
+type planVerifyOutputWriter struct {
+	data [planVerifyMaxOutput]byte
+	used int
+}
+
+func (w *planVerifyOutputWriter) Write(p []byte) (int, error) {
+	w.used += copy(w.data[w.used:], p)
+	return len(p), nil
 }
 
 func truncateVerifyOutput(out []byte) string {
@@ -78,6 +108,15 @@ func formatPlanEvidence(exitCode int, output string) string {
 // ApplyPlanStepUpdate is the engine behind update_plan. Completing a step runs
 // that step's verify command; a non-zero exit marks the step failed.
 func (c *ChatAgent) ApplyPlanStepUpdate(step, status string) PlanStepApplyResult {
+	if runtime := c.GetPlanRuntime(); runtime != nil {
+		result := runtime.UpdateStep(step, status)
+		if result.Code == PlanStepVerifyFailed {
+			c.markPlanVerifyFailed()
+		} else if result.Code == PlanStepOK && result.Applied == "complete" {
+			c.clearPlanVerifyFailed()
+		}
+		return result
+	}
 	plan := c.GetActivePlan()
 	if plan == nil {
 		return PlanStepApplyResult{}
@@ -111,54 +150,78 @@ func (c *ChatAgent) ApplyPlanStepUpdate(step, status string) PlanStepApplyResult
 		return PlanStepApplyResult{Name: name, Applied: applied, Code: PlanStepOK}
 
 	case "complete":
-		cmd := strings.TrimSpace(info.Verify)
-		if cmd == "" {
-			return PlanStepApplyResult{
-				Name:    info.Name,
-				Code:    PlanStepNoVerify,
-				Message: "this phase has no verify command; request changes and re-announce the plan — do not invent go test ./...",
-			}
-		}
-		if info.Status != "running" {
-			if reason := plan.CanStart(info.Name); reason == "" {
-				plan.SetStepStatus(info.Name, "running")
-			}
-		}
-		exit, output, err := c.runPlanVerify(cmd)
-		evidence := formatPlanEvidence(exit, output)
-		if err != nil {
-			plan.RecordEvidence(info.Name, evidence+"; "+err.Error())
-			plan.SetStepStatus(info.Name, "failed")
-			c.markPlanVerifyFailed()
-			return PlanStepApplyResult{
-				Name:    info.Name,
-				Applied: "failed",
-				Code:    PlanStepVerifyFailed,
-				Message: "verify command failed to run: " + err.Error(),
-				Output:  output,
-			}
-		}
-		if exit != 0 {
-			plan.RecordEvidence(info.Name, evidence)
-			plan.SetStepStatus(info.Name, "failed")
-			c.markPlanVerifyFailed()
-			return PlanStepApplyResult{
-				Name:    info.Name,
-				Applied: "failed",
-				Code:    PlanStepVerifyFailed,
-				Message: fmt.Sprintf("verify command exited %d — phase stays failed", exit),
-				Output:  output,
-			}
-		}
-		plan.RecordEvidence(info.Name, evidence)
-		name, applied := plan.SetStepStatus(info.Name, "complete")
-		c.clearPlanVerifyFailed()
-		return PlanStepApplyResult{Name: name, Applied: applied, Code: PlanStepOK, Output: output}
+		return c.applyLegacyPlanVerification(plan, info)
 
 	default:
 		name, applied := plan.SetStepStatus(info.Name, want)
 		return PlanStepApplyResult{Name: name, Applied: applied, Code: PlanStepOK}
 	}
+}
+
+func (c *ChatAgent) applyLegacyPlanVerification(plan *PlanState, info PlanStepInfo) PlanStepApplyResult {
+	fail := func(code, message string) PlanStepApplyResult {
+		return PlanStepApplyResult{Name: info.Name, Code: code, Message: message}
+	}
+	plan.mu.Lock()
+	idx := plan.findStepExactLocked(info.Name)
+	if idx < 0 {
+		plan.mu.Unlock()
+		return fail(PlanStepNotFound, "phase not found")
+	}
+	info = planStepInfo(plan.steps[idx])
+	if plan.verifying[info.Name] {
+		plan.mu.Unlock()
+		return fail(PlanRuntimeBusy, "phase verification is already running")
+	}
+	if strings.TrimSpace(info.Verify) == "" {
+		plan.mu.Unlock()
+		return fail(PlanStepNoVerify, "this phase has no verify command; revise the plan")
+	}
+	if reason := plan.canStartLocked(idx); reason != "" {
+		plan.mu.Unlock()
+		return fail(reason, "an earlier phase must complete first")
+	}
+	if plan.verifying == nil {
+		plan.verifying = map[string]bool{}
+	}
+	plan.verifying[info.Name] = true
+	plan.steps[idx].status = "running"
+	plan.notifyChangeLocked()
+	captured := plan.steps[idx].epoch
+	plan.mu.Unlock()
+	exit, output, err := c.runPlanVerify(info.Verify)
+	plan.mu.Lock()
+	defer plan.mu.Unlock()
+	delete(plan.verifying, info.Name)
+	// Lock ordering matches the legacy onChange callback (plan -> agent).
+	c.activePlanMu.Lock()
+	if c.activePlan != plan || idx >= len(plan.steps) || plan.steps[idx].epoch != captured || !implementationEqual(planStepInfo(plan.steps[idx]).Definition(), info.Definition()) {
+		c.activePlanMu.Unlock()
+		return fail(PlanRuntimeStale, "phase changed during verification; evidence discarded")
+	}
+	evidence := formatPlanEvidence(exit, output)
+	applied := "complete"
+	code := PlanStepOK
+	message := ""
+	if err != nil || exit != 0 {
+		applied = "failed"
+		code = PlanStepVerifyFailed
+		message = fmt.Sprintf("verify command exited %d — phase stays failed", exit)
+		if err != nil {
+			message = "verify command failed to run: " + err.Error()
+			evidence += "; " + err.Error()
+		}
+	}
+	plan.steps[idx].evidence = evidence
+	plan.steps[idx].status = applied
+	c.activePlanMu.Unlock()
+	plan.notifyChangeLocked()
+	if code == PlanStepVerifyFailed {
+		c.markPlanVerifyFailed()
+	} else {
+		c.clearPlanVerifyFailed()
+	}
+	return PlanStepApplyResult{Name: info.Name, Applied: applied, Code: code, Message: message, Output: output}
 }
 
 func (c *ChatAgent) runPlanVerify(command string) (int, string, error) {
@@ -221,6 +284,9 @@ const (
 // evidence already stored on each phase. The plan does not leave execution mode
 // without this.
 func (c *ChatAgent) AnnounceCompletion(outcomeObserved, unverified string) PlanCompletionResult {
+	if runtime := c.GetPlanRuntime(); runtime != nil {
+		return runtime.Complete(outcomeObserved, unverified)
+	}
 	plan := c.GetActivePlan()
 	if plan == nil {
 		return PlanCompletionResult{Code: PlanCompletionNoPlan, Message: "no active plan"}

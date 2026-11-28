@@ -60,6 +60,11 @@ func SessionID(v string) predicate.SessionEvent {
 	return predicate.SessionEvent(sql.FieldEQ(FieldSessionID, v))
 }
 
+// EventID applies equality check predicate on the "event_id" field. It's identical to EventIDEQ.
+func EventID(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldEQ(FieldEventID, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.SessionEvent {
 	return predicate.SessionEvent(sql.FieldEQ(FieldCreatedAt, v))
@@ -128,6 +133,81 @@ func SessionIDEqualFold(v string) predicate.SessionEvent {
 // SessionIDContainsFold applies the ContainsFold predicate on the "session_id" field.
 func SessionIDContainsFold(v string) predicate.SessionEvent {
 	return predicate.SessionEvent(sql.FieldContainsFold(FieldSessionID, v))
+}
+
+// EventIDEQ applies the EQ predicate on the "event_id" field.
+func EventIDEQ(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldEQ(FieldEventID, v))
+}
+
+// EventIDNEQ applies the NEQ predicate on the "event_id" field.
+func EventIDNEQ(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldNEQ(FieldEventID, v))
+}
+
+// EventIDIn applies the In predicate on the "event_id" field.
+func EventIDIn(vs ...string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldIn(FieldEventID, vs...))
+}
+
+// EventIDNotIn applies the NotIn predicate on the "event_id" field.
+func EventIDNotIn(vs ...string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldNotIn(FieldEventID, vs...))
+}
+
+// EventIDGT applies the GT predicate on the "event_id" field.
+func EventIDGT(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldGT(FieldEventID, v))
+}
+
+// EventIDGTE applies the GTE predicate on the "event_id" field.
+func EventIDGTE(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldGTE(FieldEventID, v))
+}
+
+// EventIDLT applies the LT predicate on the "event_id" field.
+func EventIDLT(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldLT(FieldEventID, v))
+}
+
+// EventIDLTE applies the LTE predicate on the "event_id" field.
+func EventIDLTE(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldLTE(FieldEventID, v))
+}
+
+// EventIDContains applies the Contains predicate on the "event_id" field.
+func EventIDContains(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldContains(FieldEventID, v))
+}
+
+// EventIDHasPrefix applies the HasPrefix predicate on the "event_id" field.
+func EventIDHasPrefix(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldHasPrefix(FieldEventID, v))
+}
+
+// EventIDHasSuffix applies the HasSuffix predicate on the "event_id" field.
+func EventIDHasSuffix(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldHasSuffix(FieldEventID, v))
+}
+
+// EventIDIsNil applies the IsNil predicate on the "event_id" field.
+func EventIDIsNil() predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldIsNull(FieldEventID))
+}
+
+// EventIDNotNil applies the NotNil predicate on the "event_id" field.
+func EventIDNotNil() predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldNotNull(FieldEventID))
+}
+
+// EventIDEqualFold applies the EqualFold predicate on the "event_id" field.
+func EventIDEqualFold(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldEqualFold(FieldEventID, v))
+}
+
+// EventIDContainsFold applies the ContainsFold predicate on the "event_id" field.
+func EventIDContainsFold(v string) predicate.SessionEvent {
+	return predicate.SessionEvent(sql.FieldContainsFold(FieldEventID, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

@@ -18,8 +18,6 @@ import (
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
-	"github.com/SAP/astonish/pkg/docs/slides"
-	adrill "github.com/SAP/astonish/pkg/drill"
 	emailpkg "github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/flowstore"
 	"github.com/SAP/astonish/pkg/mcp"
@@ -39,6 +37,9 @@ import (
 
 // ChatFactoryConfig holds all inputs needed to build a fully-wired ChatAgent.
 type ChatFactoryConfig struct {
+	// CatalogResources supplies explicitly scoped executable dependencies; no host bootstrap.
+	CatalogResources *ChatCatalogResources
+
 	AppConfig    *config.AppConfig
 	ProviderName string
 	ModelName    string
@@ -152,11 +153,17 @@ func (r *preparedKnowledgeRetrieval) Search(ctx context.Context, maxResults int,
 // ChatFactoryResult holds everything produced by the factory.
 // Callers (console, channel manager) unpack what they need.
 type ChatFactoryResult struct {
-	ChatAgent    *agent.ChatAgent
-	LLM          model.LLM
-	SwappableLLM *provider.SwappableLLM // hot-swappable LLM wrapper (nil in non-Studio callers)
-	ProviderName string
-	ModelName    string
+	// RuntimeFactory creates independent platform HTTP attempts over borrowed bootstrap resources.
+	RuntimeFactory api.StudioChatRuntimeFactory
+	// SharedResources is the exact borrowed infrastructure captured by RuntimeFactory.
+	// It contains no tenant tools, model, or owned cleanup; scoped attempts resolve
+	// those independently. Callers must not close its backend or pool.
+	SharedResources *ChatCatalogResources
+	ChatAgent       *agent.ChatAgent
+	LLM             model.LLM
+	SwappableLLM    *provider.SwappableLLM // hot-swappable LLM wrapper (nil in non-Studio callers)
+	ProviderName    string
+	ModelName       string
 	// ProviderConfigured is false when the agent was built without a usable
 	// provider (AllowMissingProvider) and is running on the placeholder LLM.
 	// Code mode uses this to prompt the user to run /model before a turn.
@@ -545,138 +552,25 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	swappableLLM := provider.NewSwappableLLM(rawLLM)
 	var llm model.LLM = swappableLLM
 
-	// --- 2. Initialize internal tools ---
-	// Tools are organized into groups. The main thread gets only essential tools
-	// (read, write, edit, shell, search, memory, delegate). All other tools are
-	// available to sub-agents via named groups in delegate_tasks.
-	coreTools, err := tools.GetInternalTools()
+	baseCatalog, err := buildChatBase(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize internal tools: %w", err)
+		return nil, err
 	}
-
-	// Credential tools → deferred category.
-	// Credentials require a platform vault (PG-backed or file-backed store) that
-	// is never present in Astonish Code mode, so all credential tools are no-ops
-	// there. Suppress them entirely so they are not advertised to the agent.
-	var credToolsSlice []tool.Tool
-	if !cfg.CodeMode {
-		credTools, credErr := tools.GetCredentialTools()
-		if credErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create credential tools", "error", credErr)
-			}
-		} else {
-			credToolsSlice = credTools
-		}
-	}
-
-	// Studio injects Perplexity per request because the shared agent can serve
-	// multiple tenants. Only local Code mode owns a factory-scoped instance.
-	if shouldRegisterFactoryPerplexity(cfg) {
-		perplexityTool, perplexityErr := tools.NewPerplexityWebSearchTool(cfg.AppConfig, provider.GetProvider)
-		if perplexityErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create perplexity web search tool", "error", perplexityErr)
-			}
-		} else {
-			coreTools = append(coreTools, perplexityTool)
-		}
-	}
+	coreTools, credToolsSlice := baseCatalog.CoreTools, baseCatalog.CredentialTools
+	schedToolsSlice, slideToolsSlice := baseCatalog.SchedulerTools, baseCatalog.SlideTools
+	distillToolsSlice, subAgentMgr := baseCatalog.DistillTools, baseCatalog.SubAgentManager
 
 	// --- 2b/2c. Initialize semantic memory ---
 	// Memory is fully managed by the DB (per-team vector tables).
 	// No file-based vector store needed.
 	memorySearchAvailable := true
-	indexingDone := make(chan struct{})
-	close(indexingDone)
 
-	// Create memory tools → core category.
-	// Memory tools require a PG-backed store injected at request time by
-	// TenantMiddleware / ChatRunner.InjectMemoryStores. That injection never
-	// happens in Astonish Code mode (there is no platform context), so all
-	// three tools are no-ops there and must not be registered — the agent
-	// would waste turns calling them only to receive "not available" responses.
-	if !cfg.CodeMode {
-		memorySaveTool, msErr := tools.NewMemorySaveTool()
-		if msErr == nil {
-			coreTools = append(coreTools, memorySaveTool)
-		}
-		searchTool, searchErr := tools.NewMemorySearchTool()
-		if searchErr == nil {
-			coreTools = append(coreTools, searchTool)
-		}
-		memoryDeleteTool, mdErr := tools.NewMemoryDeleteTool()
-		if mdErr == nil {
-			coreTools = append(coreTools, memoryDeleteTool)
-		}
-	}
-
-	// --- 2d. Initialize scheduler tools → deferred category ---
-	// Scheduler tools require a running scheduler daemon (platform service).
-	// They are not available in Astonish Code mode.
-	var schedToolsSlice []tool.Tool
-	if !cfg.CodeMode {
-		schedTools, schedErr := tools.GetSchedulerTools()
-		if schedErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create scheduler tools", "error", schedErr)
-			}
-		} else {
-			schedToolsSlice = schedTools
-		}
-	}
-
-	// --- 2d-i. Initialize slide deck tools → deferred category ---
-	// Deck authoring is a Studio/platform capability backed by the personal docs
-	// store injected into each request. It is intentionally unavailable in Code mode.
-	var slideToolsSlice []tool.Tool
-	if !cfg.CodeMode {
-		deckTools, deckErr := slides.GetTools()
-		if deckErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create slide deck tools", "error", deckErr)
-			}
-		} else {
-			slideToolsSlice = deckTools
-		}
-	}
-
-	// --- 2d-ii. Initialize distill_flow tool → deferred category ---
-	// Flow distillation is a platform service (requires LLM + flow registry).
-	// It is not available in Astonish Code mode.
-	var distillToolsSlice []tool.Tool
-	if !cfg.CodeMode {
-		distillTools, distillErr := tools.GetDistillTools()
-		if distillErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create distill tools", "error", distillErr)
-			}
-		} else {
-			distillToolsSlice = distillTools
-		}
-	}
-
-	// --- 2e. Initialize process management tools → core category ---
-	processTools, procErr := tools.GetProcessTools()
-	if procErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create process tools", "error", procErr)
-		}
-	} else {
-		coreTools = append(coreTools, processTools...)
-	}
 	cleanups = append(cleanups, tools.CleanupProcessManager)
 
 	// --- 2f. Initialize browser automation tools → deferred category ---
 	browserCfg := browserConfigFromApp(cfg.AppConfig)
 	browserMgr := browser.NewManager(browserCfg)
-	var browserToolsSlice []tool.Tool
-	var browserErr error
-	if cfg.AppConfig != nil && sandbox.IsSandboxEnabled(&cfg.AppConfig.Sandbox) {
-		browserToolsSlice, browserErr = tools.GetBrowserToolsForSandbox(browserMgr)
-	} else {
-		browserToolsSlice, browserErr = tools.GetBrowserTools(browserMgr)
-	}
+	browserToolsSlice, browserErr := browserToolsForFactory(cfg, browserMgr)
 	if browserErr != nil {
 		if cfg.DebugMode {
 			slog.Warn("failed to create browser tools", "error", browserErr)
@@ -726,72 +620,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		emailToolsSlice = emailTools
 	}
 
-	// --- 2g. Sub-agent delegation tool → core category ---
-	var subAgentMgr *agent.SubAgentManager
-	var fleetOnlyTools []tool.Tool // fleet-only tools (run_fleet_phase), assigned to SubAgentManager.FleetTools
-	if cfg.AppConfig.SubAgents.IsSubAgentsEnabled() {
-		subAgentCfg := agent.SubAgentConfig{
-			MaxDepth:      cfg.AppConfig.SubAgents.MaxDepth,
-			MaxConcurrent: cfg.AppConfig.SubAgents.MaxConcurrent,
-			TaskTimeout:   cfg.AppConfig.SubAgents.TaskTimeout(),
-		}
-		subAgentMgr = agent.NewSubAgentManager(subAgentCfg)
-		delegateTool, delegateErr := tools.NewDelegateTasksToolForManager(subAgentMgr)
-		if delegateErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create delegate_tasks tool", "error", delegateErr)
-			}
-		} else {
-			coreTools = append(coreTools, delegateTool)
-
-			// read_task_result: allows the orchestrator to retrieve full sub-task
-			// outputs that were summarized by delegate_tasks to prevent context explosion.
-			readResultTool, readResultErr := tools.NewReadTaskResultTool()
-			if readResultErr == nil {
-				coreTools = append(coreTools, readResultTool)
-			}
-
-			// announce_plan: allows the orchestrator to announce a
-			// structured plan before starting work. Plan phases are
-			// auto-progressed for delegated work and explicitly updated by the
-			// model via update_plan for main-thread work.
-			announcePlanTool, apErr := tools.NewAnnouncePlanTool()
-			if apErr == nil {
-				coreTools = append(coreTools, announcePlanTool)
-			}
-			// update_plan: lets the model mark plan phases running/complete/
-			// failed as it works on the main thread, keeping the checklist and
-			// the session PLAN.md accurate (and resumable after compaction).
-			updatePlanTool, upErr := tools.NewUpdatePlanTool()
-			if upErr == nil {
-				coreTools = append(coreTools, updatePlanTool)
-			}
-			if acTool, acErr := tools.NewAnnounceCompletionTool(); acErr == nil {
-				coreTools = append(coreTools, acTool)
-			}
-
-			// Graph-Optimized Plan mode transition tools (code mode only).
-			// They advance the per-session phase state machine that drives the
-			// staged runtime tool gate. Always registered; only meaningful when
-			// the turn is in Graph-Optimized Plan mode.
-			if gpReads, e := tools.NewGraphPlanReadsTool(); e == nil {
-				coreTools = append(coreTools, gpReads)
-			}
-			if gpGaps, e := tools.NewGraphPlanGapsTool(); e == nil {
-				coreTools = append(coreTools, gpGaps)
-			}
-			if gpFinalize, e := tools.NewGraphPlanFinalizeTool(); e == nil {
-				coreTools = append(coreTools, gpFinalize)
-			}
-
-		}
-	}
+	var fleetOnlyTools []tool.Tool
 
 	// --- 2h. Initialize skills system → deferred category ---
 	var skillIndex string
 	var filesystemSkills []skills.Skill
 	var skillToolSlice []tool.Tool
-	var skillLookupTool tool.Tool // hoisted for SubAgentManager wiring
 	if cfg.AppConfig != nil && cfg.AppConfig.Skills.IsSkillsEnabled() {
 		lookupMode := skillLookupMode(cfg.PlatformMode, cfg.CodeMode)
 
@@ -820,7 +654,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		} else {
 			skillToolSlice = append(skillToolSlice, skillTool)
-			skillLookupTool = skillTool // keep reference for sub-agent injection
 		}
 
 		// Skill creation is a personal-runtime capability. Bind it to the same
@@ -1184,140 +1017,16 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		slog.Debug("session storage: caller-provided service", "component", "chat-factory")
 	}
 
-	// --- 4b. Build tool groups for sub-agent delegation ---
-	// Tools are organized into named groups. The main thread gets only essential
-	// tools (file ops, shell, search, memory, delegate). All other tools are
-	// available to sub-agents via named groups in the delegate_tasks tool.
-
-	// Split coreTools into main-thread essentials and the full "core" group
-	// for sub-agents. See mainThreadToolAllowlist for the membership.
-	mainThreadToolNames := mainThreadToolAllowlist(cfg.CodeMode)
-
-	var mainThreadTools []tool.Tool
-	for _, t := range coreTools {
-		if mainThreadToolNames[t.Name()] {
-			mainThreadTools = append(mainThreadTools, t)
-		}
+	catalogCfg := *cfg
+	catalogCfg.CatalogResources = &ChatCatalogResources{Prepared: true,
+		CoreTools: coreTools, CredentialTools: credToolsSlice, SchedulerTools: schedToolsSlice,
+		SlideTools: slideToolsSlice, DistillTools: distillToolsSlice, BrowserTools: browserToolsSlice,
+		EmailTools: emailToolsSlice, SkillTools: skillToolSlice, SubAgentManager: subAgentMgr}
+	catalog, err := BuildChatCatalog(ctx, nil, &catalogCfg)
+	if err != nil {
+		return nil, err
 	}
-	// Also pull resolve_credential from credToolsSlice into the main thread.
-	// It stays in the credentials group too (for sub-agents); the ToolIndex
-	// deduplicates and gives main-thread precedence.
-	// In code mode credToolsSlice is always nil (credentials suppressed), so
-	// this loop is a no-op there — guard it explicitly for clarity.
-	if !cfg.CodeMode {
-		for _, t := range credToolsSlice {
-			if mainThreadToolNames[t.Name()] {
-				mainThreadTools = append(mainThreadTools, t)
-			}
-		}
-	}
-	// Same for skill_lookup — the system prompt instructs the agent to call
-	// it directly, so it must be on the main thread.
-	for _, t := range skillToolSlice {
-		if mainThreadToolNames[t.Name()] {
-			mainThreadTools = append(mainThreadTools, t)
-		}
-	}
-
-	// Separate web-oriented tools from core into their own group
-	webToolNames := map[string]bool{
-		"web_fetch":             true,
-		"perplexity_web_search": true,
-		"read_pdf":              true,
-		"http_request":          true,
-	}
-	processToolNames := map[string]bool{
-		"process_read":  true,
-		"process_write": true,
-		"process_list":  true,
-		"process_kill":  true,
-	}
-
-	var coreGroupTools []tool.Tool
-	var webGroupTools []tool.Tool
-	var processGroupTools []tool.Tool
-	for _, t := range coreTools {
-		name := t.Name()
-		if webToolNames[name] {
-			webGroupTools = append(webGroupTools, t)
-		} else if processToolNames[name] {
-			processGroupTools = append(processGroupTools, t)
-		} else {
-			coreGroupTools = append(coreGroupTools, t)
-		}
-	}
-
-	// Build tool groups map
-	toolGroups := map[string]*agent.ToolGroup{}
-
-	toolGroups["core"] = &agent.ToolGroup{
-		Name:        "core",
-		Description: "File operations, shell commands, search, memory, git diff, file tree",
-		Tools:       coreGroupTools,
-	}
-	if len(webGroupTools) > 0 {
-		toolGroups["web"] = &agent.ToolGroup{
-			Name:        "web",
-			Description: "Fetch web pages, read PDFs, make HTTP API requests",
-			Tools:       webGroupTools,
-		}
-	}
-	if len(processGroupTools) > 0 {
-		toolGroups["process"] = &agent.ToolGroup{
-			Name:        "process",
-			Description: "Read, write, list, and kill background processes",
-			Tools:       processGroupTools,
-		}
-	}
-	if len(browserToolsSlice) > 0 {
-		toolGroups["browser"] = &agent.ToolGroup{
-			Name:        "browser",
-			Description: "Browse and research websites, get live/current data, take screenshots, fill forms, interact with web pages",
-			Tools:       browserToolsSlice,
-		}
-	}
-	if len(credToolsSlice) > 0 {
-		toolGroups["credentials"] = &agent.ToolGroup{
-			Name:        "credentials",
-			Description: "Save, retrieve, list, test, and resolve credentials",
-			Tools:       credToolsSlice,
-		}
-	}
-	if len(schedToolsSlice) > 0 {
-		toolGroups["scheduler"] = &agent.ToolGroup{
-			Name:        "scheduler",
-			Description: "Schedule and manage recurring jobs",
-			Tools:       schedToolsSlice,
-		}
-	}
-	if len(slideToolsSlice) > 0 {
-		toolGroups["slides"] = &agent.ToolGroup{
-			Name:        "slides",
-			Description: "Create, read, write, list, and validate Astonish slide decks",
-			Tools:       slideToolsSlice,
-		}
-	}
-	if len(emailToolsSlice) > 0 {
-		toolGroups["email"] = &agent.ToolGroup{
-			Name:        "email",
-			Description: "Read, send, search, and wait for email",
-			Tools:       emailToolsSlice,
-		}
-	}
-	if len(distillToolsSlice) > 0 {
-		toolGroups["distill"] = &agent.ToolGroup{
-			Name:        "distill",
-			Description: "Distill conversation flows into reusable YAML",
-			Tools:       distillToolsSlice,
-		}
-	}
-	if len(skillToolSlice) > 0 {
-		toolGroups["skill"] = &agent.ToolGroup{
-			Name:        "skill",
-			Description: "Look up available CLI tool skills",
-			Tools:       skillToolSlice,
-		}
-	}
+	mainThreadTools, toolGroups := catalog.MainThreadTools, catalog.Groups
 
 	// MCP servers remain catalog groups for delegation in every mode. Code mode
 	// also exposes their sanitized toolsets directly to the main agent.
@@ -1510,330 +1219,29 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	// Fleet plan tools → deferred category (available in both modes)
-	var fleetToolsSlice []tool.Tool
-	fleetPlanTools, fptErr := tools.GetFleetPlanTools()
-	if fptErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create fleet plan tools", "error", fptErr)
-		}
-	} else {
-		fleetToolsSlice = append(fleetToolsSlice, fleetPlanTools...)
-	}
-
-	fleetPlanValidateTools, fpvErr := tools.GetFleetPlanValidateTools()
-	if fpvErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create fleet plan validate tools", "error", fpvErr)
-		}
-	} else {
-		fleetToolsSlice = append(fleetToolsSlice, fleetPlanValidateTools...)
-	}
-
-	fleetSetupTools, fstErr := tools.GetFleetSetupTools()
-	if fstErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create fleet setup tools", "error", fstErr)
-		}
-	} else {
-		fleetToolsSlice = append(fleetToolsSlice, fleetSetupTools...)
-	}
-
-	if len(fleetToolsSlice) > 0 {
-		toolGroups["fleet"] = &agent.ToolGroup{
-			Name:        "fleet",
-			Description: "Create and validate fleet plans",
-			Tools:       fleetToolsSlice,
-		}
-	}
-
-	// Sandbox template tools → deferred category
-	if backendSandbox != nil && backendSandboxPool != nil && sandboxTplRegistry != nil {
-		var sandboxTplTools []tool.Tool
-		tplTool, tplErr := tools.NewSaveSandboxTemplateToolFromBackend(backendSandbox, sandboxTplRegistry, backendSessRegistry)
-		if tplErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create save_sandbox_template tool", "error", tplErr)
-			}
-		} else {
-			sandboxTplTools = append(sandboxTplTools, tplTool)
-		}
-
-		listTplTool, listErr := tools.NewListSandboxTemplatesTool(sandboxTplRegistry)
-		if listErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create list_sandbox_templates tool", "error", listErr)
-			}
-		} else {
-			sandboxTplTools = append(sandboxTplTools, listTplTool)
-		}
-
-		useTplTool, useErr := tools.NewUseSandboxTemplateToolFromBackend(backendSandboxPool, backendSandbox, sandboxTplRegistry)
-		if useErr != nil {
-			if cfg.DebugMode {
-				slog.Warn("failed to create use_sandbox_template tool", "error", useErr)
-			}
-		} else {
-			sandboxTplTools = append(sandboxTplTools, useTplTool)
-		}
-
-		if len(sandboxTplTools) > 0 {
-			toolGroups["sandbox_templates"] = &agent.ToolGroup{
-				Name:        "sandbox_templates",
-				Description: "Save, list, and use sandbox container templates",
-				Tools:       sandboxTplTools,
-			}
-		}
-	}
-
-	// Drill tools → deferred category
-	var drillToolsSlice []tool.Tool
-	drillTools, drillErr := tools.GetDrillTools()
-	if drillErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create drill tools", "error", drillErr)
-		}
-	} else {
-		drillToolsSlice = append(drillToolsSlice, drillTools...)
-	}
-
-	var runDrillTool tool.Tool
-	var runDrillErr error
-	if backendSandboxPool != nil {
-		runDrillTool, runDrillErr = tools.NewRunDrillToolWithPool(backendSandboxPool, sandboxTplRegistry, browserMgr, adrill.NewLLMProviderFromModel(llm))
-	} else {
-		runDrillTool, runDrillErr = tools.NewRunDrillTool(sandboxNodePool, sandboxTplRegistry, browserMgr, adrill.NewLLMProviderFromModel(llm))
-	}
-	if runDrillErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create run_drill tool", "error", runDrillErr)
-		}
-	} else {
-		drillToolsSlice = append(drillToolsSlice, runDrillTool)
-	}
-
-	var injectCredsTool tool.Tool
-	var injectCredsErr error
-	if backendSandboxPool != nil {
-		injectCredsTool, injectCredsErr = tools.NewInjectDrillCredentialsToolWithPool(backendSandboxPool, sandboxTplRegistry, browserMgr)
-	} else {
-		injectCredsTool, injectCredsErr = tools.NewInjectDrillCredentialsTool(sandboxNodePool, sandboxTplRegistry, browserMgr)
-	}
-	if injectCredsErr != nil {
-		if cfg.DebugMode {
-			slog.Warn("failed to create inject_drill_credentials tool", "error", injectCredsErr)
-		}
-	} else {
-		drillToolsSlice = append(drillToolsSlice, injectCredsTool)
-	}
-
-	if len(drillToolsSlice) > 0 {
-		toolGroups["drill"] = &agent.ToolGroup{
-			Name:        "drill",
-			Description: "Create, validate, and run test drills",
-			Tools:       drillToolsSlice,
-		}
-	}
-
-	// Flows are deferred catalog tools in Studio; Code mode has no flow registry.
-	if !cfg.CodeMode {
-		var flowTools []tool.Tool
-		if searchFlowsTool, sfErr := tools.NewSearchFlowsTool(); sfErr == nil {
-			flowTools = append(flowTools, searchFlowsTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create search_flows tool", "error", sfErr)
-		}
-		if runFlowTool, rfErr := tools.NewRunFlowTool(); rfErr == nil {
-			flowTools = append(flowTools, runFlowTool)
-		} else if cfg.DebugMode {
-			slog.Warn("failed to create run_flow tool", "error", rfErr)
-		}
-		if len(flowTools) > 0 {
-			toolGroups["flows"] = &agent.ToolGroup{Name: "flows", Description: "Search and run reusable flows", Tools: flowTools}
-		}
-	}
-
-	// Create the dedicated tool index for retrieval-based tool discovery.
-	// One document per tool (name + description) enables accurate semantic
-	// search without the chunking problems of the general memory store.
-	//
-	// Platform mode: uses pgvector backed vector store (shared platform DB).
-	var toolIndex *agent.ToolIndex
-	var vectorStore agent.ToolVectorStore
-	var toolEmbedFunc agent.EmbedFunc
-
-	if cfg.PlatformToolVectorStore != nil && cfg.PlatformEmbedFunc != nil {
-		// Use pre-created vector store from the backend
-		vectorStore = cfg.PlatformToolVectorStore
-		toolEmbedFunc = cfg.PlatformEmbedFunc
-	}
-
-	sortedCatalogGroups := agent.SortedGroups(toolGroups)
-	if (vectorStore == nil) != (toolEmbedFunc == nil) {
-		return nil, fmt.Errorf("semantic tool retrieval requires both vector store and embedding function")
-	}
-	if vectorStore != nil {
-		var tiErr error
-		toolIndex, tiErr = agent.NewToolIndex(vectorStore, toolEmbedFunc)
-		if tiErr != nil {
-			return nil, fmt.Errorf("create semantic tool index: %w", tiErr)
-		}
-		if syncErr := toolIndex.SyncTools(ctx, mainThreadTools, sortedCatalogGroups); syncErr != nil {
-			return nil, fmt.Errorf("initialize semantic tool index: %w", syncErr)
-		}
-		slog.Debug("tool index initialized", "component", "tool-index", "tools_indexed", toolIndex.Count())
-	} else {
-		// Lexical-only catalogs are intentional when semantic retrieval is not
-		// configured. A configured semantic dependency may never degrade here.
-		toolIndex = agent.NewLexicalToolIndex()
-		if err := toolIndex.PrimeTools(ctx, mainThreadTools, sortedCatalogGroups); err != nil {
-			return nil, fmt.Errorf("initialize tool catalog: %w", err)
-		}
-	}
-
-	logChatFactoryPhase(phaseStarted, "tool-index-sync")
-
-	// Platform/chat sessions use the cache-stable bridge. Code mode runs locally
-	// and exposes concrete tools so plan and authorization policy apply to the
-	// exact model-visible operation rather than a generic executor.
-	providerTools, err := providerToolsForMode(cfg.CodeMode, toolIndex, mainThreadTools, sortedCatalogGroups)
-	if err != nil {
+	if err := addChatExtendedGroups(cfg, toolGroups, backendSandboxPool, sandboxNodePool, backendSandbox,
+		sandboxTplRegistry, backendSessRegistry, browserMgr, llm); err != nil {
 		return nil, err
 	}
-	mainThreadTools = providerTools
 
-	// --- 6. Create ChatAgent ---
-	chatAgent := agent.NewChatAgent(
-		llm, mainThreadTools, codeModeMainThreadToolsets, sessionService,
-		promptBuilder, cfg.DebugMode, cfg.AutoApprove,
-	)
-	chatAgent.PreProviderRetrievalTimeout = cfg.AppConfig.Chat.PreProviderRetrievalTimeout()
-	// Code-mode authorization: gate not-whitelisted tools and out-of-project
-	// filesystem access behind per-tool / per-folder user authorization. Active
-	// only in code mode and only when the user hasn't opted into --auto-approve
-	// (--yolo), which bypasses all approval. Studio/platform mode leaves this
-	// off — those surfaces are sandboxed / tenant-scoped instead.
-	if cfg.CodeMode && !cfg.AutoApprove {
-		chatAgent.SetEnforceAuthorization(true)
-		chatAgent.SetWorkingDir(workspaceDir)
-		// NOTE: we deliberately do NOT call tools.SetScopeRoot here. In
-		// interactive code mode the folder-access gate in pkg/agent is the
-		// authoritative, GRANT-AWARE enforcer: it prompts for out-of-scope
-		// paths and, once the user approves, records a path grant so the retry
-		// succeeds. The tools.SetScopeRoot guard is grant-BLIND (a hard reject),
-		// so engaging it here would re-reject a path the user just approved.
-		// SetScopeRoot is reserved for non-interactive callers that cannot
-		// prompt (scheduler/planner auto-approve) — wired there separately.
-	}
-
-	// Wire tool index to ChatAgent for per-turn auto-discovery
-	if toolIndex != nil {
-		chatAgent.ToolIndex = toolIndex
-	}
-
-	// Wire credential redactor to ChatAgent, session service, and sub-agents.
-	// The Redactor is a security boundary — it MUST always exist (never nil),
-	// even when the file-based credential store fails (platform mode with
-	// regenerated .store_key). In platform mode, it gets hydrated per-request
-	// from the PG-backed credential store in chat_handlers.go.
 	redactor := credentials.NewRedactor()
 	credentialResolver := optionalCredentialResolver(credStore)
 	if credentialResolver != nil {
 		redactor = credStore.Redactor()
-		chatAgent.CredentialStore = credentialResolver
 	}
-	chatAgent.Redactor = redactor
-	// Create per-session PendingVault for <<<SECRET_N>>> token resolution.
-	// The vault extracts raw secrets from user messages before the LLM sees
-	// them, and registers them with the redactor as a safety net.
-	chatAgent.PendingSecrets = credentials.NewPendingVault(redactor)
-	// Attach proactive secret scanner if enabled (default: true).
-	// Scans user messages for untagged secrets using keyword, entropy,
-	// and structural analysis before they reach the LLM provider.
-	if cfg.AppConfig == nil || cfg.AppConfig.Security.IsSecretScannerEnabled() {
-		scanner := credentials.NewSecretScanner()
-		if cfg.AppConfig != nil {
-			sc := cfg.AppConfig.Security.SecretScanner
-			if sc.EntropyThreshold > 0 {
-				scanner.EntropyThreshold = sc.EntropyThreshold
-			}
-			if sc.MinTokenLength > 0 {
-				scanner.MinTokenLength = sc.MinTokenLength
-			}
-		}
-		chatAgent.PendingSecrets.Scanner = scanner
+	catalog.MainThreadTools, catalog.Groups = mainThreadTools, toolGroups
+	runtimeDeps := ChatRuntimeDependencies{
+		Config: cfg, LLM: llm, Sessions: sessionService, Catalog: catalog,
+		Prompt: promptBuilder, Toolsets: codeModeMainThreadToolsets,
+		Redactor: redactor, Credentials: credentialResolver,
+		FleetTools: fleetOnlyTools, Cleanup: cleanup,
 	}
-	if credStore != nil {
-		// Also wire to file-based session store for transcript redaction
-		if fs, ok := sessionService.(*persistentsession.FileStore); ok {
-			fs.RedactFunc = redactor.Redact
-			// Wire retroactive redaction callback so that after save_credential
-			// completes, the current session's transcript is scrubbed of any
-			// secrets that were persisted before the credential was registered.
-			chatAgent.RedactSessionFunc = fs.RedactSession
-		}
-	}
+	// Legacy host registrations below capture this pointer; scoped construction
+	// does not install globals. No callback executes during bootstrap.
+	var chatAgent *agent.ChatAgent
+	var registerLegacyPlanCallbacks func()
 
-	// Wire SubAgentManager — deferred until all tools and LLM are known.
-	// Sub-agents get tool groups for group-based tool resolution.
 	if subAgentMgr != nil {
-		subAgentMgr.LLM = llm
-		subAgentMgr.ToolGroups = toolGroups
-		subAgentMgr.FleetTools = fleetOnlyTools
-		subAgentMgr.SessionService = sessionService
-		subAgentMgr.Redactor = chatAgent.Redactor
-		subAgentMgr.CredentialStore = credentialResolver
-		subAgentMgr.PendingSecrets = chatAgent.PendingSecrets
-		subAgentMgr.EventForwarder = chatAgent.ForwardSubTaskEvent
-		// Wire structured sub-task progress: drive plan step transitions from
-		// sub-task lifecycle events, then forward to ChatAgent.SubTaskProgressCallback
-		// (which is set dynamically by ChatRunner.Run() for Studio sessions).
-		subAgentMgr.SubTaskProgress = func(evt agent.SubTaskProgressEvent) {
-			// Drive plan step transitions via explicit plan_step binding.
-			// task_start → resolve step name, register task, mark step "running"
-			// task_complete → mark task done; if all tasks for step done, mark step "complete"
-			if plan := chatAgent.GetActivePlan(); plan != nil {
-				switch evt.Type {
-				case "task_start":
-					// Resolve the plan step: use explicit plan_step if set, else prefix match
-					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
-					if stepName != "" {
-						if emittedStep := plan.StartStep(stepName, evt.TaskName); emittedStep != "" {
-							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
-								Type:       "plan_step_update",
-								StepName:   emittedStep,
-								StepStatus: "running",
-								SessionID:  evt.SessionID,
-							})
-						}
-					}
-				case "task_complete":
-					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
-					if stepName != "" {
-						if ready := plan.CompleteTask(stepName, evt.TaskName); ready != "" {
-							result := chatAgent.ApplyPlanStepUpdate(ready, "complete")
-							status := result.Applied
-							if status == "" {
-								status = "running"
-							}
-							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
-								Type:       "plan_step_update",
-								StepName:   ready,
-								StepStatus: status,
-								SessionID:  evt.SessionID,
-							})
-						}
-					}
-				}
-			}
-			// Forward the original event to the correct session's callback.
-			chatAgent.EmitSubTaskProgress(evt.SessionID, evt)
-		}
-		// Wire file artifact capture so sub-agent write_file/edit_file calls
-		// propagate file artifacts to the parent ChatAgent for channel delivery
-		// (e.g., as Telegram document attachments).
-		subAgentMgr.FileArtifactCapture = chatAgent.CaptureFileArtifact
-
 		// Wire MCP group fallback resolver to handle the race condition where
 		// async MCP discovery completes after the chat agent was initialized.
 		// When a sub-agent requests "mcp:<server>" but it wasn't in ToolGroups
@@ -1847,7 +1255,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				capturedPool = sandbox.AsNodePool(sandboxNodePool)
 			}
 			capturedCredStore := optionalCredentialResolver(credStore)
-			subAgentMgr.MCPGroupResolver = func(ctx context.Context, serverName string) *agent.ToolGroup {
+			runtimeDeps.MCPGroupResolver = func(ctx context.Context, serverName string) *agent.ToolGroup {
 				serverCfg, exists := capturedMCPCfg.MCPServers[serverName]
 				if !exists || !serverCfg.IsEnabled() {
 					return nil
@@ -1902,96 +1310,58 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		}
 
-		subAgentMgr.AppName = "astonish"
-		// Use SystemUserID as the fallback for child sessions.
-		// The per-request user ID from context (store.UserIDFromContext) takes
-		// precedence in sub_agent.go — this is only the factory-time default.
-		subAgentMgr.UserID = store.SystemUserID
-
-		// Wire plan tools: announce_plan emits events through
-		// the same ChatAgent.SubTaskProgressCallback pipeline.
-		tools.SetPlanProgressCallback(func(evt agent.SubTaskProgressEvent) {
-			if chatAgent.SubTaskProgressCallback != nil {
-				chatAgent.SubTaskProgressCallback(evt)
-			}
-		})
-		// Wire plan state storage so AfterToolCallback can auto-progress steps.
-		tools.SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
-			plan := agent.NewPlanState(goal, doc, steps)
-			return chatAgent.TrySetActivePlan(plan)
-		})
-		// Wire explicit model-driven plan updates (update_plan tool) onto the
-		// active plan. This drives PLAN.md rewrites for main-thread work and
-		// suppresses the end-of-turn bulk-complete sweep.
-		tools.SetPlanStepUpdateCallback(func(step, status string) agent.PlanStepApplyResult {
-			return chatAgent.ApplyPlanStepUpdate(step, status)
-		})
-		tools.SetPlanCompletionCallback(func(outcomeObserved, unverified string) agent.PlanCompletionResult {
-			return chatAgent.AnnounceCompletion(outcomeObserved, unverified)
-		})
-		tools.SetPlanKnownStepsCallback(func() []string {
-			plan := chatAgent.GetActivePlan()
-			if plan == nil {
+		registerLegacyPlanCallbacks = func() {
+			// Wire plan tools: announce_plan emits events through
+			// the same ChatAgent.SubTaskProgressCallback pipeline.
+			tools.SetPlanProgressCallback(func(evt agent.SubTaskProgressEvent) {
+				if chatAgent.SubTaskProgressCallback != nil {
+					chatAgent.SubTaskProgressCallback(evt)
+				}
+			})
+			// Wire plan state storage so AfterToolCallback can auto-progress steps.
+			tools.SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
+				plan := agent.NewPlanState(goal, doc, steps)
+				return chatAgent.TrySetActivePlan(plan)
+			})
+			// Wire explicit model-driven plan updates (update_plan tool) onto the
+			// active plan. This drives PLAN.md rewrites for main-thread work and
+			// suppresses the end-of-turn bulk-complete sweep.
+			tools.SetPlanStepUpdateCallback(func(step, status string) agent.PlanStepApplyResult {
+				return chatAgent.ApplyPlanStepUpdate(step, status)
+			})
+			tools.SetPlanCompletionCallback(func(outcomeObserved, unverified string) agent.PlanCompletionResult {
+				return chatAgent.AnnounceCompletion(outcomeObserved, unverified)
+			})
+			tools.SetPlanKnownStepsCallback(func() []string {
+				plan := chatAgent.GetActivePlan()
+				if plan == nil {
+					return nil
+				}
+				return plan.StepNames()
+			})
+			tools.SetGraphPlanAdvanceCallback(func(to agent.GraphPlanPhase) error {
+				gp := chatAgent.GetActiveGraphPlan()
+				if gp == nil {
+					return fmt.Errorf("no active graph plan")
+				}
+				gp.Advance(to)
 				return nil
-			}
-			return plan.StepNames()
-		})
-		tools.SetGraphPlanAdvanceCallback(func(to agent.GraphPlanPhase) error {
-			gp := chatAgent.GetActiveGraphPlan()
-			if gp == nil {
-				return fmt.Errorf("no active graph plan")
-			}
-			gp.Advance(to)
-			return nil
-		})
-		tools.SetGraphPlanAcceptanceCallback(func(acceptance string) error {
-			gp := chatAgent.GetActiveGraphPlan()
-			if gp == nil {
-				return fmt.Errorf("no active graph plan")
-			}
-			gp.SetAcceptance(acceptance)
-			return nil
-		})
-		tools.SetGraphPlanAcceptanceLookup(func() string {
-			gp := chatAgent.GetActiveGraphPlan()
-			if gp == nil {
-				return ""
-			}
-			return gp.Acceptance()
-		})
-		// Wire tool discovery so sub-agents can auto-discover their tools
-		if toolIndex != nil {
-			subAgentMgr.ToolIndex = toolIndex
-		}
-		// Discovery and execution share the immutable child catalog, even when
-		// no global semantic index is configured.
-		subAgentMgr.SearchToolsFactory = tools.NewScopedSearchToolsTool
-		// Wire skill awareness into sub-agents so they can load skill
-		// content on demand (e.g., git/github skills for repo operations).
-		if skillLookupTool != nil {
-			subAgentMgr.SkillLookupTool = skillLookupTool
-		}
-		if skillIndex != "" {
-			subAgentMgr.SkillIndex = skillIndex
-		}
-		// Wire web search/extract tool names so sub-agents get proper guidance
-		// preferring dedicated search over web_fetch.
-		if promptBuilder.WebSearchAvailable && promptBuilder.WebSearchToolName != "" {
-			// Normalize hyphens → underscores to match actual MCP tool names
-			subAgentMgr.WebSearchToolName = strings.ReplaceAll(promptBuilder.WebSearchToolName, "-", "_")
-		}
-		if promptBuilder.WebExtractAvailable && promptBuilder.WebExtractToolName != "" {
-			subAgentMgr.WebExtractToolName = strings.ReplaceAll(promptBuilder.WebExtractToolName, "-", "_")
-		}
-		// Wire sandbox guidance so sub-agents know about workspace and recovery.
-		subAgentMgr.SandboxEnabled = promptBuilder.SandboxEnabled
-		subAgentMgr.SandboxWorkspaceDir = promptBuilder.SandboxWorkspaceDir
-		// Wire working directory so sub-agents know the correct project path
-		// and don't hallucinate paths like /home/user/repo/... on macOS.
-		if promptBuilder.WorkspaceDir != "" {
-			subAgentMgr.WorkDir = promptBuilder.WorkspaceDir
-		} else if cwd, err := os.Getwd(); err == nil {
-			subAgentMgr.WorkDir = cwd
+			})
+			tools.SetGraphPlanAcceptanceCallback(func(acceptance string) error {
+				gp := chatAgent.GetActiveGraphPlan()
+				if gp == nil {
+					return fmt.Errorf("no active graph plan")
+				}
+				gp.SetAcceptance(acceptance)
+				return nil
+			})
+			tools.SetGraphPlanAcceptanceLookup(func() string {
+				gp := chatAgent.GetActiveGraphPlan()
+				if gp == nil {
+					return ""
+				}
+				return gp.Acceptance()
+			})
 		}
 		// Alias sub-agent sessions to the parent's sandbox container so they
 		// share the same container instead of each creating a new one.
@@ -1999,7 +1369,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			pool := sandboxNodePool
 			bmgr := browserMgr // capture for closure
 			sessReg := sandboxSessRegistry
-			subAgentMgr.OnChildSession = func(parentSessionID, childSessionID string) {
+			runtimeDeps.OnChildSession = func(parentSessionID, childSessionID string) {
 				pool.Alias(childSessionID, parentSessionID)
 				bmgr.AliasSession(childSessionID, parentSessionID)
 				// Register the child session in the sandbox session registry so
@@ -2014,25 +1384,10 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		} else if backendSandboxPool != nil {
 			pool := backendSandboxPool
 			bmgr := browserMgr
-			subAgentMgr.OnChildSession = func(parentSessionID, childSessionID string) {
+			runtimeDeps.OnChildSession = func(parentSessionID, childSessionID string) {
 				aliasBackendChildSession(pool, bmgr, parentSessionID, childSessionID)
 			}
 		}
-		// Wire sub-agent authorization gate for code-mode HITL.
-		// When the parent ChatAgent enforces authorization (astonish code, non-yolo),
-		// sub-agents must surface tool/folder authorization requests to the parent.
-		if chatAgent.EnforceAuthorization && !chatAgent.AutoApprove {
-			subAgentMgr.GetAuthPolicy = chatAgent.GetOrCreateAuthPolicy
-			subAgentMgr.AuthorizationGate = func(req agent.SubAgentAuthRequest) agent.SubAgentAuthResponse {
-				if chatAgent.SubAgentAuthGate != nil {
-					return chatAgent.SubAgentAuthGate(req)
-				}
-				// Fallback: deny if no gate is wired (shouldn't happen in practice)
-				return agent.SubAgentAuthResponse{Granted: false, Choice: "Deny"}
-			}
-		}
-		tools.SetSubAgentManager(subAgentMgr)
-		chatAgent.SubAgentManager = subAgentMgr
 	}
 
 	// --- 6b. Initialize Flow Registry ---
@@ -2044,7 +1399,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				slog.Warn("failed to load flow registry", "error", regLoadErr)
 			}
 		} else {
-			chatAgent.FlowRegistry = registry
+			runtimeDeps.FlowRegistry = registry
 
 			// Wire flow registry into search_flows / run_flow tools
 			tools.SetFlowRegistry(registry)
@@ -2068,35 +1423,14 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 
 	// --- 6b2. Wire request-scoped knowledge retrieval ---
 	if memorySearchAvailable {
-		chatAgent.KnowledgeRetrieval = prepareKnowledgeRetrieval
+		runtimeDeps.KnowledgeRetrieval = prepareKnowledgeRetrieval
 		if cfg.DebugMode {
 			slog.Debug("auto knowledge retrieval: enabled")
 		}
 	}
 
-	// --- 6c. Initialize Flow Distiller ---
-	validateYAML := func(yamlStr string, distillerTools []agent.DistillerToolInfo) agent.FlowValidationResult {
-		apiTools := make([]api.ToolInfo, len(distillerTools))
-		for i, t := range distillerTools {
-			apiTools[i] = api.ToolInfo{Name: t.Name, Description: t.Description, Source: t.Source}
-		}
-		result := api.ValidateFlowYAML(yamlStr, apiTools)
-		return agent.FlowValidationResult{Valid: result.Valid, Errors: result.Errors}
-	}
-
-	dryRunYAML := func(yamlStr string, toolSchemas map[string]json.RawMessage) agent.FlowDryRunResult {
-		result := api.DryRunFlowYAML(yamlStr, toolSchemas)
-		return agent.FlowDryRunResult{Valid: result.Valid, Warnings: result.Warnings, Errors: result.Errors}
-	}
-
-	chatAgent.FlowDistiller = agent.NewFlowDistiller(
-		llm, allToolsForPrompt, allToolsetsForPrompt,
-		api.GetFlowSchema, validateYAML, dryRunYAML,
-	)
-
-	// Wire the FlowRunner closure for dry-run execution of distilled flows.
-	// This uses the same InteractiveFlowRunner that powers the run_flow tool.
-	chatAgent.FlowRunner = func(ctx context.Context, yamlContent string, params map[string]string) (*agent.DryRunExecResult, error) {
+	// Supply the host flow executor; shared composition owns distillation wiring.
+	runtimeDeps.FlowRunner = func(ctx context.Context, yamlContent string, params map[string]string) (*agent.DryRunExecResult, error) {
 		sessionKey := fmt.Sprintf("__distill_dryrun__%d", time.Now().UnixNano())
 		defer flowRunner.CleanupSession(sessionKey)
 
@@ -2141,47 +1475,33 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 	}
 
-	if cfg.AppConfig != nil && cfg.AppConfig.Chat.FlowSaveDir != "" {
-		chatAgent.FlowSaveDir = cfg.AppConfig.Chat.FlowSaveDir
-	}
-
-	// --- 6e. Initialize context compaction ---
-	var compactor *persistentsession.Compactor
-	if cfg.AppConfig == nil || cfg.AppConfig.Sessions.Compaction.IsCompactionEnabled() {
-		contextWindow := provider.ResolveContextWindowCached(ctx, cfg.ProviderName, cfg.ModelName, cfg.AppConfig)
-		compactor = persistentsession.NewCompactor(contextWindow)
-		if cfg.AppConfig != nil {
-			compCfg := &cfg.AppConfig.Sessions.Compaction
-			compactor.Threshold = compCfg.GetThreshold()
-			compactor.PreserveRecent = compCfg.GetPreserveRecent()
-		}
-		compactor.DebugMode = cfg.DebugMode
-		compactor.LLM = makeLLMFunc(llm)
-		if cfg.CodeMode {
-			compactor.SetStrategy(&persistentsession.CodeStrategy{})
-		}
-		chatAgent.Compactor = compactor
-		if subAgentMgr != nil {
-			// Clone so sub-agent compactons do not fire the parent UI hook
-			// or share summary-cache / persist state with the main thread.
-			subAgentMgr.Compactor = compactor.Clone()
-			if cfg.CodeMode {
-				subAgentMgr.Compactor.SetStrategy(&persistentsession.CodeStrategy{})
-			}
-		}
-		if cfg.DebugMode {
-			slog.Debug("context compaction enabled", "window_tokens", contextWindow, "threshold_pct", compactor.Threshold*100)
-		}
+	// Resolve capacity at bootstrap only; scoped construction must never discover
+	// a provider or silently borrow a host model's context window.
+	if cfg.AppConfig.Sessions.Compaction.IsCompactionEnabled() {
+		runtimeDeps.ContextWindow = provider.ResolveContextWindowCached(ctx, cfg.ProviderName, cfg.ModelName, cfg.AppConfig)
 	}
 
 	// --- 6d. Wire memory and flow context ---
 	// Use PlatformReflector which writes to team memory store via context
 	// injection. It also runs extraction/consolidation after each turn
 	// to keep session memories well-organized.
-	chatAgent.PlatformReflector = &agent.PlatformReflector{
+	runtimeDeps.Reflector = &agent.PlatformReflector{
 		LLM:       llm,
 		DebugMode: cfg.DebugMode,
 	}
+
+	runtime, err := NewScopedChatRuntime(ctx, runtimeDeps, ChatRuntimeHooks{})
+	if err != nil {
+		return nil, err
+	}
+	chatAgent = runtime.ChatAgent
+	if registerLegacyPlanCallbacks != nil {
+		registerLegacyPlanCallbacks()
+	}
+	if subAgentMgr != nil {
+		tools.SetSubAgentManager(subAgentMgr)
+	}
+	logChatFactoryPhase(phaseStarted, "tool-index-sync")
 
 	// Build ShutdownSandbox callback (nil when sandbox is not enabled)
 	var shutdownSandbox func()
@@ -2199,27 +1519,23 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		resultPool = sandbox.AsNodePool(sandboxNodePool)
 	}
 
-	return &ChatFactoryResult{
-		ChatAgent:             chatAgent,
-		LLM:                   llm,
-		SwappableLLM:          swappableLLM,
-		ProviderName:          cfg.ProviderName,
-		ModelName:             cfg.ModelName,
-		ProviderConfigured:    providerConfigured,
-		Compactor:             compactor,
-		InternalTools:         allToolsForPrompt,
-		MCPToolsets:           allToolsetsForPrompt,
-		MemorySearchAvailable: memorySearchAvailable,
-		IndexingDone:          indexingDone,
-		SessionService:        sessionService,
-		StartupNotices:        startupNotices,
-		PromptBuilder:         promptBuilder,
-		CredentialStore:       credStore,
-		FilesystemSkills:      append([]skills.Skill(nil), filesystemSkills...),
-		Cleanup:               cleanup,
-		ShutdownSandbox:       shutdownSandbox,
-		SandboxPool:           resultPool,
-	}, nil
+	// Add host bootstrap metadata without reconstructing execution objects.
+	runtime.ProviderConfigured = providerConfigured
+	runtime.MemorySearchAvailable = memorySearchAvailable
+	runtime.StartupNotices = startupNotices
+	runtime.CredentialStore = credStore
+	runtime.FilesystemSkills = append([]skills.Skill(nil), filesystemSkills...)
+	runtime.ShutdownSandbox = shutdownSandbox
+	runtime.SandboxPool = resultPool
+	if cfg.PlatformMode && !cfg.CodeMode {
+		runtime.SharedResources = &ChatCatalogResources{
+			Pool: resultPool, Backend: backendSandbox, BrowserManager: browserMgr,
+			TemplateRegistry: sandboxTplRegistry, SessionRegistry: backendSessRegistry,
+			BrowserTools: browserToolsSlice, FilesystemSkills: filesystemSkills,
+		}
+		runtime.RuntimeFactory = newStudioChatRuntimeFactory(*cfg, *runtime.SharedResources, runtimeDeps.OnChildSession)
+	}
+	return runtime, nil
 }
 
 // makeLLMFunc creates a simple LLM call function suitable for FlowDistiller /
@@ -2264,6 +1580,17 @@ func makeLLMFunc(llm model.LLM) func(ctx context.Context, prompt string) (string
 // Exported for use by the channel manager and other callers.
 func MakeLLMFunc(llm model.LLM) func(ctx context.Context, prompt string) (string, error) {
 	return makeLLMFunc(llm)
+}
+
+// browserToolsForFactory keeps the loopback exception exclusive to host Code mode.
+func browserToolsForFactory(cfg *ChatFactoryConfig, mgr *browser.Manager) ([]tool.Tool, error) {
+	if cfg.AppConfig != nil && sandbox.IsSandboxEnabled(&cfg.AppConfig.Sandbox) {
+		return tools.GetBrowserToolsForSandbox(mgr)
+	}
+	if cfg.CodeMode {
+		return tools.GetBrowserToolsForCode(mgr)
+	}
+	return tools.GetBrowserTools(mgr)
 }
 
 // browserConfigFromApp builds a browser.BrowserConfig by merging user settings
@@ -2620,4 +1947,83 @@ func parseCachedToolsJSON(data []byte) []cache.ToolEntry {
 		})
 	}
 	return entries
+}
+
+// forwardPlanDelegateProgress keeps delegate lifecycle mutations on the same
+// durable runtime as direct tools. Original worker events are always forwarded.
+func forwardPlanDelegateProgress(chatAgent *agent.ChatAgent, evt agent.SubTaskProgressEvent) {
+	// task_joined is manager bookkeeping, not a public presentation event.
+	if evt.Type != string(agent.TaskJoined) {
+		defer chatAgent.EmitSubTaskProgress(evt.SessionID, evt)
+	}
+	plan := chatAgent.GetActivePlan()
+	runtime, bound := chatAgent.SessionPlanRuntime(evt.SessionID)
+	if bound {
+		if runtime == nil {
+			return
+		}
+		plan = runtime.PlanState()
+	}
+	if plan == nil {
+		return
+	}
+	if bound && runtime.CodeExecutionEnabled() {
+		return // Code uses ID-owned admission/join, never legacy callbacks.
+	}
+	joined := evt.Type == string(agent.TaskJoined)
+	failed := evt.Type == "task_failed"
+	if evt.Type != "task_start" && evt.Type != "task_complete" && !failed && !joined {
+		return
+	}
+	identified := evt.BatchID != "" && evt.TaskID != ""
+	if identified && (failed || evt.Type == "task_complete") {
+		return // Attempt events can be followed by a retry; wait for manager join.
+	}
+	if joined && !identified {
+		return
+	}
+	taskKey := evt.TaskName
+	if identified {
+		// Distinguish concurrent batches and same-named siblings. Attempts share
+		// one registration until the manager has joined their complete chain.
+		taskKey = "delegate:" + evt.BatchID + ":" + evt.TaskID
+	}
+	step := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
+	if step == "" {
+		return
+	}
+	emitError := func(code, message string) {
+		chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{Type: "plan_step_update", SessionID: evt.SessionID, StepName: step, Error: message, Reason: code})
+	}
+	if bound {
+		var err error
+		if evt.Type == "task_start" {
+			_, err = runtime.RegisterDelegate(step, taskKey)
+		} else {
+			var ready string
+			ready, err = runtime.FinishDelegate(step, taskKey)
+			if err == nil && ready != "" && !failed && !joined {
+				result := runtime.UpdateStep(ready, "complete")
+				if result.Code != agent.PlanStepOK {
+					emitError(result.Code, result.Message)
+				}
+			}
+		}
+		if err != nil {
+			emitError(agent.PlanRuntimeErrorCode(err), err.Error())
+		}
+		return // Runtime publishes its snapshot only after persistence succeeds.
+	}
+	if evt.Type == "task_start" {
+		if started := plan.StartStep(step, taskKey); started != "" {
+			chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{Type: "plan_step_update", SessionID: evt.SessionID, StepName: started, StepStatus: "running"})
+		}
+	} else if ready := plan.CompleteTask(step, taskKey); ready != "" && !failed && !joined {
+		result := chatAgent.ApplyPlanStepUpdate(ready, "complete")
+		status := result.Applied
+		if status == "" {
+			status = "running"
+		}
+		chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{Type: "plan_step_update", SessionID: evt.SessionID, StepName: ready, StepStatus: status, Error: result.Message})
+	}
 }

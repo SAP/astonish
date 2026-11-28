@@ -150,6 +150,13 @@ export function setupMockFetch(config: MockFetchConfig = {}): () => void {
       return mockJsonResponse(config.sessionHistory || { id: '', title: '', messages: [] })
     }
 
+    // GET /api/studio/bots with an explicit scope — empty sidebar fixture.
+    const parsedURL = new URL(url, 'http://localhost')
+    const botScope = parsedURL.searchParams.get('scope')
+    if (method === 'GET' && parsedURL.pathname === '/api/studio/bots' && (botScope === 'personal' || botScope === 'team')) {
+      return mockJsonResponse({ bots: [] })
+    }
+
     // GET /api/studio/sessions (list)
     if (method === 'GET' && url.match(/\/api\/studio\/sessions\/?$/) && !url.includes('/fleet/')) {
       return mockJsonResponse(config.sessions || [])

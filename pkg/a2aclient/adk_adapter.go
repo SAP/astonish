@@ -7,6 +7,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/store"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -48,6 +49,31 @@ func (t *adkA2ATool) Declaration() *genai.FunctionDeclaration {
 			Required: []string{"message"},
 		},
 	}
+}
+
+// ProcessRequest registers the executable and its declaration using ADK's
+// normal packing contract. Scoped wrappers can then retain their dispatch guard.
+func (t *adkA2ATool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	if req.Tools == nil {
+		req.Tools = make(map[string]any)
+	}
+	if _, exists := req.Tools[t.Name()]; exists {
+		return fmt.Errorf("duplicate tool: %q", t.Name())
+	}
+	req.Tools[t.Name()] = t
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
+	}
+	for _, entry := range req.Config.Tools {
+		if entry != nil && entry.FunctionDeclarations != nil {
+			entry.FunctionDeclarations = append(entry.FunctionDeclarations, t.Declaration())
+			return nil
+		}
+	}
+	req.Config.Tools = append(req.Config.Tools, &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{t.Declaration()},
+	})
+	return nil
 }
 
 // Run executes the tool (implements tool.Tool).

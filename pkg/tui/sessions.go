@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -17,6 +19,7 @@ type sessionsState struct {
 	open          bool
 	loading       bool
 	confirmDelete bool
+	deleting      bool
 	err           string
 	notice        string
 	items         []backend.SessionSummary
@@ -41,6 +44,12 @@ type historyLoadedMsg struct {
 }
 
 func (m model) openSessionsPicker() (tea.Model, tea.Cmd) {
+	if m.botSelected() {
+		m.detachBotWatch()
+		m.botCap().DetachBot()
+		m.tr.Reset()
+		m.info = m.backend.Info()
+	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
@@ -83,6 +92,10 @@ func (m model) loadInitialHistoryCmd() tea.Cmd {
 
 func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	// Once dispatched, deletion cannot be canceled or dispatched twice.
+	if m.sessions.deleting {
+		return m, nil
+	}
 	if m.sessions.loading {
 		if key == "esc" || key == "ctrl+c" {
 			m.sessions = sessionsState{}
@@ -94,15 +107,21 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc", "q", "n", "ctrl+c":
 			m.sessions.confirmDelete = false
+			m.sessions.err = ""
 			m.sessions.notice = ""
 			return m, nil
 		case "y", "enter":
+			if m.info.Mode == "code" && m.workspaceBusy() {
+				m.sessions.err = "Finish or cancel the current operation first"
+				return m, nil
+			}
 			if len(m.sessions.items) == 0 {
 				m.sessions.confirmDelete = false
 				return m, nil
 			}
 			id := m.sessions.items[m.sessions.cursor].ID
 			m.sessions.loading = true
+			m.sessions.deleting = true
 			m.sessions.confirmDelete = false
 			m.sessions.err = ""
 			m.sessions.notice = "Deleting session…"
@@ -129,10 +148,22 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessions = sessionsState{}
 			return m, nil
 		}
-		id := m.sessions.items[m.sessions.cursor].ID
+		item := m.sessions.items[m.sessions.cursor]
+		id := item.ID
+		if m.workspaceCap() != nil && item.WorkspaceID != "" && item.WorkspacePath != "" && filepath.Clean(item.WorkspacePath) != filepath.Clean(m.info.WorkingDir) {
+			next, _ := m.openWorkspacePicker(false)
+			n := next.(model)
+			n.sessions = sessionsState{}
+			n.workspacePicker.request = backend.WorkspaceLaunchRequest{Mode: backend.WorkspaceCurrent, WorkspaceID: item.WorkspaceID, WorkingDir: item.WorkspacePath, SessionID: id}
+			return n.dispatchWorkspace(workspaceLaunch)
+		}
 		m.sessions = sessionsState{loading: true, open: true}
 		return m, m.resumeSessionCmd(id)
 	case "d", "backspace", "delete":
+		if m.info.Mode == "code" && m.workspaceBusy() {
+			m.sessions.err = "Finish or cancel the current operation first"
+			return m, nil
+		}
 		if len(m.sessions.items) == 0 {
 			return m, nil
 		}
@@ -149,6 +180,18 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startNewSession() (tea.Model, tea.Cmd) {
+	if m.workspaceCap() != nil {
+		return m.openWorkspacePicker(false)
+	}
+	return m.startCurrentSession()
+}
+
+func (m model) startCurrentSession() (tea.Model, tea.Cmd) {
+	if m.botSelected() {
+		m.detachBotWatch()
+		m.botCap().DetachBot()
+		m.tr.Reset()
+	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
@@ -156,6 +199,7 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 	m.backend.NewSession()
 	m.info = m.backend.Info()
 	m.tr.Reset()
+	m.tr.SessionID = m.info.SessionID
 	m.layout()
 	m.refreshViewport()
 	return m, nil
@@ -163,6 +207,15 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 
 func (m model) applySessionDeleted(msg sessionDeletedMsg) (tea.Model, tea.Cmd) {
 	m.sessions.loading = false
+	m.sessions.deleting = false
+	var handoff *backend.WorkspaceHandoffError
+	if errors.As(msg.err, &handoff) {
+		m.workspaceHandoff = handoff
+		m.quitting = true
+		m.sessions.err = ""
+		m.sessions.notice = ""
+		return m, tea.Quit
+	}
 	if msg.err != nil {
 		m.sessions.err = "Failed to delete session: " + msg.err.Error()
 		m.sessions.notice = ""
@@ -184,6 +237,7 @@ func (m model) applySessionDeleted(msg sessionDeletedMsg) (tea.Model, tea.Cmd) {
 		m.backend.NewSession()
 		m.info = m.backend.Info()
 		m.tr.Reset()
+		m.tr.SessionID = m.info.SessionID
 		m.refreshViewport()
 	}
 	return m, nil
@@ -233,9 +287,12 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 	if m.info.ContextTokens > 0 {
 		m.tr.ContextTokens = m.info.ContextTokens
 	}
-	if msg.sessionID != "" {
+	if m.info.SessionID == "" && msg.sessionID != "" {
 		m.info.SessionID = msg.sessionID
 	}
+	// History replay does not choose a session identity. Bind the restored
+	// transcript to the same session as the header and backend permission reads.
+	m.tr.SessionID = m.info.SessionID
 	m.info.IsResumed = true
 	if msg.notice != "" && len(entries) > 0 {
 		m.tr.Apply(events.NewSystem(msg.notice))
@@ -269,12 +326,20 @@ func (m model) renderSessionsOverlay() string {
 
 	if m.sessions.loading {
 		body.WriteString(th.Muted.Render(first(m.sessions.notice, "Loading…")))
-	} else if m.sessions.err != "" {
+	} else if m.sessions.err != "" && !m.sessions.confirmDelete {
 		body.WriteString(th.Error.Render(m.sessions.err))
 	} else if m.sessions.confirmDelete && len(m.sessions.items) > 0 {
+		if m.sessions.err != "" {
+			body.WriteString(th.Error.Render(m.sessions.err) + "\n")
+		}
 		s := m.sessions.items[m.sessions.cursor]
-		body.WriteString(th.Danger.Render("Delete this session? ") + th.Text.Render(first(s.Title, "(untitled)")) + "\n")
-		body.WriteString(th.Muted.Render("This removes the saved transcript. Press y to delete or Esc to cancel."))
+		if m.info.Mode == "code" && s.WorkspaceID != "" {
+			body.WriteString(th.Danger.Render("Delete this session and its dedicated workspace? ") + th.Text.Render(first(s.Title, "(untitled)")) + "\n")
+			body.WriteString(th.Muted.Render("This removes the saved transcript and permanently discards workspace files, uncommitted changes, and detached commits.\nThe original checkout and named branches are preserved. Shared workspaces are retained.\nIf this is the active workspace, Code returns to the original checkout.\nPress y to delete or Esc to cancel."))
+		} else {
+			body.WriteString(th.Danger.Render("Delete this session? ") + th.Text.Render(first(s.Title, "(untitled)")) + "\n")
+			body.WriteString(th.Muted.Render("This removes the saved transcript. Press y to delete or Esc to cancel."))
+		}
 	} else if len(m.sessions.items) == 0 {
 		body.WriteString(th.Muted.Render("No sessions yet. Press n for a new one."))
 	} else {
@@ -307,6 +372,12 @@ func (m model) renderSessionsOverlay() string {
 			id := s.ID
 			if len(id) > 8 {
 				id = id[:8]
+			}
+			if s.WorkspaceMode != "" {
+				id += " · " + string(s.WorkspaceMode)
+			}
+			if s.WorkspaceActive {
+				id += " · busy"
 			}
 			title := s.Title
 			if title == "" {

@@ -1,0 +1,145 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
+)
+
+func TestBotsAuthenticatedDTOAndScope(t *testing.T) {
+	id := uuid.New()
+	var method, path string
+	var body map[string]any
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token" {
+			t.Error("missing auth")
+		}
+		if r.URL.Query().Get("scope") != "team" {
+			t.Error("scope lost")
+		}
+		method, path = r.Method, r.URL.Path
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		_ = json.NewEncoder(w).Encode(store.Bot{ID: id})
+	}))
+	defer s.Close()
+	c := NewWithConfig(s.URL)
+	c.cached = &Tokens{AccessToken: "token"}
+	b := Bots{Client: c, Scope: store.BotScopeTeam}
+	if _, err := b.Lifecycle(context.Background(), id.String(), BotDelete, 7, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if method != "DELETE" || path != "/api/studio/bots/"+id.String() || body["expected_revision"] != float64(7) || body["reason"] != "reviewed" || len(body) != 2 {
+		t.Fatalf("wrong DTO %s %s %#v", method, path, body)
+	}
+	if _, err := b.Lifecycle(context.Background(), id.String(), BotStop, 0, ""); err == nil {
+		t.Fatal("unreviewed mutation allowed")
+	}
+}
+func TestBotsResolveAmbiguity(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"bots": []store.Bot{{ID: uuid.New(), Name: "same"}, {ID: uuid.New(), Name: "same"}}})
+	}))
+	defer s.Close()
+	b := Bots{Client: NewWithConfig(s.URL), Scope: store.BotScopePersonal}
+	if _, err := b.Resolve(context.Background(), "same"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatal(err)
+	}
+}
+func TestBotsWatchReconnectCursorAndDetach(t *testing.T) {
+	sid, id := uuid.NewString(), uuid.NewString()
+	writeFrame := func(w http.ResponseWriter, cursor int, eventID, text string) {
+		fmt.Fprintf(w, "id: %s:%d\nevent: text\ndata: {\"text\":%q,\"_projection\":{\"event_id\":%q,\"session_id\":%q,\"cursor\":%q}}\n\n", sid, cursor, text, eventID, sid, fmt.Sprintf("%s:%d", sid, cursor))
+	}
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if r.Method != "GET" {
+			t.Error("watch mutated")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			writeFrame(w, 1, "first", strings.Repeat("x", 90000))
+			return
+		}
+		if r.URL.Query().Get("after") != sid+":1" {
+			t.Error("cursor lost")
+		}
+		writeFrame(w, 1, "first", "duplicate")
+		writeFrame(w, 2, "second", "next")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer s.Close()
+	b := Bots{Client: NewWithConfig(s.URL), Scope: store.BotScopePersonal}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	count := 0
+	err := b.Watch(ctx, id, sid, "", true, func(e SSEEvent) error {
+		count++
+		if count == 3 {
+			if !strings.Contains(e.Data, `"text":"next"`) {
+				t.Error("next frame not delivered")
+			}
+			cancel()
+		}
+		return nil
+	})
+	if err != context.Canceled || count != 3 || calls.Load() != 2 {
+		t.Fatalf("%v count=%d calls=%d", err, count, calls.Load())
+	}
+	if err := b.Watch(context.Background(), id, sid, uuid.NewString()+":1", false, func(SSEEvent) error { return nil }); err == nil {
+		t.Fatal("cross-session cursor accepted")
+	}
+}
+func TestBotsDeletionPendingNoContent(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			calls := 0
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusGone)
+				fmt.Fprint(w, `{"code":"deletion_pending","error":"Bot content unavailable: cleanup pending"}`)
+			}))
+			defer s.Close()
+			b := Bots{Client: NewWithConfig(s.URL), Scope: scope}
+			ctx := context.Background()
+			id, sid := uuid.NewString(), uuid.NewString()
+			// Existing client methods return allocated zero values alongside errors.
+			// Verify no retained content rather than imposing a new nil-result contract.
+			if bot, err := b.Get(ctx, id); !reflect.DeepEqual(bot, &store.Bot{}) || err == nil || !strings.Contains(err.Error(), "cleanup pending") {
+				t.Fatalf("detail: %+v %v", bot, err)
+			}
+			if snap, err := b.Snapshot(ctx, id); !reflect.DeepEqual(snap, &store.BotSnapshot{}) || err == nil || !strings.Contains(err.Error(), "cleanup pending") {
+				t.Fatalf("snapshot: %+v %v", snap, err)
+			}
+			err := b.Watch(ctx, id, sid, "", true, func(SSEEvent) error { t.Error("deleted content delivered"); return nil })
+			if err == nil || !strings.Contains(err.Error(), "cleanup pending") || calls != 3 {
+				t.Fatalf("watch retried or invented completion: %v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestBotsWatchForbiddenNoRetry(t *testing.T) {
+	var calls int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; http.Error(w, "forbidden", 403) }))
+	defer s.Close()
+	b := Bots{Client: NewWithConfig(s.URL), Scope: store.BotScopePersonal}
+	err := b.Watch(context.Background(), uuid.NewString(), uuid.NewString(), "", true, func(SSEEvent) error { return nil })
+	if err == nil || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}

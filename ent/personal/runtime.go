@@ -7,6 +7,20 @@ import (
 
 	"github.com/SAP/astonish/ent/personal/app"
 	"github.com/SAP/astonish/ent/personal/appstate"
+	"github.com/SAP/astonish/ent/personal/bot"
+	"github.com/SAP/astonish/ent/personal/botapproval"
+	"github.com/SAP/astonish/ent/personal/botgoal"
+	"github.com/SAP/astonish/ent/personal/botintake"
+	"github.com/SAP/astonish/ent/personal/botknowledgeextraction"
+	"github.com/SAP/astonish/ent/personal/botknowledgefilehead"
+	"github.com/SAP/astonish/ent/personal/botoutbox"
+	"github.com/SAP/astonish/ent/personal/botrun"
+	"github.com/SAP/astonish/ent/personal/botskill"
+	"github.com/SAP/astonish/ent/personal/botskillrevision"
+	"github.com/SAP/astonish/ent/personal/bottask"
+	"github.com/SAP/astonish/ent/personal/bottaskrevision"
+	"github.com/SAP/astonish/ent/personal/bottrackeditem"
+	"github.com/SAP/astonish/ent/personal/botversion"
 	"github.com/SAP/astonish/ent/personal/cachediagnostic"
 	"github.com/SAP/astonish/ent/personal/credential"
 	"github.com/SAP/astonish/ent/personal/deck"
@@ -82,6 +96,390 @@ func init() {
 	appstateDescID := appstateFields[0].Descriptor()
 	// appstate.DefaultID holds the default value on creation for the id field.
 	appstate.DefaultID = appstateDescID.Default.(func() uuid.UUID)
+	botFields := schema.Bot{}.Fields()
+	_ = botFields
+	// botDescName is the schema descriptor for name field.
+	botDescName := botFields[2].Descriptor()
+	// bot.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	bot.NameValidator = botDescName.Validators[0].(func(string) error)
+	// botDescRevision is the schema descriptor for revision field.
+	botDescRevision := botFields[4].Descriptor()
+	// bot.DefaultRevision holds the default value on creation for the revision field.
+	bot.DefaultRevision = botDescRevision.Default.(int64)
+	// botDescVersion is the schema descriptor for version field.
+	botDescVersion := botFields[5].Descriptor()
+	// bot.DefaultVersion holds the default value on creation for the version field.
+	bot.DefaultVersion = botDescVersion.Default.(int64)
+	// botDescSchemaVersion is the schema descriptor for schema_version field.
+	botDescSchemaVersion := botFields[6].Descriptor()
+	// bot.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	bot.DefaultSchemaVersion = botDescSchemaVersion.Default.(int)
+	// botDescHomeSessionID is the schema descriptor for home_session_id field.
+	botDescHomeSessionID := botFields[7].Descriptor()
+	// bot.HomeSessionIDValidator is a validator for the "home_session_id" field. It is called by the builders before save.
+	bot.HomeSessionIDValidator = botDescHomeSessionID.Validators[0].(func(string) error)
+	// botDescCreateKey is the schema descriptor for create_key field.
+	botDescCreateKey := botFields[9].Descriptor()
+	// bot.CreateKeyValidator is a validator for the "create_key" field. It is called by the builders before save.
+	bot.CreateKeyValidator = botDescCreateKey.Validators[0].(func(string) error)
+	// botDescLastSeq is the schema descriptor for last_seq field.
+	botDescLastSeq := botFields[10].Descriptor()
+	// bot.DefaultLastSeq holds the default value on creation for the last_seq field.
+	bot.DefaultLastSeq = botDescLastSeq.Default.(int64)
+	// botDescFence is the schema descriptor for fence field.
+	botDescFence := botFields[11].Descriptor()
+	// bot.DefaultFence holds the default value on creation for the fence field.
+	bot.DefaultFence = botDescFence.Default.(int64)
+	// botDescData is the schema descriptor for data field.
+	botDescData := botFields[14].Descriptor()
+	// bot.DefaultData holds the default value on creation for the data field.
+	bot.DefaultData = botDescData.Default.(map[string]interface{})
+	// botDescCleanupComplete is the schema descriptor for cleanup_complete field.
+	botDescCleanupComplete := botFields[17].Descriptor()
+	// bot.DefaultCleanupComplete holds the default value on creation for the cleanup_complete field.
+	bot.DefaultCleanupComplete = botDescCleanupComplete.Default.(bool)
+	// botDescCreatedAt is the schema descriptor for created_at field.
+	botDescCreatedAt := botFields[18].Descriptor()
+	// bot.DefaultCreatedAt holds the default value on creation for the created_at field.
+	bot.DefaultCreatedAt = botDescCreatedAt.Default.(func() time.Time)
+	// botDescUpdatedAt is the schema descriptor for updated_at field.
+	botDescUpdatedAt := botFields[19].Descriptor()
+	// bot.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	bot.DefaultUpdatedAt = botDescUpdatedAt.Default.(func() time.Time)
+	// bot.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	bot.UpdateDefaultUpdatedAt = botDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// botDescID is the schema descriptor for id field.
+	botDescID := botFields[0].Descriptor()
+	// bot.DefaultID holds the default value on creation for the id field.
+	bot.DefaultID = botDescID.Default.(func() uuid.UUID)
+	botapprovalFields := schema.BotApproval{}.Fields()
+	_ = botapprovalFields
+	// botapprovalDescVersion is the schema descriptor for version field.
+	botapprovalDescVersion := botapprovalFields[3].Descriptor()
+	// botapproval.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	botapproval.VersionValidator = botapprovalDescVersion.Validators[0].(func(int64) error)
+	// botapprovalDescActionDigest is the schema descriptor for action_digest field.
+	botapprovalDescActionDigest := botapprovalFields[4].Descriptor()
+	// botapproval.ActionDigestValidator is a validator for the "action_digest" field. It is called by the builders before save.
+	botapproval.ActionDigestValidator = botapprovalDescActionDigest.Validators[0].(func(string) error)
+	// botapprovalDescCreatedAt is the schema descriptor for created_at field.
+	botapprovalDescCreatedAt := botapprovalFields[8].Descriptor()
+	// botapproval.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botapproval.DefaultCreatedAt = botapprovalDescCreatedAt.Default.(func() time.Time)
+	// botapprovalDescID is the schema descriptor for id field.
+	botapprovalDescID := botapprovalFields[0].Descriptor()
+	// botapproval.DefaultID holds the default value on creation for the id field.
+	botapproval.DefaultID = botapprovalDescID.Default.(func() uuid.UUID)
+	botgoalFields := schema.BotGoal{}.Fields()
+	_ = botgoalFields
+	// botgoalDescRevision is the schema descriptor for revision field.
+	botgoalDescRevision := botgoalFields[2].Descriptor()
+	// botgoal.DefaultRevision holds the default value on creation for the revision field.
+	botgoal.DefaultRevision = botgoalDescRevision.Default.(int64)
+	// botgoalDescTitle is the schema descriptor for title field.
+	botgoalDescTitle := botgoalFields[3].Descriptor()
+	// botgoal.TitleValidator is a validator for the "title" field. It is called by the builders before save.
+	botgoal.TitleValidator = botgoalDescTitle.Validators[0].(func(string) error)
+	// botgoalDescCreatedAt is the schema descriptor for created_at field.
+	botgoalDescCreatedAt := botgoalFields[7].Descriptor()
+	// botgoal.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botgoal.DefaultCreatedAt = botgoalDescCreatedAt.Default.(func() time.Time)
+	// botgoalDescUpdatedAt is the schema descriptor for updated_at field.
+	botgoalDescUpdatedAt := botgoalFields[8].Descriptor()
+	// botgoal.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	botgoal.DefaultUpdatedAt = botgoalDescUpdatedAt.Default.(func() time.Time)
+	// botgoal.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	botgoal.UpdateDefaultUpdatedAt = botgoalDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// botgoalDescID is the schema descriptor for id field.
+	botgoalDescID := botgoalFields[0].Descriptor()
+	// botgoal.DefaultID holds the default value on creation for the id field.
+	botgoal.DefaultID = botgoalDescID.Default.(func() uuid.UUID)
+	botintakeFields := schema.BotIntake{}.Fields()
+	_ = botintakeFields
+	// botintakeDescDiscarded is the schema descriptor for discarded field.
+	botintakeDescDiscarded := botintakeFields[4].Descriptor()
+	// botintake.DefaultDiscarded holds the default value on creation for the discarded field.
+	botintake.DefaultDiscarded = botintakeDescDiscarded.Default.(bool)
+	// botintakeDescCreatedAt is the schema descriptor for created_at field.
+	botintakeDescCreatedAt := botintakeFields[6].Descriptor()
+	// botintake.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botintake.DefaultCreatedAt = botintakeDescCreatedAt.Default.(func() time.Time)
+	// botintakeDescUpdatedAt is the schema descriptor for updated_at field.
+	botintakeDescUpdatedAt := botintakeFields[7].Descriptor()
+	// botintake.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	botintake.DefaultUpdatedAt = botintakeDescUpdatedAt.Default.(func() time.Time)
+	botknowledgeextractionFields := schema.BotKnowledgeExtraction{}.Fields()
+	_ = botknowledgeextractionFields
+	// botknowledgeextractionDescOutcomeDigest is the schema descriptor for outcome_digest field.
+	botknowledgeextractionDescOutcomeDigest := botknowledgeextractionFields[3].Descriptor()
+	// botknowledgeextraction.OutcomeDigestValidator is a validator for the "outcome_digest" field. It is called by the builders before save.
+	botknowledgeextraction.OutcomeDigestValidator = botknowledgeextractionDescOutcomeDigest.Validators[0].(func(string) error)
+	// botknowledgeextractionDescRevision is the schema descriptor for revision field.
+	botknowledgeextractionDescRevision := botknowledgeextractionFields[6].Descriptor()
+	// botknowledgeextraction.DefaultRevision holds the default value on creation for the revision field.
+	botknowledgeextraction.DefaultRevision = botknowledgeextractionDescRevision.Default.(int64)
+	// botknowledgeextractionDescFence is the schema descriptor for fence field.
+	botknowledgeextractionDescFence := botknowledgeextractionFields[7].Descriptor()
+	// botknowledgeextraction.DefaultFence holds the default value on creation for the fence field.
+	botknowledgeextraction.DefaultFence = botknowledgeextractionDescFence.Default.(int64)
+	// botknowledgeextractionDescWorkerID is the schema descriptor for worker_id field.
+	botknowledgeextractionDescWorkerID := botknowledgeextractionFields[8].Descriptor()
+	// botknowledgeextraction.DefaultWorkerID holds the default value on creation for the worker_id field.
+	botknowledgeextraction.DefaultWorkerID = botknowledgeextractionDescWorkerID.Default.(string)
+	// botknowledgeextractionDescCreatedAt is the schema descriptor for created_at field.
+	botknowledgeextractionDescCreatedAt := botknowledgeextractionFields[12].Descriptor()
+	// botknowledgeextraction.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botknowledgeextraction.DefaultCreatedAt = botknowledgeextractionDescCreatedAt.Default.(func() time.Time)
+	// botknowledgeextractionDescUpdatedAt is the schema descriptor for updated_at field.
+	botknowledgeextractionDescUpdatedAt := botknowledgeextractionFields[13].Descriptor()
+	// botknowledgeextraction.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	botknowledgeextraction.DefaultUpdatedAt = botknowledgeextractionDescUpdatedAt.Default.(func() time.Time)
+	// botknowledgeextraction.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	botknowledgeextraction.UpdateDefaultUpdatedAt = botknowledgeextractionDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// botknowledgeextractionDescID is the schema descriptor for id field.
+	botknowledgeextractionDescID := botknowledgeextractionFields[0].Descriptor()
+	// botknowledgeextraction.DefaultID holds the default value on creation for the id field.
+	botknowledgeextraction.DefaultID = botknowledgeextractionDescID.Default.(func() uuid.UUID)
+	botknowledgefileheadFields := schema.BotKnowledgeFileHead{}.Fields()
+	_ = botknowledgefileheadFields
+	// botknowledgefileheadDescPath is the schema descriptor for path field.
+	botknowledgefileheadDescPath := botknowledgefileheadFields[2].Descriptor()
+	// botknowledgefilehead.PathValidator is a validator for the "path" field. It is called by the builders before save.
+	botknowledgefilehead.PathValidator = botknowledgefileheadDescPath.Validators[0].(func(string) error)
+	// botknowledgefileheadDescDigest is the schema descriptor for digest field.
+	botknowledgefileheadDescDigest := botknowledgefileheadFields[3].Descriptor()
+	// botknowledgefilehead.DigestValidator is a validator for the "digest" field. It is called by the builders before save.
+	botknowledgefilehead.DigestValidator = botknowledgefileheadDescDigest.Validators[0].(func(string) error)
+	// botknowledgefileheadDescRevision is the schema descriptor for revision field.
+	botknowledgefileheadDescRevision := botknowledgefileheadFields[5].Descriptor()
+	// botknowledgefilehead.DefaultRevision holds the default value on creation for the revision field.
+	botknowledgefilehead.DefaultRevision = botknowledgefileheadDescRevision.Default.(int64)
+	// botknowledgefileheadDescID is the schema descriptor for id field.
+	botknowledgefileheadDescID := botknowledgefileheadFields[0].Descriptor()
+	// botknowledgefilehead.DefaultID holds the default value on creation for the id field.
+	botknowledgefilehead.DefaultID = botknowledgefileheadDescID.Default.(func() uuid.UUID)
+	botoutboxFields := schema.BotOutbox{}.Fields()
+	_ = botoutboxFields
+	// botoutboxDescSequence is the schema descriptor for sequence field.
+	botoutboxDescSequence := botoutboxFields[2].Descriptor()
+	// botoutbox.SequenceValidator is a validator for the "sequence" field. It is called by the builders before save.
+	botoutbox.SequenceValidator = botoutboxDescSequence.Validators[0].(func(int64) error)
+	// botoutboxDescKind is the schema descriptor for kind field.
+	botoutboxDescKind := botoutboxFields[3].Descriptor()
+	// botoutbox.KindValidator is a validator for the "kind" field. It is called by the builders before save.
+	botoutbox.KindValidator = botoutboxDescKind.Validators[0].(func(string) error)
+	// botoutboxDescDeduplicationKey is the schema descriptor for deduplication_key field.
+	botoutboxDescDeduplicationKey := botoutboxFields[4].Descriptor()
+	// botoutbox.DeduplicationKeyValidator is a validator for the "deduplication_key" field. It is called by the builders before save.
+	botoutbox.DeduplicationKeyValidator = botoutboxDescDeduplicationKey.Validators[0].(func(string) error)
+	// botoutboxDescWorkerID is the schema descriptor for worker_id field.
+	botoutboxDescWorkerID := botoutboxFields[8].Descriptor()
+	// botoutbox.DefaultWorkerID holds the default value on creation for the worker_id field.
+	botoutbox.DefaultWorkerID = botoutboxDescWorkerID.Default.(string)
+	// botoutboxDescFence is the schema descriptor for fence field.
+	botoutboxDescFence := botoutboxFields[9].Descriptor()
+	// botoutbox.DefaultFence holds the default value on creation for the fence field.
+	botoutbox.DefaultFence = botoutboxDescFence.Default.(int64)
+	// botoutboxDescAttempts is the schema descriptor for attempts field.
+	botoutboxDescAttempts := botoutboxFields[11].Descriptor()
+	// botoutbox.DefaultAttempts holds the default value on creation for the attempts field.
+	botoutbox.DefaultAttempts = botoutboxDescAttempts.Default.(int)
+	// botoutboxDescLastError is the schema descriptor for last_error field.
+	botoutboxDescLastError := botoutboxFields[12].Descriptor()
+	// botoutbox.DefaultLastError holds the default value on creation for the last_error field.
+	botoutbox.DefaultLastError = botoutboxDescLastError.Default.(string)
+	// botoutboxDescCreatedAt is the schema descriptor for created_at field.
+	botoutboxDescCreatedAt := botoutboxFields[13].Descriptor()
+	// botoutbox.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botoutbox.DefaultCreatedAt = botoutboxDescCreatedAt.Default.(func() time.Time)
+	// botoutboxDescID is the schema descriptor for id field.
+	botoutboxDescID := botoutboxFields[0].Descriptor()
+	// botoutbox.DefaultID holds the default value on creation for the id field.
+	botoutbox.DefaultID = botoutboxDescID.Default.(func() uuid.UUID)
+	botrunFields := schema.BotRun{}.Fields()
+	_ = botrunFields
+	// botrunDescVersion is the schema descriptor for version field.
+	botrunDescVersion := botrunFields[2].Descriptor()
+	// botrun.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	botrun.VersionValidator = botrunDescVersion.Validators[0].(func(int64) error)
+	// botrunDescSessionID is the schema descriptor for session_id field.
+	botrunDescSessionID := botrunFields[3].Descriptor()
+	// botrun.SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
+	botrun.SessionIDValidator = botrunDescSessionID.Validators[0].(func(string) error)
+	// botrunDescIdempotencyKey is the schema descriptor for idempotency_key field.
+	botrunDescIdempotencyKey := botrunFields[4].Descriptor()
+	// botrun.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
+	botrun.IdempotencyKeyValidator = botrunDescIdempotencyKey.Validators[0].(func(string) error)
+	// botrunDescRequestHash is the schema descriptor for request_hash field.
+	botrunDescRequestHash := botrunFields[5].Descriptor()
+	// botrun.RequestHashValidator is a validator for the "request_hash" field. It is called by the builders before save.
+	botrun.RequestHashValidator = botrunDescRequestHash.Validators[0].(func(string) error)
+	// botrunDescFence is the schema descriptor for fence field.
+	botrunDescFence := botrunFields[7].Descriptor()
+	// botrun.DefaultFence holds the default value on creation for the fence field.
+	botrun.DefaultFence = botrunDescFence.Default.(int64)
+	// botrunDescWorkerID is the schema descriptor for worker_id field.
+	botrunDescWorkerID := botrunFields[8].Descriptor()
+	// botrun.DefaultWorkerID holds the default value on creation for the worker_id field.
+	botrun.DefaultWorkerID = botrunDescWorkerID.Default.(string)
+	// botrunDescCreatedAt is the schema descriptor for created_at field.
+	botrunDescCreatedAt := botrunFields[11].Descriptor()
+	// botrun.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botrun.DefaultCreatedAt = botrunDescCreatedAt.Default.(func() time.Time)
+	// botrunDescUpdatedAt is the schema descriptor for updated_at field.
+	botrunDescUpdatedAt := botrunFields[12].Descriptor()
+	// botrun.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	botrun.DefaultUpdatedAt = botrunDescUpdatedAt.Default.(func() time.Time)
+	// botrun.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	botrun.UpdateDefaultUpdatedAt = botrunDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// botrunDescID is the schema descriptor for id field.
+	botrunDescID := botrunFields[0].Descriptor()
+	// botrun.DefaultID holds the default value on creation for the id field.
+	botrun.DefaultID = botrunDescID.Default.(func() uuid.UUID)
+	botskillFields := schema.BotSkill{}.Fields()
+	_ = botskillFields
+	// botskillDescKey is the schema descriptor for key field.
+	botskillDescKey := botskillFields[2].Descriptor()
+	// botskill.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	botskill.KeyValidator = botskillDescKey.Validators[0].(func(string) error)
+	// botskillDescRevision is the schema descriptor for revision field.
+	botskillDescRevision := botskillFields[3].Descriptor()
+	// botskill.DefaultRevision holds the default value on creation for the revision field.
+	botskill.DefaultRevision = botskillDescRevision.Default.(int64)
+	// botskillDescCreatedAt is the schema descriptor for created_at field.
+	botskillDescCreatedAt := botskillFields[6].Descriptor()
+	// botskill.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botskill.DefaultCreatedAt = botskillDescCreatedAt.Default.(func() time.Time)
+	// botskillDescUpdatedAt is the schema descriptor for updated_at field.
+	botskillDescUpdatedAt := botskillFields[7].Descriptor()
+	// botskill.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	botskill.DefaultUpdatedAt = botskillDescUpdatedAt.Default.(func() time.Time)
+	// botskill.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	botskill.UpdateDefaultUpdatedAt = botskillDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// botskillDescID is the schema descriptor for id field.
+	botskillDescID := botskillFields[0].Descriptor()
+	// botskill.DefaultID holds the default value on creation for the id field.
+	botskill.DefaultID = botskillDescID.Default.(func() uuid.UUID)
+	botskillrevisionFields := schema.BotSkillRevision{}.Fields()
+	_ = botskillrevisionFields
+	// botskillrevisionDescDigest is the schema descriptor for digest field.
+	botskillrevisionDescDigest := botskillrevisionFields[4].Descriptor()
+	// botskillrevision.DigestValidator is a validator for the "digest" field. It is called by the builders before save.
+	botskillrevision.DigestValidator = botskillrevisionDescDigest.Validators[0].(func(string) error)
+	// botskillrevisionDescCreatedAt is the schema descriptor for created_at field.
+	botskillrevisionDescCreatedAt := botskillrevisionFields[7].Descriptor()
+	// botskillrevision.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botskillrevision.DefaultCreatedAt = botskillrevisionDescCreatedAt.Default.(func() time.Time)
+	// botskillrevisionDescID is the schema descriptor for id field.
+	botskillrevisionDescID := botskillrevisionFields[0].Descriptor()
+	// botskillrevision.DefaultID holds the default value on creation for the id field.
+	botskillrevision.DefaultID = botskillrevisionDescID.Default.(func() uuid.UUID)
+	bottaskFields := schema.BotTask{}.Fields()
+	_ = bottaskFields
+	// bottaskDescKey is the schema descriptor for key field.
+	bottaskDescKey := bottaskFields[2].Descriptor()
+	// bottask.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	bottask.KeyValidator = bottaskDescKey.Validators[0].(func(string) error)
+	// bottaskDescHomePath is the schema descriptor for home_path field.
+	bottaskDescHomePath := bottaskFields[3].Descriptor()
+	// bottask.HomePathValidator is a validator for the "home_path" field. It is called by the builders before save.
+	bottask.HomePathValidator = bottaskDescHomePath.Validators[0].(func(string) error)
+	// bottaskDescTitle is the schema descriptor for title field.
+	bottaskDescTitle := bottaskFields[4].Descriptor()
+	// bottask.TitleValidator is a validator for the "title" field. It is called by the builders before save.
+	bottask.TitleValidator = bottaskDescTitle.Validators[0].(func(string) error)
+	// bottaskDescRevision is the schema descriptor for revision field.
+	bottaskDescRevision := bottaskFields[5].Descriptor()
+	// bottask.DefaultRevision holds the default value on creation for the revision field.
+	bottask.DefaultRevision = bottaskDescRevision.Default.(int64)
+	// bottaskDescHeadRevision is the schema descriptor for head_revision field.
+	bottaskDescHeadRevision := bottaskFields[7].Descriptor()
+	// bottask.DefaultHeadRevision holds the default value on creation for the head_revision field.
+	bottask.DefaultHeadRevision = bottaskDescHeadRevision.Default.(int64)
+	// bottaskDescHeadDigest is the schema descriptor for head_digest field.
+	bottaskDescHeadDigest := bottaskFields[8].Descriptor()
+	// bottask.DefaultHeadDigest holds the default value on creation for the head_digest field.
+	bottask.DefaultHeadDigest = bottaskDescHeadDigest.Default.(string)
+	// bottaskDescCreatedAt is the schema descriptor for created_at field.
+	bottaskDescCreatedAt := bottaskFields[9].Descriptor()
+	// bottask.DefaultCreatedAt holds the default value on creation for the created_at field.
+	bottask.DefaultCreatedAt = bottaskDescCreatedAt.Default.(func() time.Time)
+	// bottaskDescUpdatedAt is the schema descriptor for updated_at field.
+	bottaskDescUpdatedAt := bottaskFields[10].Descriptor()
+	// bottask.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	bottask.DefaultUpdatedAt = bottaskDescUpdatedAt.Default.(func() time.Time)
+	// bottask.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	bottask.UpdateDefaultUpdatedAt = bottaskDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// bottaskDescID is the schema descriptor for id field.
+	bottaskDescID := bottaskFields[0].Descriptor()
+	// bottask.DefaultID holds the default value on creation for the id field.
+	bottask.DefaultID = bottaskDescID.Default.(func() uuid.UUID)
+	bottaskrevisionFields := schema.BotTaskRevision{}.Fields()
+	_ = bottaskrevisionFields
+	// bottaskrevisionDescDigest is the schema descriptor for digest field.
+	bottaskrevisionDescDigest := bottaskrevisionFields[4].Descriptor()
+	// bottaskrevision.DigestValidator is a validator for the "digest" field. It is called by the builders before save.
+	bottaskrevision.DigestValidator = bottaskrevisionDescDigest.Validators[0].(func(string) error)
+	// bottaskrevisionDescParentRevision is the schema descriptor for parent_revision field.
+	bottaskrevisionDescParentRevision := bottaskrevisionFields[6].Descriptor()
+	// bottaskrevision.DefaultParentRevision holds the default value on creation for the parent_revision field.
+	bottaskrevision.DefaultParentRevision = bottaskrevisionDescParentRevision.Default.(int64)
+	// bottaskrevisionDescParentDigest is the schema descriptor for parent_digest field.
+	bottaskrevisionDescParentDigest := bottaskrevisionFields[7].Descriptor()
+	// bottaskrevision.DefaultParentDigest holds the default value on creation for the parent_digest field.
+	bottaskrevision.DefaultParentDigest = bottaskrevisionDescParentDigest.Default.(string)
+	// bottaskrevisionDescAuthorityConstraintRef is the schema descriptor for authority_constraint_ref field.
+	bottaskrevisionDescAuthorityConstraintRef := bottaskrevisionFields[9].Descriptor()
+	// bottaskrevision.AuthorityConstraintRefValidator is a validator for the "authority_constraint_ref" field. It is called by the builders before save.
+	bottaskrevision.AuthorityConstraintRefValidator = bottaskrevisionDescAuthorityConstraintRef.Validators[0].(func(string) error)
+	// bottaskrevisionDescWorkspaceReceiptRef is the schema descriptor for workspace_receipt_ref field.
+	bottaskrevisionDescWorkspaceReceiptRef := bottaskrevisionFields[10].Descriptor()
+	// bottaskrevision.DefaultWorkspaceReceiptRef holds the default value on creation for the workspace_receipt_ref field.
+	bottaskrevision.DefaultWorkspaceReceiptRef = bottaskrevisionDescWorkspaceReceiptRef.Default.(string)
+	// bottaskrevisionDescCreatedAt is the schema descriptor for created_at field.
+	bottaskrevisionDescCreatedAt := bottaskrevisionFields[12].Descriptor()
+	// bottaskrevision.DefaultCreatedAt holds the default value on creation for the created_at field.
+	bottaskrevision.DefaultCreatedAt = bottaskrevisionDescCreatedAt.Default.(func() time.Time)
+	// bottaskrevisionDescID is the schema descriptor for id field.
+	bottaskrevisionDescID := bottaskrevisionFields[0].Descriptor()
+	// bottaskrevision.DefaultID holds the default value on creation for the id field.
+	bottaskrevision.DefaultID = bottaskrevisionDescID.Default.(func() uuid.UUID)
+	bottrackeditemFields := schema.BotTrackedItem{}.Fields()
+	_ = bottrackeditemFields
+	// bottrackeditemDescRevision is the schema descriptor for revision field.
+	bottrackeditemDescRevision := bottrackeditemFields[2].Descriptor()
+	// bottrackeditem.DefaultRevision holds the default value on creation for the revision field.
+	bottrackeditem.DefaultRevision = bottrackeditemDescRevision.Default.(int64)
+	// bottrackeditemDescID is the schema descriptor for id field.
+	bottrackeditemDescID := bottrackeditemFields[0].Descriptor()
+	// bottrackeditem.DefaultID holds the default value on creation for the id field.
+	bottrackeditem.DefaultID = bottrackeditemDescID.Default.(func() uuid.UUID)
+	botversionFields := schema.BotVersion{}.Fields()
+	_ = botversionFields
+	// botversionDescVersion is the schema descriptor for version field.
+	botversionDescVersion := botversionFields[2].Descriptor()
+	// botversion.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	botversion.VersionValidator = botversionDescVersion.Validators[0].(func(int64) error)
+	// botversionDescSchemaVersion is the schema descriptor for schema_version field.
+	botversionDescSchemaVersion := botversionFields[3].Descriptor()
+	// botversion.DefaultSchemaVersion holds the default value on creation for the schema_version field.
+	botversion.DefaultSchemaVersion = botversionDescSchemaVersion.Default.(int)
+	// botversionDescContentHash is the schema descriptor for content_hash field.
+	botversionDescContentHash := botversionFields[5].Descriptor()
+	// botversion.ContentHashValidator is a validator for the "content_hash" field. It is called by the builders before save.
+	botversion.ContentHashValidator = botversionDescContentHash.Validators[0].(func(string) error)
+	// botversionDescChangeReason is the schema descriptor for change_reason field.
+	botversionDescChangeReason := botversionFields[7].Descriptor()
+	// botversion.DefaultChangeReason holds the default value on creation for the change_reason field.
+	botversion.DefaultChangeReason = botversionDescChangeReason.Default.(string)
+	// botversionDescCreatedAt is the schema descriptor for created_at field.
+	botversionDescCreatedAt := botversionFields[8].Descriptor()
+	// botversion.DefaultCreatedAt holds the default value on creation for the created_at field.
+	botversion.DefaultCreatedAt = botversionDescCreatedAt.Default.(func() time.Time)
+	// botversionDescID is the schema descriptor for id field.
+	botversionDescID := botversionFields[0].Descriptor()
+	// botversion.DefaultID holds the default value on creation for the id field.
+	botversion.DefaultID = botversionDescID.Default.(func() uuid.UUID)
 	cachediagnosticFields := schema.CacheDiagnostic{}.Fields()
 	_ = cachediagnosticFields
 	// cachediagnosticDescSessionID is the schema descriptor for session_id field.
@@ -263,11 +661,11 @@ func init() {
 	// personalsettings.DefaultBrandTheme holds the default value on creation for the brand_theme field.
 	personalsettings.DefaultBrandTheme = personalsettingsDescBrandTheme.Default.(string)
 	// personalsettingsDescCreatedAt is the schema descriptor for created_at field.
-	personalsettingsDescCreatedAt := personalsettingsFields[4].Descriptor()
+	personalsettingsDescCreatedAt := personalsettingsFields[5].Descriptor()
 	// personalsettings.DefaultCreatedAt holds the default value on creation for the created_at field.
 	personalsettings.DefaultCreatedAt = personalsettingsDescCreatedAt.Default.(func() time.Time)
 	// personalsettingsDescUpdatedAt is the schema descriptor for updated_at field.
-	personalsettingsDescUpdatedAt := personalsettingsFields[5].Descriptor()
+	personalsettingsDescUpdatedAt := personalsettingsFields[6].Descriptor()
 	// personalsettings.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	personalsettings.DefaultUpdatedAt = personalsettingsDescUpdatedAt.Default.(func() time.Time)
 	// personalsettings.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
@@ -315,39 +713,39 @@ func init() {
 	sessionFields := schema.Session{}.Fields()
 	_ = sessionFields
 	// sessionDescTitle is the schema descriptor for title field.
-	sessionDescTitle := sessionFields[2].Descriptor()
+	sessionDescTitle := sessionFields[6].Descriptor()
 	// session.DefaultTitle holds the default value on creation for the title field.
 	session.DefaultTitle = sessionDescTitle.Default.(string)
 	// sessionDescMessageCount is the schema descriptor for message_count field.
-	sessionDescMessageCount := sessionFields[3].Descriptor()
+	sessionDescMessageCount := sessionFields[7].Descriptor()
 	// session.DefaultMessageCount holds the default value on creation for the message_count field.
 	session.DefaultMessageCount = sessionDescMessageCount.Default.(int)
 	// sessionDescFleetKey is the schema descriptor for fleet_key field.
-	sessionDescFleetKey := sessionFields[5].Descriptor()
+	sessionDescFleetKey := sessionFields[9].Descriptor()
 	// session.DefaultFleetKey holds the default value on creation for the fleet_key field.
 	session.DefaultFleetKey = sessionDescFleetKey.Default.(string)
 	// sessionDescFleetName is the schema descriptor for fleet_name field.
-	sessionDescFleetName := sessionFields[6].Descriptor()
+	sessionDescFleetName := sessionFields[10].Descriptor()
 	// session.DefaultFleetName holds the default value on creation for the fleet_name field.
 	session.DefaultFleetName = sessionDescFleetName.Default.(string)
 	// sessionDescIssueNumber is the schema descriptor for issue_number field.
-	sessionDescIssueNumber := sessionFields[7].Descriptor()
+	sessionDescIssueNumber := sessionFields[11].Descriptor()
 	// session.DefaultIssueNumber holds the default value on creation for the issue_number field.
 	session.DefaultIssueNumber = sessionDescIssueNumber.Default.(int)
 	// sessionDescRepo is the schema descriptor for repo field.
-	sessionDescRepo := sessionFields[8].Descriptor()
+	sessionDescRepo := sessionFields[12].Descriptor()
 	// session.DefaultRepo holds the default value on creation for the repo field.
 	session.DefaultRepo = sessionDescRepo.Default.(string)
 	// sessionDescWorkspaceDir is the schema descriptor for workspace_dir field.
-	sessionDescWorkspaceDir := sessionFields[9].Descriptor()
+	sessionDescWorkspaceDir := sessionFields[13].Descriptor()
 	// session.DefaultWorkspaceDir holds the default value on creation for the workspace_dir field.
 	session.DefaultWorkspaceDir = sessionDescWorkspaceDir.Default.(string)
 	// sessionDescCreatedAt is the schema descriptor for created_at field.
-	sessionDescCreatedAt := sessionFields[13].Descriptor()
+	sessionDescCreatedAt := sessionFields[17].Descriptor()
 	// session.DefaultCreatedAt holds the default value on creation for the created_at field.
 	session.DefaultCreatedAt = sessionDescCreatedAt.Default.(func() time.Time)
 	// sessionDescUpdatedAt is the schema descriptor for updated_at field.
-	sessionDescUpdatedAt := sessionFields[14].Descriptor()
+	sessionDescUpdatedAt := sessionFields[18].Descriptor()
 	// session.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	session.DefaultUpdatedAt = sessionDescUpdatedAt.Default.(func() time.Time)
 	// session.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
@@ -362,8 +760,12 @@ func init() {
 	sessioneventDescSessionID := sessioneventFields[1].Descriptor()
 	// sessionevent.SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	sessionevent.SessionIDValidator = sessioneventDescSessionID.Validators[0].(func(string) error)
+	// sessioneventDescEventID is the schema descriptor for event_id field.
+	sessioneventDescEventID := sessioneventFields[2].Descriptor()
+	// sessionevent.EventIDValidator is a validator for the "event_id" field. It is called by the builders before save.
+	sessionevent.EventIDValidator = sessioneventDescEventID.Validators[0].(func(string) error)
 	// sessioneventDescCreatedAt is the schema descriptor for created_at field.
-	sessioneventDescCreatedAt := sessioneventFields[3].Descriptor()
+	sessioneventDescCreatedAt := sessioneventFields[4].Descriptor()
 	// sessionevent.DefaultCreatedAt holds the default value on creation for the created_at field.
 	sessionevent.DefaultCreatedAt = sessioneventDescCreatedAt.Default.(func() time.Time)
 	slideFields := schema.Slide{}.Fields()

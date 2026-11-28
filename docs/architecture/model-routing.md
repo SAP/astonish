@@ -16,6 +16,10 @@ classifier produces a complexity score in [0, 1]; two configurable thresholds
 - Score ≤ low threshold → **weak** model
 - Otherwise → **medium** model (or weak if medium is not configured)
 
+## Bot model selection boundary
+
+The production Bot worker resolves the persistent **home session pin**, not a viewer override or run-session pin. `BotChatModelResolver` supports an explicitly supplied inherited resolver, but production supplies none: missing/partial pins fail closed. Provider configuration is read strictly through platform/org/team settings. The resulting model is wrapped per run with live binding and `BudgetLLM`; delegates, flows and compaction retain that binding. Ordinary Chat's Auto routing above does not imply a production Bot Auto fallback or a model-price oracle. See [Bot runtime](bots.md) and [budget wrapper](providers.md).
+
 ## Configuration
 
 ```yaml

@@ -3,33 +3,46 @@
 package render
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
+)
+
+// TableLayout preserves legacy tables for zero-valued/Platform styles.
+type TableLayout uint8
+
+const (
+	TableLayoutLegacy TableLayout = iota
+	TableLayoutFramed
 )
 
 // Styles carries lipgloss colors used by renderers (subset of tui.Theme).
 type Styles struct {
-	Background    lipgloss.Style
-	Text          lipgloss.Style
-	Muted         lipgloss.Style
-	Brand         lipgloss.Style
-	Success       lipgloss.Style
-	Danger        lipgloss.Style
-	Number        lipgloss.Style
-	CodeGutter    lipgloss.Style
-	CodeHeader    lipgloss.Style
-	Heading       lipgloss.Style // fallback for H4-H6
-	Heading1      lipgloss.Style // top-level heading (#)
-	Heading2      lipgloss.Style // section heading (##)
-	Heading3      lipgloss.Style // subheading (###)
-	Bold          lipgloss.Style
-	Italic        lipgloss.Style
-	DiffAddedBg   lipgloss.Style // background band for added lines in diffs
-	DiffRemovedBg lipgloss.Style // background band for removed lines in diffs
-	NoColor       bool
+	TableLayout                            TableLayout
+	TableSurface, TableHeader, TableBorder lipgloss.Style
+	SyntaxStyle                            *chroma.Style
+	Background                             lipgloss.Style
+	Text                                   lipgloss.Style
+	Muted                                  lipgloss.Style
+	Brand                                  lipgloss.Style
+	Success                                lipgloss.Style
+	Danger                                 lipgloss.Style
+	Number                                 lipgloss.Style
+	CodeGutter                             lipgloss.Style
+	CodeHeader                             lipgloss.Style
+	Heading                                lipgloss.Style // fallback for H4-H6
+	Heading1                               lipgloss.Style // top-level heading (#)
+	Heading2                               lipgloss.Style // section heading (##)
+	Heading3                               lipgloss.Style // subheading (###)
+	Bold                                   lipgloss.Style
+	Italic                                 lipgloss.Style
+	DiffAddedBg                            lipgloss.Style // background band for added lines in diffs
+	DiffRemovedBg                          lipgloss.Style // background band for removed lines in diffs
+	NoColor                                bool
 	// HeadingBar, when true, carves H1–H3 into rooms: a full-width rule under
 	// the title and a blank line after, so section headings scan as document
 	// bars rather than bold words in a packed paragraph. Used by the plan card;
@@ -73,6 +86,7 @@ func (s Styles) Effective() Styles {
 		DiffRemovedBg: plain,
 		NoColor:       true,
 		HeadingBar:    s.HeadingBar,
+		TableLayout:   s.TableLayout, TableSurface: plain, TableHeader: plain, TableBorder: plain,
 	}
 }
 
@@ -433,6 +447,9 @@ func parseTableRow(line string) []string {
 
 // renderTable formats GFM pipe tables into aligned columns.
 func renderTable(rows []string, width int, st Styles) string {
+	if st.TableLayout == TableLayoutFramed {
+		return renderFramedTable(rows, width, st.Effective())
+	}
 	if len(rows) == 0 {
 		return ""
 	}
@@ -716,3 +733,166 @@ func wrapStyledPlain(s string, width int, base lipgloss.Style, st Styles, inline
 
 // RuneLen is a tiny helper for tests.
 func RuneLen(s string) int { return utf8.RuneCountInString(s) }
+
+// renderFramedTable wraps every cell without truncating content. The first
+// identifier column gets its natural width before distributing remaining space.
+func renderFramedTable(rows []string, width int, st Styles) string {
+	var parsed [][]string
+	cols := 0
+	for _, row := range rows {
+		cells := parseFramedTableRow(row)
+		if isTableSeparator(cells) {
+			continue
+		}
+		parsed = append(parsed, cells)
+		cols = max(cols, len(cells))
+	}
+	if len(parsed) == 0 || cols == 0 {
+		return ""
+	}
+	natural := make([]int, cols)
+	for i := range parsed {
+		for len(parsed[i]) < cols {
+			parsed[i] = append(parsed[i], "")
+		}
+		for c, cell := range parsed[i] {
+			natural[c] = max(natural[c], lipgloss.Width(stripInlineMarkers(cell)))
+		}
+	}
+	budget := width - 3*cols - 1
+	// Below six cells per column, labeled rows are more readable than slivers.
+	if budget < cols*6 {
+		return renderStackedTable(parsed, width, st)
+	}
+	widths := make([]int, cols)
+	for c := range widths {
+		widths[c] = 6
+	}
+	left := budget - cols*6
+	first := min(left, max(0, natural[0]-6))
+	widths[0] += first
+	left -= first
+	for left > 0 {
+		changed := false
+		for c := 1; c < cols && left > 0; c++ {
+			if widths[c] < natural[c] {
+				widths[c]++
+				left--
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	border := func(a, b, c string) string {
+		parts := make([]string, cols)
+		for i, w := range widths {
+			parts[i] = strings.Repeat("─", w+2)
+		}
+		return st.TableBorder.Render(a + strings.Join(parts, b) + c)
+	}
+	out := []string{border("┌", "┬", "┐")}
+	for ri, row := range parsed {
+		wrapped := make([][]string, cols)
+		height := 1
+		cellStyles := st
+		if ri == 0 {
+			cellStyles.Text = st.TableHeader
+			cellStyles.Bold = st.TableHeader.Bold(true)
+			cellStyles.Italic = st.TableHeader.Italic(true)
+		}
+		for c, cell := range row {
+			wrapped[c] = wrapCodeLine(inlineMarkdown(cell, cellStyles), widths[c])
+			height = max(height, len(wrapped[c]))
+		}
+		for line := 0; line < height; line++ {
+			var b strings.Builder
+			b.WriteString(st.TableBorder.Render("│"))
+			for c := 0; c < cols; c++ {
+				text := ""
+				if line < len(wrapped[c]) {
+					text = wrapped[c][line]
+				}
+				base := st.Text
+				if ri == 0 {
+					base = st.TableHeader
+				}
+				b.WriteString(st.TableSurface.Render(" ") + base.Render(text) + st.TableSurface.Render(strings.Repeat(" ", max(0, widths[c]-lipgloss.Width(text))+1)))
+				b.WriteString(st.TableBorder.Render("│"))
+			}
+			out = append(out, b.String())
+		}
+		if ri+1 < len(parsed) {
+			out = append(out, border("├", "┼", "┤"))
+		}
+	}
+	out = append(out, border("└", "┴", "┘"))
+	return strings.Join(out, "\n")
+}
+
+// Escaped pipes belong to cells, including during incomplete streamed rows.
+func parseFramedTableRow(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	if strings.HasSuffix(line, "|") && !strings.HasSuffix(line, `\|`) {
+		line = strings.TrimSuffix(line, "|")
+	}
+	var cells []string
+	var b strings.Builder
+	escaped := false
+	for _, r := range line {
+		if escaped {
+			if r != '|' && r != '\\' {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '|' {
+			cells = append(cells, strings.TrimSpace(b.String()))
+			b.Reset()
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	if escaped {
+		b.WriteByte('\\')
+	}
+	return append(cells, strings.TrimSpace(b.String()))
+}
+
+func renderStackedTable(rows [][]string, width int, st Styles) string {
+	inner := max(2, width-4)
+	rule := st.TableBorder.Render("┌" + strings.Repeat("─", inner+2) + "┐")
+	out := []string{rule}
+	emit := func(text string) {
+		for _, line := range wrapCodeLine(text, inner) {
+			out = append(out, st.TableBorder.Render("│")+st.TableSurface.Render(" ")+line+st.TableSurface.Render(strings.Repeat(" ", max(0, inner-lipgloss.Width(line))+1))+st.TableBorder.Render("│"))
+		}
+	}
+	if len(rows) == 1 {
+		for _, cell := range rows[0] {
+			emit(st.TableHeader.Render(stripInlineMarkers(cell)))
+		}
+	}
+	for ri, row := range rows[1:] {
+		if ri > 0 {
+			out = append(out, st.TableBorder.Render("├"+strings.Repeat("─", inner+2)+"┤"))
+		}
+		for c, cell := range row {
+			label := stripInlineMarkers(rows[0][c])
+			if label == "" {
+				label = fmt.Sprintf("Column %d", c+1)
+			}
+			emit(st.TableHeader.Render(label+": ") + inlineMarkdown(cell, st))
+		}
+	}
+	out = append(out, st.TableBorder.Render("└"+strings.Repeat("─", inner+2)+"┘"))
+	return strings.Join(out, "\n")
+}

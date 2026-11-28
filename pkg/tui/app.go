@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image/color"
@@ -19,9 +20,11 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/google/uuid"
 
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/xai_oauth"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/SAP/astonish/pkg/tui/render"
@@ -84,9 +87,13 @@ type fileViewerState struct {
 
 // delegationDetailState holds the overlay state for viewing a sub-task's activity.
 type delegationDetailState struct {
-	loading bool
-	err     string
-	request *int
+	raw      bool
+	cacheKey string
+	tab      delegationDetailTab
+	offsets  [2]int
+	loading  bool
+	err      string
+	request  *int
 
 	open     bool
 	taskName string
@@ -97,6 +104,8 @@ type delegationDetailState struct {
 
 // Config configures the terminal chat app.
 type Config struct {
+	// ThemeID overrides Code slots only, without changing platform styling.
+	ThemeID CodeThemeID
 	Backend backend.Backend
 	// AltBackend enables Ctrl+Tab switching between two modes (e.g. code ↔
 	// platform). When nil, the TUI operates in single-backend mode and Ctrl+Tab
@@ -109,42 +118,72 @@ type Config struct {
 
 // Run starts the fullscreen TUI and blocks until exit.
 func Run(ctx context.Context, cfg Config) error {
+	if _, err := ResolveCodeTheme(cfg.ThemeID); err != nil {
+		return err
+	}
 	if cfg.Backend == nil {
 		return fmt.Errorf("tui: backend is required")
 	}
 	if err := cfg.Backend.Open(ctx); err != nil {
 		return err
 	}
-	defer cfg.Backend.Close()
-
 	m := newModel(ctx, cfg)
 	p := tea.NewProgram(m)
-	_, err := p.Run()
-
-	// Close alt backend if it was opened during the session.
-	if cfg.AltBackend != nil && m.backends[1].opened {
-		cfg.AltBackend.Close()
+	final, err := p.Run()
+	if n, ok := final.(model); ok {
+		m = n
 	}
 
+	// Cleanup the returned model: alternate open state lives in that value,
+	// not the initial model passed to Bubble Tea. A cleanup error forbids handoff.
+	err = errors.Join(err, m.closeBackends())
+
+	if err == nil && m.workspaceHandoff != nil {
+		return m.workspaceHandoff
+	}
 	return err
+}
+
+func (m *model) closeBackends() error {
+	if m.turnCancel != nil {
+		m.turnCancel()
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	var errs []error
+	for i := range m.backends {
+		slot := &m.backends[i]
+		if slot.opened && slot.backend != nil {
+			if err := slot.backend.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			slot.opened = false
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // model is the root bubbletea model.
 type model struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	backend  backend.Backend
-	info     backend.Info
-	theme    Theme
-	tr       *events.Transcript
-	vp       viewport.Model
-	ta       textarea.Model
-	spin     spinner.Model
-	width    int
-	height   int
-	ready    bool
-	err      string
-	quitting bool
+	workspacePicker     workspacePickerState
+	workspaceGeneration uint64
+	workspaceHandoff    *backend.WorkspaceHandoffError
+	verification        planVerificationState
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	backend             backend.Backend
+	info                backend.Info
+	theme               Theme
+	tr                  *events.Transcript
+	vp                  viewport.Model
+	ta                  textarea.Model
+	spin                spinner.Model
+	width               int
+	height              int
+	ready               bool
+	err                 string
+	quitting            bool
 	// history of sent prompts for Up/Down.
 	history    []string
 	historyIdx int // -1 = not browsing
@@ -164,7 +203,15 @@ type model struct {
 	reauthLaunched bool
 	// planApprovalPending prevents duplicate approval turns while persistence and
 	// RunTurn execute asynchronously outside Bubble Tea's update loop.
-	planApprovalPending bool
+	planApprovalPending    bool
+	planPermissionIdentity string
+	themePicker            themePickerState
+	themeGeneration        uint64
+	themeOverride          CodeThemeID
+	permissions            codePermissionsState
+	permissionOwner        *events.Transcript
+	permissionSession      string
+	permissionRequest      uint64
 	// turnStartedAt records when the current turn began (or resumed after a
 	// HITL pause), enabling a live elapsed-time counter in the status bar.
 	// Zero value means the timer is not actively ticking (either no turn or paused).
@@ -238,6 +285,15 @@ type model struct {
 	// -1 means no item was pinned last frame.
 	stickyPinnedIdx int
 
+	botProposalSeen map[uuid.UUID]bool
+	botCancel       context.CancelFunc
+	botGeneration   uint64
+	botEvents       <-chan botWatchMsg
+	botSnapshots    <-chan botSnapshotMsg
+	botSnapshot     *store.BotSnapshot
+	botSnapshotErr  error
+	bots            botsState
+	planPanel       planPanelState
 	// overlays
 	sessions         sessionsState
 	rollback         rollbackState
@@ -293,6 +349,10 @@ func newModel(parent context.Context, cfg Config) model {
 	ctx, cancel := context.WithCancel(parent)
 	info := cfg.Backend.Info()
 	th := ThemeForMode(info.Mode)
+	var themeLoadErr error
+	if info.Mode == "code" {
+		th, themeLoadErr = resolveInitialCodeTheme(ctx, cfg.Backend, cfg.ThemeID)
+	}
 
 	ta := textarea.New()
 	ta.Placeholder = "Message Astonish…"
@@ -321,7 +381,7 @@ func newModel(parent context.Context, cfg Config) model {
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	sp.Style = th.spinnerStyle()
 
 	tr := events.NewTranscript()
 	tr.SessionID = info.SessionID
@@ -339,6 +399,9 @@ func newModel(parent context.Context, cfg Config) model {
 	for _, n := range info.Notices {
 		tr.Apply(events.NewSystem(n))
 	}
+	if themeLoadErr != nil {
+		tr.Apply(events.NewSystem("Could not load saved Code theme: " + themeLoadErr.Error()))
+	}
 	// Resumed sessions load history asynchronously in Init (historyLoadedMsg).
 
 	m := model{
@@ -347,6 +410,7 @@ func newModel(parent context.Context, cfg Config) model {
 		backend:         cfg.Backend,
 		info:            info,
 		theme:           th,
+		themeOverride:   cfg.ThemeID,
 		tr:              tr,
 		ta:              ta,
 		spin:            sp,
@@ -368,9 +432,15 @@ func newModel(parent context.Context, cfg Config) model {
 	}
 	if cfg.AltBackend != nil {
 		altInfo := cfg.AltBackend.Info()
+		altTheme := ThemeForMode(altInfo.Mode)
+		if altInfo.Mode == "code" {
+			if resolved, err := ResolveCodeTheme(cfg.ThemeID); err == nil {
+				altTheme = resolved
+			}
+		}
 		m.backends[1] = backendSlot{
 			backend:    cfg.AltBackend,
-			theme:      ThemeForMode(altInfo.Mode),
+			theme:      altTheme,
 			historyIdx: -1,
 			opened:     false, // lazily opened on first Ctrl+Tab
 		}
@@ -405,15 +475,99 @@ type artifactContentLoadedMsg struct {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick}
+	if m.codePermissionsCap() != nil {
+		cmds = append(cmds, func() tea.Msg { return codePermissionsRefreshMsg{} })
+	}
+	if m.botSelected() {
+		cmds = append(cmds, func() tea.Msg { return botStartMsg{} })
+	}
 	if m.info.IsResumed && m.info.SessionID != "" {
 		cmds = append(cmds, m.loadInitialHistoryCmd())
 	}
 	return tea.Batch(cmds...)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
+	defer func() {
+		n, ok := next.(model)
+		if !ok {
+			return
+		}
+		ownerChanged := n.permissionOwner != n.tr || n.permissionSession != n.tr.SessionID
+		n.syncCodePermissions()
+		refresh := ownerChanged
+		switch msg.(type) {
+		case eventMsg, turnDoneMsg, historyLoadedMsg, planApprovalStartedMsg:
+			refresh = true
+		}
+		if refresh {
+			if n.permissions.loading {
+				n.permissions.refreshPending = true
+			} else {
+				command = tea.Batch(command, n.refreshCodePermissions())
+			}
+		}
+		if n.themePicker.open && (n.themePicker.slot != n.activeBackendIdx || n.themePicker.backend != n.backend || n.themePicker.owner != n.tr || n.themePicker.session != n.tr.SessionID) {
+			// A dispatched write may finish on disk, but cannot own the new screen.
+			n.themePicker.open = false
+			n.themeGeneration++
+		}
+		if n.workspacePicker.open && (n.workspacePicker.slot != n.activeBackendIdx || n.workspacePicker.backend != n.backend || n.workspacePicker.owner != n.tr || n.workspacePicker.session != n.tr.SessionID) {
+			n.workspacePicker.open = false
+			n.workspaceGeneration++
+		}
+		next = n
+	}()
+	if msg, ok := msg.(workspaceResultMsg); ok {
+		return m.applyWorkspaceResult(msg)
+	}
+	if m.workspacePicker.open {
+		switch key := msg.(type) {
+		case tea.KeyPressMsg:
+			return m.handleWorkspaceKey(key)
+		case tea.MouseMsg, tea.PasteMsg:
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
+	m.syncCodePermissions()
+	if m.permissions.open {
+		switch key := msg.(type) {
+		case tea.KeyPressMsg:
+			return m.handleCodePermissionsKey(key)
+		case tea.MouseMsg, tea.PasteMsg:
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
+	if msg, ok := msg.(themePreferenceMsg); ok {
+		return m.applyThemePreferenceMsg(msg)
+	}
+	if m.themePicker.open && !m.permissions.open {
+		switch key := msg.(type) {
+		case tea.KeyPressMsg:
+			return m.handleThemePickerKey(key)
+		case tea.MouseMsg, tea.PasteMsg:
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
 	var cmds []tea.Cmd
 
+	if m.planPanel.open && !m.planModalBlocked() {
+		if _, ok := msg.(tea.PasteMsg); ok {
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
 	// A textarea paste (Ctrl+V keybinding → clipboard read) arrives as a
 	// textarea.pasteMsg. When it carries text, insert it. When it is empty, the
 	// clipboard likely holds an image with no text representation — try an image
@@ -437,6 +591,108 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case codePermissionsRefreshMsg:
+		return m, m.refreshCodePermissions()
+	case codePermissionsMsg:
+		if msg.owner != m.tr || msg.request != m.permissionRequest || msg.session != m.tr.SessionID {
+			return m, nil
+		}
+		if msg.createdSession && msg.err == nil && msg.session == "" && msg.snapshot.SessionID != "" && m.backend.Info().SessionID == msg.snapshot.SessionID {
+			m.info = m.backend.Info()
+			m.tr.SessionID = msg.snapshot.SessionID
+			m.permissionSession = msg.snapshot.SessionID
+		}
+		m.permissions.loading = false
+		m.permissions.err = ""
+		if msg.err != nil {
+			m.permissions.err = msg.err.Error()
+			m.permissions.known = false
+		} else if msg.snapshot.SessionID == m.tr.SessionID {
+			m.permissions.snapshot, m.permissions.known = msg.snapshot, true
+		} else {
+			m.permissions.known = false
+			m.permissions.err = "Session changed; press r to refresh."
+		}
+		if m.permissions.refreshPending {
+			m.permissions.refreshPending = false
+			return m, m.refreshCodePermissions()
+		}
+		return m, nil
+	case botSnapshotMsg:
+		return m.applyBotSnapshot(msg)
+	case botAdmissionMsg:
+		return m.applyBotAdmission(msg)
+	case botOverviewMsg:
+		return m.applyBotOverview(msg)
+	case botStartMsg:
+		return m.startBotWatch()
+	case botWatchMsg:
+		if msg.generation == m.botGeneration && m.botSelected() && !msg.done && msg.err == nil && msg.event.BotFilePublication != nil && msg.event.Kind == events.KindSystem {
+			m.applyEvent(msg.event)
+			m.refreshViewport()
+			return m, waitBotEvent(m.botEvents)
+		}
+		return m.applyBotWatch(msg)
+	case botFilesMsg:
+		return m.applyBotFiles(msg)
+	case botSkillsLoadedMsg:
+		return m.applyBotSkills(msg)
+	case botsLoadedMsg:
+		if msg.generation != m.botGeneration || !m.bots.open || msg.requestID != m.bots.requestID {
+			return m, nil
+		}
+		m.bots.loading = false
+		if msg.err != nil {
+			m.bots.err = botEmployeeFailure(msg.err)
+		} else {
+			m.bots.runItems = msg.runs
+			m.bots.items = msg.items
+			m.bots.decisions = msg.approvals
+			m.bots.proposalItems = msg.proposals
+			m.bots.snapshot = msg.snapshot
+			if msg.snapshot != nil {
+				m.botSnapshot = msg.snapshot
+				m.botSnapshotErr = nil
+			}
+		}
+		return m, nil
+	case botSelectedMsg:
+		if msg.generation != m.botGeneration {
+			return m, nil
+		}
+		m.bots.loading = false
+		if msg.err != nil {
+			m.bots.err = botEmployeeFailure(msg.err)
+			return m, nil
+		}
+		m.bots = botsState{}
+		return m.startBotWatch()
+	case botDecisionMsg:
+		if msg.generation != m.botGeneration || !m.bots.open || msg.requestID != m.bots.requestID {
+			return m, nil
+		}
+		m.bots.loading = false
+		m.bots.confirm = ""
+		if msg.err != nil {
+			m.bots.err = botEmployeeFailure(msg.err)
+			return m, nil
+		}
+		if receipt, ok := botEmployeeApprovalReceipt(msg.continuation); ok {
+			m.tr.Items = append(m.tr.Items, receipt)
+			m.refreshViewport()
+		}
+		if m.bots.exceptions {
+			return m.openBotExceptions()
+		}
+		if m.bots.proposals {
+			return m.openBotProposals()
+		}
+		return m.botCommand("/bots approvals")
+	case delegationDetailPollMsg:
+		if m.delegationDetail.open && m.delegationDetail.request == msg.request && !m.delegationDetail.loading {
+			return m.fetchDelegationDetail()
+		}
+		return m, nil
 	case delegationDetailLoadedMsg:
 		if !m.delegationDetail.open || m.delegationDetail.request != msg.request {
 			return m, nil
@@ -451,11 +707,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.delegationDetail.err = msg.err.Error()
 		} else {
 			task := &m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks[m.delegationDetail.taskIdx]
-			if len(task.Activity) == 0 || (task.Status == "complete" || task.Status == "failed") && len(msg.activity) > 0 {
-				task.Activity = msg.activity
+			m.delegationDetail.err = ""
+			if task.Status == "complete" || task.Status == "failed" || task.Status == "interrupted" || task.Status == "cancelled" {
+				if len(msg.activity) > 0 {
+					task.Activity = msg.activity
+				}
+			} else {
+				task.Activity = mergeDelegationDetailActivity(msg.activity, task.Activity)
 			}
 		}
 		m.layoutDelegationDetail()
+		if msg.err == nil && m.delegationDetailActive() {
+			request := m.delegationDetail.request
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return delegationDetailPollMsg{request: request} })
+		}
 		return m, nil
 
 	case tea.PasteMsg:
@@ -492,6 +757,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.delegationDetail.open {
 			return m.handleDelegationDetailKey(msg)
+		}
+		if m.bots.open {
+			return m.handleBotsKey(msg)
 		}
 		// Sessions / model picker overlays capture keys first.
 		if m.sessions.open {
@@ -531,6 +799,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				return m, nil
 			}
+		}
+
+		if msg.String() == "ctrl+p" && !m.tr.Awaiting && m.codePermissionsCap() != nil {
+			return m.openCodePermissions()
+		}
+		if next, cmd, handled := m.handlePlanProgressKey(msg); handled {
+			return next, cmd
 		}
 
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
@@ -606,8 +881,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// While streaming, only allow cancel / scroll keys through textarea limited.
-		if m.tr.Streaming {
+		// Bot streams are observations: keep the composer available for local
+		// commands even when persisted text is partial.
+		if m.tr.Streaming && !m.botSelected() {
+			// Keep the existing mid-turn send lock, but permit the local palette
+			// command. It never enters RunTurn or cancels the current stream.
+			if next, cmd, handled := m.handleStreamingThemeCommand(msg); handled {
+				return next, cmd
+			}
 			switch msg.String() {
 			case "pgup", "pgdown", "up", "down":
 				var cmd tea.Cmd
@@ -769,6 +1050,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyArtifactContentLoaded(msg)
 
 	case planApprovalStartedMsg:
+		if msg.owner != nil && (msg.owner != m.tr || msg.session != m.tr.SessionID || msg.identity != m.planPermissionIdentity) {
+			if msg.cancel != nil {
+				msg.cancel()
+			}
+			if msg.owner == m.tr && msg.session == m.tr.SessionID {
+				m.planApprovalPending = false
+			}
+			return m, nil
+		}
 		m.planApprovalPending = false
 		if msg.err != nil {
 			m.tr.Apply(events.NewError("Approved plan did not start: " + msg.err.Error() + ". Press Enter to retry."))
@@ -799,6 +1089,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// backend keeps working. Coalescing bounds repaints to one per batch.
 		// The drain is bounded and non-blocking so key messages (Esc/cancel) are
 		// never starved: we take only events already buffered, then yield.
+		onlySnapshots := events.Event(msg).Kind == events.KindPlanSnapshot
+		previousItems, previousOffset := len(m.tr.Items), m.vp.YOffset()
+		refresh := func() {
+			m.refreshViewport()
+			if onlySnapshots && len(m.tr.Items) == previousItems && !m.tr.Awaiting {
+				m.vp.SetYOffset(previousOffset)
+			}
+		}
 		m.applyEvent(events.Event(msg))
 		drained := 0
 		for m.eventCh != nil && drained < maxCoalescedEvents {
@@ -808,9 +1106,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Channel closed mid-drain: the turn finished. Finalize now.
 					m.eventCh = nil
 					cmd := m.finishTurn()
-					m.refreshViewport()
+					refresh()
 					return m, cmd
 				}
+				onlySnapshots = onlySnapshots && ev.Kind == events.KindPlanSnapshot
 				m.applyEvent(ev)
 				drained++
 			default:
@@ -824,7 +1123,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tr.Awaiting {
 			m.layout()
 		}
-		m.refreshViewport()
+		refresh()
 		if m.eventCh != nil {
 			cmds = append(cmds, waitEvent(m.eventCh))
 		}
@@ -1013,6 +1312,18 @@ func (m *model) syncSlashCompletion() {
 		return
 	}
 	var extra []slashCommand
+	if m.workspaceCap() != nil {
+		extra = append(extra, workspacesSlashCommand)
+	}
+	if m.codeThemePreferencesCap() != nil {
+		extra = append(extra, themesSlashCommand)
+	}
+	if m.codePermissionsCap() != nil {
+		extra = append(extra, permissionsSlashCommand)
+	}
+	if m.botCap() != nil {
+		extra = append(extra, botsSlashCommand)
+	}
 	if m.webSearchAdmin() != nil {
 		extra = append(extra, webSearchSlashCommand)
 	}
@@ -2036,6 +2347,43 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		// Image-only turn still needs a visible/user message marker.
 		text = strings.TrimSpace(rawValue)
 	}
+	if text == "/themes" {
+		return m.openThemePicker()
+	}
+	if m.botSelected() {
+		// Observed text can be partial indefinitely. Local commands must remain
+		// usable while the daemon streams; ordinary input must not enter history.
+		if strings.HasPrefix(text, "/") {
+			return m.handleSlash(text)
+		}
+		b := m.botCap().SelectedBot()
+		if m.info.SessionID != "" && m.info.SessionID != b.HomeSessionID.String() {
+			m.tr.Apply(events.NewSystem("selected run trace is read-only; /bots home to converse"))
+			m.refreshViewport()
+			return m, nil
+		}
+		if b.Status != store.BotActive && b.Status != store.BotPaused {
+			m.tr.Apply(events.NewSystem("This Bot cannot converse in its current state."))
+			m.refreshViewport()
+			return m, nil
+		}
+		admission, err := m.backend.RunTurn(m.ctx, text, backend.TurnOptions{Attachments: attachments})
+		if err != nil {
+			// Preserve the composer and never echo a rejected admission.
+			m.tr.Apply(events.NewError(err.Error()))
+		} else {
+			m.history = append(m.history, text)
+			m.historyIdx = -1
+			m.ta.Reset()
+			m.pastedBlocks = nil
+			m.pastedImages = nil
+		}
+		m.refreshViewport()
+		if err == nil && admission != nil {
+			return m, waitBotAdmission(admission, m.botGeneration)
+		}
+		return m, nil
+	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
@@ -2125,9 +2473,32 @@ func (m model) collectSubmitAttachments(composerValue string) []backend.Attachme
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
+	if text == "/workspaces" {
+		return m.openWorkspacePicker(true)
+	}
+	if text == "/themes" {
+		return m.openThemePicker()
+	}
+	if text == "/permissions" && m.codePermissionsCap() != nil {
+		return m.openCodePermissions()
+	}
 	m.ta.Reset()
 	switch {
+	case text == "/bots" || strings.HasPrefix(text, "/bots "):
+		return m.botCommand(text)
 	case text == "/help" || text == "/?":
+		if m.workspaceCap() != nil {
+			m.tr.Apply(events.NewSystem("/workspaces — browse, review, apply and retain independent Code workspaces"))
+		}
+		if m.codeThemePreferencesCap() != nil {
+			m.tr.Apply(events.NewSystem("/themes — choose and save a Code color palette"))
+		}
+		if m.codePermissionsCap() != nil {
+			m.tr.Apply(events.NewSystem("/permissions · Ctrl+P — view and revoke local Code grants"))
+		}
+		if m.botCap() != nil {
+			m.tr.Apply(events.NewSystem("/bots — remote picker; /bots approvals — exact durable decisions; /bots detach — leave work running"))
+		}
 		m.tr.Apply(events.NewSystem(helpText(m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil, m.localSkillsCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
@@ -2141,7 +2512,6 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.cancel()
 		return m, tea.Quit
 	case text == "/new":
-		m.planMode = false
 		return m.startNewSession()
 	case text == "/sessions" || text == "/session":
 		return m.openSessionsPicker()
@@ -2402,7 +2772,32 @@ func timerTick() tea.Cmd {
 // applyEvent applies one streamed event to the transcript and keeps the header
 // info in sync. It does NOT repaint — callers coalesce a batch and repaint once.
 func (m *model) applyEvent(ev events.Event) {
+	if ev.Kind == events.KindPlanVerification {
+		m.applyPlanVerification(ev)
+		return
+	}
+	previousRevision := int64(0)
+	if ev.Kind == events.KindPlanSnapshot && ev.PlanSnapshot != nil {
+		for _, it := range m.tr.Items {
+			if it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == ev.PlanSnapshot.PlanID {
+				previousRevision = it.PlanSnapshot.Revision
+				break
+			}
+		}
+	}
 	m.tr.Apply(ev)
+	if ev.Kind == events.KindSystem && ev.BotFilePublication != nil && len(m.tr.Items) > 0 {
+		// Artifact-only deliveries are neutral status but retain the immutable
+		// receipt used by /bots files. They are not a substitute Employee reply.
+		m.tr.Items[len(m.tr.Items)-1].BotFilePublication = ev.BotFilePublication
+	}
+	if previousRevision > 0 && ev.PlanSnapshot.Revision > previousRevision {
+		if it := m.approvalItem(); it != nil && it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == ev.PlanSnapshot.PlanID && it.PlanSnapshot.Sequence == ev.PlanSnapshot.Sequence {
+			// A new approval presentation is not a quiet execution update.
+			m.userScrolledUp = false
+			m.vp.GotoBottom()
+		}
+	}
 	if ev.Kind == events.KindSession && ev.SessionID != "" {
 		m.info.SessionID = ev.SessionID
 	}
@@ -2462,10 +2857,20 @@ func (m *model) layout() {
 	taH := m.composerTextHeight()
 	composerH := taH + 2 // rounded border top/bottom
 	popupH := m.completionPopupHeight()
-	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps + m.stickyHeaderLines
-	vh := screenH - chrome
-	if vh < 5 {
-		vh = 5
+	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps + m.stickyHeaderLines + m.compactPlanHeight()
+	if m.tr != nil && m.tr.Awaiting {
+		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+			chrome = headerH + 1 + hintsH + m.stickyHeaderLines + m.compactPlanHeight()
+			if m.info.Mode == "code" {
+				chrome += metaH
+			}
+		} else if m.planLayout() != planLayoutHidden {
+			chrome = 4 + lipgloss.Height(m.renderApprovalOverlay()) + m.stickyHeaderLines + m.compactPlanHeight()
+		}
+	}
+	vh := max(1, screenH-chrome)
+	if m.planLayout() == planLayoutHidden {
+		vh = max(5, vh)
 	}
 	oldOffset := 0
 	wasAtBottom := true
@@ -2473,9 +2878,9 @@ func (m *model) layout() {
 		oldOffset = m.vp.YOffset()
 		wasAtBottom = m.vp.AtBottom()
 	}
-	m.vp = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(vh))
+	m.vp = viewport.New(viewport.WithWidth(m.transcriptWidth()), viewport.WithHeight(vh))
 	if !m.theme.NoColor {
-		m.vp.Style = lipgloss.NewStyle().Background(lipgloss.Color("#111416"))
+		m.vp.Style = m.theme.Background
 	}
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
@@ -2495,6 +2900,7 @@ func (m *model) layout() {
 	}
 	m.ta.SetWidth(innerW)
 	m.ta.SetHeight(taH)
+	m.syncPlanPanel()
 }
 
 func (m model) screenHeight() int {
@@ -2531,7 +2937,7 @@ func (m model) composerTextHeight() int {
 // no popup is active. Used by layout() to shrink the viewport so the total
 // rendered height stays within the terminal.
 func (m model) completionPopupHeight() int {
-	if m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open {
+	if m.themePicker.open || m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open {
 		return 0
 	}
 	switch {
@@ -2573,9 +2979,15 @@ func (m model) composerWrapWidth() int {
 }
 
 func (m *model) refreshViewport() {
+	m.syncCodePermissions()
+	m.layoutDelegationDetail()
 	if !m.ready {
 		return
 	}
+	if m.vp.Width() != m.transcriptWidth() || m.planPanel.mode != m.planLayout() || m.planPanel.awaiting != m.tr.Awaiting {
+		m.layout()
+	}
+	m.syncPlanPanel()
 	atBottom := m.vp.AtBottom()
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
@@ -2598,7 +3010,7 @@ func (m *model) refreshViewport() {
 			m.stickyExpanded = false
 		}
 		m.stickyPinnedIdx = newIdx
-		m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
+		m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.transcriptWidth()), m.stickyExpanded), "\n") + 1
 	} else {
 		m.stickyPinnedIdx = -1
 		m.stickyHeaderLines = 0
@@ -2645,8 +3057,8 @@ func (m model) renderWelcome() string {
 		Width(contentW).
 		Padding(1, 2).
 		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("238")).
-		Background(lipgloss.Color("#111416")).
+		BorderForeground(m.theme.Border.GetForeground()).
+		Background(m.theme.Background.GetBackground()).
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.Place(
@@ -2656,7 +3068,7 @@ func (m model) renderWelcome() string {
 		lipgloss.Center,
 		body,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+		lipgloss.WithWhitespaceStyle(m.theme.Background),
 	)
 }
 
@@ -2668,7 +3080,7 @@ func (m model) welcomeLines(width int) []string {
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(m.theme.AccentColor).
-		Background(lipgloss.Color("#111416")).
+		Background(m.theme.Background.GetBackground()).
 		Bold(true).
 		Align(lipgloss.Center).
 		Width(width).
@@ -2691,10 +3103,7 @@ func (m model) welcomeLines(width int) []string {
 // shows the directory being operated on.
 func (m model) codeWelcomeLines(width int) []string {
 	th := m.theme
-	title := lipgloss.NewStyle().
-		Foreground(m.theme.AccentColor).
-		Background(lipgloss.Color("#111416")).
-		Bold(true).
+	title := th.Header.
 		Align(lipgloss.Center).
 		Width(width).
 		Render("✦ Astonish Code")
@@ -2772,10 +3181,13 @@ func footerWorkDirText(path, branch string) string {
 func (m model) viewportTopY() int {
 	// The transcript viewport starts after the one-line header and separator,
 	// plus any sticky user-message header rows currently shown above it.
-	return 2 + m.stickyHeaderLines
+	return 2 + m.compactPlanHeight() + m.stickyHeaderLines
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if next, cmd, handled := m.handlePlanProgressMouse(msg); handled {
+		return next, cmd
+	}
 	mouse := msg.Mouse()
 
 	switch msg.(type) {
@@ -2816,6 +3228,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.planLayout() == planLayoutSidebar && msg.X >= m.transcriptWidth() {
+		return m, nil
+	}
 	// Double-click detection (used both for sticky header and transcript items).
 	now := time.Now()
 	isDouble := now.Sub(m.lastClickAt) < doubleClickWindowMS*time.Millisecond &&
@@ -2829,7 +3244,7 @@ func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	// If the click is in the sticky header zone (rows 2..2+stickyHeaderLines-1),
 	// handle double-click to expand/collapse right on press.
 	if m.stickyHeaderLines > 0 {
-		stickyTop := 2 // after header(1) + sep(1)
+		stickyTop := 2 + m.compactPlanHeight() // after global and plan headers
 		stickyBot := stickyTop + m.stickyHeaderLines
 		if msg.Y >= stickyTop && msg.Y < stickyBot {
 			if isDouble {
@@ -2838,7 +3253,7 @@ func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 				oldStickyH := m.stickyHeaderLines
 				sticky := m.stickyUserMessage()
 				if sticky != "" {
-					m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
+					m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.transcriptWidth()), m.stickyExpanded), "\n") + 1
 				} else {
 					m.stickyHeaderLines = 0
 				}
@@ -2915,6 +3330,11 @@ func (m model) handleMouseRelease(msg tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if idx, ok := m.codePlanApprovalAtPoint(m.selectionStart); ok {
+		m.tr.ApprovalCursor = idx
+		return m.submitApproval(m.approvalOptions()[idx])
+	}
+
 	if artifact, ok := m.artifactAtLine(m.selectionStart.line); ok {
 		return m.openArtifactViewer(artifact)
 	}
@@ -2947,7 +3367,7 @@ func (m model) handleMouseRelease(msg tea.Mouse) (tea.Model, tea.Cmd) {
 
 func (m model) selectionPointForMouse(msg tea.Mouse) (selectionPoint, bool) {
 	top := m.viewportTopY()
-	if msg.Y < top || msg.Y >= top+m.vp.Height() {
+	if (m.planLayout() == planLayoutSidebar && msg.X >= m.transcriptWidth()) || msg.Y < top || msg.Y >= top+m.vp.Height() {
 		return selectionPoint{}, false
 	}
 	line := m.vp.YOffset() + (msg.Y - top)
@@ -3099,7 +3519,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	var plainLines []string
 	var contentSpans [][2]int
 	th := m.theme
-	cw := contentWidth(m.width)
+	cw := contentWidth(m.transcriptWidth())
 	lineNo := 0
 
 	if m.itemRenderCache == nil {
@@ -3167,7 +3587,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		b.WriteString("\n")
 		pl, cs := buildPlainSpanned(padded, spanFor)
 		appendPlainSpanned(pl, cs)
-		gap := m.paintRow("", m.width)
+		gap := m.paintRow("", m.transcriptWidth())
 		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
 		plainLines = append(plainLines, stripANSI(gap))
@@ -3204,7 +3624,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		b.WriteString("\n")
 		appendPlainSpanned(cached.plainLines, cached.spans)
 		// Gap row (empty painted row for visual separation).
-		gap := m.paintRow("", m.width)
+		gap := m.paintRow("", m.transcriptWidth())
 		b.WriteString(gap)
 		b.WriteString("\n")
 		plainLines = append(plainLines, stripANSI(gap))
@@ -3237,7 +3657,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		b.WriteString("\n")
 		pl, cs := buildPlainSpanned(painted, spanFor)
 		appendPlainSpanned(pl, cs)
-		gap := m.paintRow("", m.width)
+		gap := m.paintRow("", m.transcriptWidth())
 		b.WriteString(gap)
 		b.WriteString("\n")
 		plainLines = append(plainLines, stripANSI(gap))
@@ -3272,6 +3692,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	}
 
 	for i, it := range m.tr.Items {
+		it = botEmployeeItem(it, m.botSelected())
 		switch it.Kind {
 		case events.ItemUser:
 			// User bubbles are cacheable (content never changes after submit).
@@ -3433,7 +3854,12 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			appendBlock(i, it.Kind, m.renderDelegationItem(it, cw))
 
 		case events.ItemPlan:
-			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, "", "")
+			approvalState := ""
+			if it.PlanStatus == events.PlanPending {
+				// Pending cards contain controls: content alone cannot cache their cursor.
+				approvalState = fmt.Sprintf("%d:%q:%s:%t:%t", m.tr.ApprovalCursor, m.planApprovalOptions(it), m.planPermissionIdentity, m.planApprovalPending, m.info.AutoApprove)
+			}
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, approvalState, "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
 				useCached(i, it.Kind, cacheKey, cached)
 			} else {
@@ -3468,7 +3894,7 @@ func (m model) paintTranscriptBlock(block string) string {
 	}
 	lines := strings.Split(block, "\n")
 	for i, line := range lines {
-		lines[i] = m.paintRow(line, m.width)
+		lines[i] = m.paintRow(line, m.transcriptWidth())
 	}
 	return strings.Join(lines, "\n")
 }
@@ -3480,19 +3906,12 @@ func (m model) paintRow(line string, width int) string {
 	if width < 1 {
 		width = m.width
 	}
-	line = forceTrueBlackAfterReset(line)
+	line = m.theme.restoreCanvas(line)
 	w := lipgloss.Width(line)
 	if w < width {
-		line += ansiTrueBlackBG + strings.Repeat(" ", width-w)
+		line += m.theme.backgroundSGR() + strings.Repeat(" ", width-w)
 	}
-	return ansiTrueBlackBG + line + ansiDefaultBG
-}
-
-func forceTrueBlackAfterReset(s string) string {
-	s = strings.ReplaceAll(s, ansiReset, ansiReset+ansiTrueBlackBG)
-	// lipgloss v2 uses the short reset form \x1b[m — handle it too.
-	s = strings.ReplaceAll(s, ansiResetShort, ansiResetShort+ansiTrueBlackBG)
-	return s
+	return m.theme.backgroundSGR() + line + ansiDefaultBG
 }
 
 // renderThinkingBubble is the mid-turn sticky agent slot (replaces between tools).
@@ -4141,7 +4560,16 @@ func (m model) View() tea.View {
 }
 
 func (m model) viewContent() string {
+	if m.workspacePicker.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderWorkspacePicker(), lipgloss.WithWhitespaceStyle(m.theme.Background)))
+	}
+	if m.permissions.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderCodePermissions()))
+	}
 
+	if m.themePicker.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderThemePicker(), lipgloss.WithWhitespaceStyle(m.theme.Background)))
+	}
 	th := m.theme
 	sep := th.Border.Width(m.width).Render(strings.Repeat("─", max(1, m.width)))
 
@@ -4162,34 +4590,11 @@ func (m model) viewContent() string {
 		}
 	}
 
+	body := m.conversationBody(m.vp.Height() + m.stickyHeaderLines + m.compactPlanHeight())
 	main := lipgloss.JoinVertical(lipgloss.Left,
-		m.renderHeader(),
-		sep,
-		m.vp.View(),
-		sep,
-		m.renderLiveStatus(),
-		composerBlock,
-		m.renderFooterMeta(),
-		m.renderHints(),
+		m.renderHeader(), sep, body, sep, m.renderLiveStatus(), composerBlock,
+		m.renderFooterMeta(), m.renderHints(),
 	)
-
-	// If a sticky user header is active, insert it between the separator and
-	// the viewport so the user always sees which question the current response
-	// is answering, even when the original user bubble has scrolled out of view.
-	if stickyContent := m.stickyUserMessage(); stickyContent != "" && m.stickyHeaderLines > 0 {
-		stickyBlock := m.paintTranscriptBlock(padBlock(m.renderStickyUserHeader(stickyContent, contentWidth(m.width), m.stickyExpanded)))
-		main = lipgloss.JoinVertical(lipgloss.Left,
-			m.renderHeader(),
-			sep,
-			stickyBlock,
-			m.vp.View(),
-			sep,
-			m.renderLiveStatus(),
-			composerBlock,
-			m.renderFooterMeta(),
-			m.renderHints(),
-		)
-	}
 
 	// Overlays: sessions / model picker or approval card on top of the main chrome.
 	if m.fileViewer.open {
@@ -4197,21 +4602,23 @@ func (m model) viewContent() string {
 		return m.paintBackground(m.renderFileViewer())
 	}
 	if m.delegationDetail.open {
-		m.layoutDelegationDetail()
 		return m.paintBackground(m.renderDelegationDetail())
+	}
+	if m.bots.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderBotsOverlay(), lipgloss.WithWhitespaceChars(" ")))
 	}
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 	if m.modelPicker.open {
 		overlay := m.renderModelPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 
@@ -4219,7 +4626,7 @@ func (m model) viewContent() string {
 		overlay := m.renderWebSearchPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 	if m.skillsPicker.open {
@@ -4229,40 +4636,29 @@ func (m model) viewContent() string {
 		overlay := m.renderRollbackOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
+	}
+	if m.planPanel.open && m.planLayout() != planLayoutHidden {
+		return m.paintBackground(m.renderFullPlanProgress())
 	}
 	if m.tr.Awaiting {
 		it := m.approvalItem()
 		if it != nil && it.ApprovalKind == "plan" {
-			// The plan card itself owns the controls; keep the transcript visible
-			// and suppress the normal composer while it is pending.
-			planParts := []string{
-				m.renderHeader(),
-				sep,
+			if m.info.Mode == "code" {
+				return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
+					m.renderHeader(), sep, body, m.renderFooterMeta(), m.renderHints()))
 			}
-			if stickyContent := m.stickyUserMessage(); stickyContent != "" && m.stickyHeaderLines > 0 {
-				stickyBlock := m.paintTranscriptBlock(padBlock(m.renderStickyUserHeader(stickyContent, contentWidth(m.width), m.stickyExpanded)))
-				planParts = append(planParts, stickyBlock)
-			}
-			planParts = append(planParts, m.vp.View(), m.renderHints())
-			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left, planParts...))
+			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
+				m.renderHeader(), sep, body, m.renderHints()))
 		}
 		// Non-plan approvals keep the existing overlay behavior.
 		overlay := m.renderApprovalOverlay()
 		// The overlay replaces the composer area but may be taller; cap the
 		// viewport output so the total fits within the terminal height.
-		vpView := m.vp.View()
 		overlayH := strings.Count(overlay, "\n") + 1
 		chrome := 4 + overlayH // header + 2 seps + hints + overlay
-		maxVP := m.screenHeight() - chrome
-		if maxVP < 3 {
-			maxVP = 3
-		}
-		if vpLines := strings.Count(vpView, "\n") + 1; vpLines > maxVP {
-			lines := strings.SplitN(vpView, "\n", maxVP+1)
-			vpView = strings.Join(lines[:maxVP], "\n")
-		}
+		vpView := m.conversationBody(max(1, m.screenHeight()-chrome))
 		return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 			m.renderHeader(),
 			sep,
@@ -4285,12 +4681,12 @@ func (m model) paintBackground(s string) string {
 		paintH,
 		lipgloss.Left,
 		lipgloss.Top,
-		forceTrueBlackAfterReset(s),
+		m.theme.restoreCanvas(s),
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+		lipgloss.WithWhitespaceStyle(m.theme.Background),
 	)
 	placed = m.padPaintedHeight(placed, paintH)
-	return ansiTrueBlackBG + placed + ansiDefaultBG
+	return m.theme.backgroundSGR() + placed + ansiDefaultBG
 }
 
 func (m model) padPaintedHeight(s string, height int) string {
@@ -4298,7 +4694,7 @@ func (m model) padPaintedHeight(s string, height int) string {
 		if s != "" {
 			s += "\n"
 		}
-		s += ansiTrueBlackBG + strings.Repeat(" ", m.width)
+		s += m.theme.backgroundSGR() + strings.Repeat(" ", m.width)
 	}
 	return s
 }
@@ -4428,6 +4824,11 @@ func (m model) renderHeader() string {
 	centerPlain := ""
 	if m.tr != nil && m.tr.Title != "" {
 		centerPlain = m.tr.Title
+	}
+	if m.botSelected() {
+		centerPlain = m.botHeaderTitle()
+		rightPlain = m.botHeaderStatus()
+		rightW = lipgloss.Width(rightPlain)
 	}
 	centerW := lipgloss.Width(centerPlain)
 
@@ -4595,6 +4996,9 @@ func (m model) renderLiveStatus() string {
 	if m.err != "" {
 		return m.paintRow(th.Error.Render(m.err), m.width)
 	}
+	if label := m.verificationLabel(); label != "" {
+		return m.paintRow(th.Status.Render(m.spin.View()+" "+label), m.width)
+	}
 	if m.tr.Status != "" || m.tr.Streaming {
 		left := th.Status.Render(m.spin.View() + " " + first(m.tr.Status, "Working…"))
 		if m.timerActive() && !m.tr.Awaiting {
@@ -4755,19 +5159,24 @@ func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) str
 	case task.Status == "failed" && task.Error != "":
 		line = task.Error
 	case task.Status == "running" && len(task.Activity) > 0:
-		last := task.Activity[len(task.Activity)-1]
-		switch last.Type {
-		case "tool_call":
-			line = "→ " + delegationToolHint(last.ToolName, last.Args)
-		case "tool_result":
-			line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
-		case "text":
-			t := strings.TrimSpace(last.Text)
-			if idx := strings.IndexByte(t, '\n'); idx >= 0 {
-				t = t[:idx]
-			}
-			if t != "" {
-				line = "→ " + t
+		rows := projectDelegationActivity(task.Activity)
+		if len(rows) > 0 {
+			last := rows[len(rows)-1]
+			if last.step != nil {
+				line = "→ " + delegationToolHint(last.step.Name, last.step.Args)
+				if last.step.Status == "error" {
+					line += " failed"
+				} else if last.step.Status == "complete" {
+					line += " done"
+				}
+			} else {
+				t := strings.TrimSpace(last.text)
+				if idx := strings.IndexByte(t, '\n'); idx >= 0 {
+					t = t[:idx]
+				}
+				if t != "" {
+					line = "→ " + t
+				}
 			}
 		}
 	}
@@ -4940,6 +5349,7 @@ func (m model) fetchDelegationDetail() (tea.Model, tea.Cmd) {
 	m.delegationDetail.request = request
 	m.delegationDetail.loading = true
 	m.delegationDetail.err = ""
+	m.layoutDelegationDetail()
 	return m, func() tea.Msg {
 		a, err := cap.LoadDelegationDetail(m.ctx, task)
 		return delegationDetailLoadedMsg{request: request, activity: a, err: err}
@@ -4954,8 +5364,6 @@ func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 	w := max(20, m.width-4)
 	h := max(5, m.screenHeight()-4)
 	vp := viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
-	vp.SetContent(m.renderDelegationDetailContent(tasks[taskIdx], w))
-	vp.GotoBottom()
 	m.delegationDetail = delegationDetailState{
 		open:     true,
 		taskName: tasks[taskIdx].Name,
@@ -4963,6 +5371,7 @@ func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 		itemIdx:  itemIdx,
 		vp:       vp,
 	}
+	m.layoutDelegationDetail()
 	if len(tasks[taskIdx].Activity) == 0 || tasks[taskIdx].ChildSessionID != "" {
 		return m.fetchDelegationDetail()
 	}
@@ -4973,33 +5382,62 @@ func (m *model) layoutDelegationDetail() {
 	if !m.delegationDetail.open {
 		return
 	}
+	d := &m.delegationDetail
 	w := max(20, m.width-4)
-	h := max(5, m.screenHeight()-4)
-	m.delegationDetail.vp.SetWidth(w)
-	m.delegationDetail.vp.SetHeight(h)
-	if m.delegationDetail.loading {
-		m.delegationDetail.vp.SetContent("Loading attempt activity…")
+	headerHeight := lipgloss.Height(m.renderDelegationDetailHeader())
+	d.vp.SetWidth(w)
+	d.vp.SetHeight(max(1, m.screenHeight()-headerHeight-1))
+	if d.itemIdx < 0 || d.itemIdx >= len(m.tr.Items) || d.taskIdx < 0 || d.taskIdx >= len(m.tr.Items[d.itemIdx].DelegationTasks) {
 		return
 	}
-	if m.delegationDetail.err != "" {
-		m.delegationDetail.vp.SetContent("Could not load activity: " + m.delegationDetail.err + "\nPress r to Retry.")
+	task := m.tr.Items[d.itemIdx].DelegationTasks[d.taskIdx]
+	// Cache by activity identity and scalar presentation state, never by
+	// serializing potentially multi-megabyte tool results.
+	key := fmt.Sprintf("%d/%d/%t/%t/%s/%s/%d/%d/%p", w, d.tab, d.raw, d.loading, d.err, task.Status, task.Sequence, len(task.Activity), task.Activity)
+	if key == d.cacheKey {
 		return
 	}
-	// Refresh content from current task state.
-	if m.delegationDetail.itemIdx >= 0 && m.delegationDetail.itemIdx < len(m.tr.Items) {
-		tasks := m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks
-		if m.delegationDetail.taskIdx >= 0 && m.delegationDetail.taskIdx < len(tasks) {
-			atBottom := m.delegationDetail.vp.AtBottom()
-			m.delegationDetail.vp.SetContent(m.renderDelegationDetailContent(tasks[m.delegationDetail.taskIdx], w))
-			if atBottom {
-				m.delegationDetail.vp.GotoBottom()
-			}
-		}
+	d.cacheKey = key
+	offset := d.vp.YOffset()
+	var content string
+	if d.tab == delegationHandoffTab {
+		content = m.renderDelegationHandoff(task, w)
+	} else {
+		content = m.renderDelegationDetailContent(task, w)
 	}
+	if d.loading && len(task.Activity) == 0 {
+		content = "Loading attempt detail…\n\n" + content
+	}
+	if d.err != "" {
+		content = wrapPlain("Could not load detail: "+d.err+"\nPress r to Retry.", w) + "\n\n" + content
+	}
+	d.vp.SetContent(content)
+	d.vp.SetYOffset(offset)
 }
 
 func (m model) handleDelegationDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "end", "G":
+		m.delegationDetail.vp.GotoBottom()
+		return m, nil
+	case "home", "g":
+		m.delegationDetail.vp.GotoTop()
+		return m, nil
+	case "d":
+		m.delegationDetail.raw = !m.delegationDetail.raw
+		m.layoutDelegationDetail()
+		return m, nil
+	case "tab", "h":
+		d := &m.delegationDetail
+		d.offsets[d.tab] = d.vp.YOffset()
+		if d.tab == delegationActivityTab {
+			d.tab = delegationHandoffTab
+		} else {
+			d.tab = delegationActivityTab
+		}
+		m.layoutDelegationDetail()
+		d.vp.SetYOffset(d.offsets[d.tab])
+		return m, nil
 	case "r":
 		if !m.delegationDetail.loading {
 			return m.fetchDelegationDetail()
@@ -5040,19 +5478,41 @@ func (m model) renderDelegationDetail() string {
 }
 
 func (m model) renderDelegationDetailHeader() string {
-	th := m.theme
 	w := max(20, m.width)
-	name := m.delegationDetail.taskName
-	left := "⬡ " + name
-	right := "esc back · ↑↓ scroll"
-	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	d := m.delegationDetail
+	label := "⬡ " + d.taskName
+	if d.itemIdx >= 0 && d.itemIdx < len(m.tr.Items) && d.taskIdx >= 0 && d.taskIdx < len(m.tr.Items[d.itemIdx].DelegationTasks) {
+		task := m.tr.Items[d.itemIdx].DelegationTasks[d.taskIdx]
+		label += fmt.Sprintf(" · attempt %d · %s", max(1, task.Attempt), strings.ReplaceAll(task.Status, "_", " "))
 	}
-	return m.paintRow(th.Header.Render(left)+strings.Repeat(" ", gap)+th.Muted.Render(right), w)
+	if d.loading {
+		label += " · Loading"
+	}
+	if d.err != "" {
+		label += " · load failed (r Retry)"
+	}
+	tabs := "[Activity]  Handoff"
+	if d.tab == delegationHandoffTab {
+		tabs = "Activity  [Handoff]"
+	}
+	if d.raw {
+		tabs += " · output shown"
+	}
+	return m.theme.Header.Render(wrapPlain(label, w)) + "\n" + m.theme.Muted.Render(wrapPlain(tabs+" · tab/h switch · d output · r Retry · esc back · ↑↓ scroll", w))
 }
 
 func (m model) renderDelegationDetailContent(task events.DelegationTaskState, width int) string {
+	if task.Description == "" {
+		for _, a := range task.Activity {
+			if a.Type == "handoff" {
+				var h delegationHandoff
+				if json.Unmarshal([]byte(a.Text), &h) == nil && h.Version == 1 {
+					task.Description = h.EffectiveTask
+				}
+				break
+			}
+		}
+	}
 	th := m.theme
 	bodyWidth := width - 4
 	if bodyWidth < 20 {
@@ -5107,6 +5567,8 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 		statusIcon = th.Success.Render("✓")
 	case "failed":
 		statusIcon = th.Error.Render("✗")
+	case "queued", "interrupted", "cancelled":
+		statusIcon = th.Muted.Render("○")
 	default:
 		statusIcon = th.Brand.Render("●")
 	}
@@ -5136,84 +5598,16 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 			warning += ": " + task.Error
 		}
 		b.WriteString("  " + th.Error.Render("⚠ "+warning) + "\n")
-	} else if task.Status == "retrying" && task.Error != "" {
-		b.WriteString("  " + th.Muted.Render("Retry reason: "+task.Error) + "\n")
+	} else if task.Error != "" {
+		b.WriteString("  " + th.Error.Render(wrapPlain("Reason: "+task.Error, bodyWidth-2)) + "\n")
+	} else if task.Status == "queued" || task.Status == "waiting_on_model" {
+		b.WriteString(wrapPlain(delegationTaskStatusLine(task, 0), bodyWidth) + "\n")
 	}
 	b.WriteString("\n")
 
-	// Activity log — rendered in the same tool-fold format as the main thread's
-	// renderActivity: ToolStatusLabel + ToolDisplayName + ToolDetailBody for tool
-	// call/result pairs, and render.Markdown for text output.
-	if len(task.Activity) == 0 {
-		b.WriteString("  " + th.Muted.Italic(true).Render("No activity yet…") + "\n")
-		return b.String()
-	}
-
-	// Build ToolStep groups: pair each tool_call with its following tool_result
-	// (same tool name). Standalone text entries are rendered as markdown blocks.
-	consumed := make(map[int]bool)
-	i := 0
-	for i < len(task.Activity) {
-		if consumed[i] {
-			i++
-			continue
-		}
-		act := task.Activity[i]
-		switch act.Type {
-		case "tool_call":
-			// Look ahead for a matching tool_result.
-			step := render.ToolStep{
-				Name:   act.ToolName,
-				Args:   act.Args,
-				Status: "running",
-			}
-			for j := i + 1; j < len(task.Activity); j++ {
-				result := task.Activity[j]
-				if consumed[j] || result.Type != "tool_result" {
-					continue
-				}
-				match := act.CallID != "" && result.CallID == act.CallID
-				if act.CallID == "" && result.CallID == "" {
-					match = j == i+1 && result.ToolName == act.ToolName
-				}
-				if match {
-					step.Result = result.Result
-					step.Status = "complete"
-					consumed[j] = true
-					break
-				}
-			}
-			// Render using the same format as renderActivity expanded view.
-			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)
-			if step.Status == "running" {
-				b.WriteString(th.Activity.Width(bodyWidth).Render("  " + line))
-			} else {
-				b.WriteString(th.Muted.Width(bodyWidth).Render("  " + line))
-			}
-			b.WriteByte('\n')
-			if detail := render.ToolDetailBody(step, bodyWidth-4); detail != "" {
-				b.WriteString(th.Muted.Width(bodyWidth).Render("    " + detail))
-				b.WriteByte('\n')
-			}
-		case "tool_result":
-			// Orphan result (no preceding call in current pass) — render as completed tool.
-			step := render.ToolStep{Name: act.ToolName, Result: act.Result, Status: "complete"}
-			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)
-			b.WriteString(th.Muted.Width(bodyWidth).Render("  " + line))
-			b.WriteByte('\n')
-		case "text":
-			// Render text output as styled markdown, matching ItemAgent on the main thread.
-			md := render.Markdown(act.Text, bodyWidth, th.RenderStyles())
-			if md == "" {
-				md = th.Agent.Width(bodyWidth).Render(act.Text)
-			}
-			b.WriteString(md)
-			b.WriteString("\n\n")
-		}
-		i++
-	}
-
-	return padBlock(b.String())
+	// Activity and Handoff are intentionally separate: captured input is never model output.
+	b.WriteString(m.renderDelegationActivity(task, bodyWidth))
+	return padBlock(wrapDelegationStyled(b.String(), width-2*contentMarginX))
 }
 
 // summarizeToolArgs produces a compact one-line summary of tool arguments.
@@ -5357,6 +5751,15 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	if m.theme.NoColor {
 		return lipgloss.NewStyle()
 	}
+	if m.theme.CodeThemeID != "" {
+		if m.graphPlanMode || m.planMode {
+			return m.theme.Background.Foreground(m.theme.InputBorderPlan.GetBorderTopForeground())
+		}
+		if m.askMode {
+			return m.theme.AskBorder
+		}
+		return m.theme.Border
+	}
 	var c color.Color
 	if m.graphPlanMode {
 		c = lipgloss.Color("172") // amber — plan mode accent
@@ -5371,7 +5774,7 @@ func (m model) composerBorderStyle() lipgloss.Style {
 			c = lipgloss.Color("39") // platform uses cyan even in normal mode
 		}
 	}
-	return lipgloss.NewStyle().Foreground(c).Background(lipgloss.Color("#111416"))
+	return lipgloss.NewStyle().Foreground(c).Background(m.theme.Background.GetBackground())
 }
 
 // composerModeLabel returns the text shown in the composer bottom border.
@@ -5417,6 +5820,9 @@ func (m model) renderComposerBottomBorder(width int, label string, border lipglo
 			left = 1
 		}
 	}
+	if m.theme.CodeThemeID != "" && !m.theme.NoColor {
+		bg = bg.Foreground(border.GetForeground())
+	}
 	return border.Render("╰"+strings.Repeat("─", left)) +
 		bg.Render(text) +
 		border.Render(strings.Repeat("─", right)+"╯")
@@ -5440,9 +5846,24 @@ func (m model) renderFooterMeta() string {
 	}
 	left := modelFooterText(provider, modelName)
 	folder := footerWorkDirText(m.info.WorkingDir, m.info.GitBranch)
+	if m.info.Mode == "code" && m.info.WorkspaceMode != "" {
+		folder += " · " + string(m.info.WorkspaceMode)
+	}
 	right := ""
-	if m.info.AutoApprove {
+	if m.info.AutoApprove && m.info.Mode != "code" {
 		right = "auto-approve"
+	}
+	if permissions := m.codePermissionFooter(); permissions != "" {
+		if right != "" {
+			right += " · "
+		}
+		right += permissions
+	}
+	if m.info.Mode == "code" && right != "" {
+		if m.width <= lipgloss.Width(right) {
+			return m.paintRow(th.FooterMeta.Render(truncateToWidth(right, max(0, m.width))), m.width)
+		}
+		left = truncateToWidth(left, max(0, m.width-lipgloss.Width(right)-1))
 	}
 	leftR := th.FooterMeta.Render(left)
 	leftW := lipgloss.Width(leftR)
@@ -5539,6 +5960,9 @@ func (m model) renderHints() string {
 	th := m.theme
 	if m.tr.Awaiting {
 		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+			if m.info.Mode == "code" {
+				return th.Hint.Render("Enter select  ·  1–6 choose  ·  y safe run  ·  r changes  ·  Esc decline")
+			}
 			return th.Hint.Render("enter implement  ·  r request changes  ·  n/esc decline  ·  ↑↓ choose")
 		}
 		return th.Hint.Render("y approve  ·  n deny  ·  1/2 select  ·  esc deny")

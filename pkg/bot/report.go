@@ -1,0 +1,188 @@
+package bot
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/SAP/astonish/pkg/store"
+)
+
+// QualitySummary is shared by report publication and the remote terminal
+// overview. Missing/unknown/incomplete evidence never becomes a green pass.
+func QualitySummary(q *store.BotQualityReport) string {
+	if q == nil {
+		return "Not assessed"
+	}
+	if q.SchemaVersion != store.BotWorkSchemaVersion {
+		return "Assessment unavailable"
+	}
+	if q.Outcome != store.BotWorkAccepted {
+		return "Requirements remain unmet or unverified"
+	}
+	if len(q.Criteria) == 0 || len(q.Limitations) > 0 {
+		return "Requirements remain unmet or unverified"
+	}
+	for _, c := range q.Criteria {
+		if c.Verdict != store.BotCriterionSatisfied || len(c.EvidenceRefs) == 0 || (c.Method != store.BotAssessmentModel && c.Method != store.BotAssessmentMechanical) {
+			return "Requirements remain unmet or unverified"
+		}
+	}
+	return fmt.Sprintf("Requirements checked · %d correction attempts. Model assessments are judgments, not guarantees.", q.Repairs)
+}
+
+// WorkSummary labels agent judgment without certifying requirements or delivery.
+func WorkSummary(w *store.BotWorkProjection) string {
+	if w == nil {
+		return "No work result yet"
+	}
+	if w.SchemaVersion != store.BotAgentWorkSchemaVersion || w.Protocol != store.BotWorkProtocolAgentLedV1 {
+		return "Work details unavailable"
+	}
+	switch w.Disposition {
+	case store.AgentWorkComplete:
+		return "Completed by agent"
+	case store.AgentWorkAnswered:
+		return "Answer provided"
+	case store.AgentWorkPartial:
+		return "Partial answer"
+	case store.AgentWorkBlocked:
+		return "Blocked"
+	}
+	if w.Phase == store.BotWorkInterrupted {
+		return "Interrupted"
+	}
+	return "Work in progress"
+}
+
+// RenderWorkDetails consumes only the public projection; private notes never enter it.
+func RenderWorkDetails(w *store.BotWorkProjection) string {
+	var b strings.Builder
+	b.WriteString(WorkSummary(w))
+	if w == nil || w.SchemaVersion != store.BotAgentWorkSchemaVersion || w.Protocol != store.BotWorkProtocolAgentLedV1 {
+		return b.String()
+	}
+	b.WriteString("\nAgent-reported progress, not independent verification. Delivery and observed effects are separate.")
+	for _, item := range w.Items {
+		status := strings.ReplaceAll(string(item.Status), "_", " ")
+		if item.Status == store.BotWorkItemCompleted {
+			status = "Completed by agent"
+		}
+		fmt.Fprintf(&b, "\n%s: %s", status, item.Summary)
+		if item.Reason != "" {
+			fmt.Fprintf(&b, " — %s", item.Reason)
+		}
+	}
+	if len(w.Remaining) > 0 {
+		b.WriteString("\nRemaining work")
+	}
+	for _, item := range w.Remaining {
+		continuation := "Requires a new owner request; no automatic continuation."
+		switch item.Continuation {
+		case store.BotWorkContinueExistingSchedule:
+			continuation = "Linked to an existing schedule; timing is not provided here."
+		case store.BotWorkContinueExistingApproval:
+			continuation = "Requires the linked approval."
+		}
+		fmt.Fprintf(&b, "\n%s — %s. %s", item.Summary, item.Reason, continuation)
+	}
+	for _, check := range w.Checks {
+		label := "Check unavailable"
+		if check.Status == store.BotWorkCheckReturned {
+			label = "Feedback received"
+			if check.Kind == store.BotWorkCheckMechanicalObservation {
+				label = "Mechanical observation"
+			}
+		}
+		fmt.Fprintf(&b, "\n%s: %s", label, check.Summary)
+	}
+	return b.String()
+}
+
+// RenderReport is a concise report projection, not the authority for Home speech.
+// Home additionally requires private producer provenance or a completed presentation.
+// System fallbacks and operation receipts never become Employee speech here.
+func RenderReport(run store.BotRun) string {
+	if run.Report.ValidateEmployeeMessageIntegrity(run.Status) == nil {
+		switch run.Report.EmployeeMessage.Origin {
+		case store.BotEmployeeMessageAgent, store.BotEmployeeMessageAssessed, store.BotEmployeeMessageModel:
+			return run.Report.EmployeeMessage.Text + "\n"
+		}
+	}
+	// Neither legacy summaries nor malformed envelopes are public authority.
+	// Keep historical diagnostic bytes intact without manufacturing a new voice.
+	return "Employee response unavailable.\n"
+}
+
+// RenderDiagnosticReport is the explicit detailed representation, not Home prose.
+func RenderDiagnosticReport(run store.BotRun) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Run report — %s\n\n%s\n", run.Status, strings.TrimSpace(run.Report.Summary))
+	if q := run.Report.Quality; q != nil {
+		fmt.Fprintf(&b, "\n### Quality assessment\n%s\n", QualitySummary(q))
+		if q.SchemaVersion == store.BotWorkSchemaVersion {
+			for _, c := range q.Criteria {
+				method := "Assessment method unavailable"
+				if c.Method == store.BotAssessmentModel {
+					method = "Model assessment"
+				}
+				if c.Method == store.BotAssessmentMechanical {
+					method = "Mechanical observation"
+				}
+				fmt.Fprintf(&b, "- %s: %s — %s (%s)\n", c.CriterionID, c.Verdict, c.Explanation, method)
+				if len(c.EvidenceRefs) > 0 {
+					fmt.Fprintf(&b, "  Evidence: %s\n", strings.Join(c.EvidenceRefs, ", "))
+				}
+			}
+			for _, limitation := range q.Limitations {
+				fmt.Fprintf(&b, "- Unresolved: %s\n", limitation)
+			}
+		}
+	}
+	for _, section := range []struct {
+		name     string
+		evidence []store.BotEvidence
+	}{{"Changed", run.Report.Changed}, {"Unchanged", run.Report.Unchanged}} {
+		if len(section.evidence) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\n### %s\n", section.name)
+		for _, e := range section.evidence {
+			fmt.Fprintf(&b, "- %s", e.Summary)
+			if e.Source != "" {
+				fmt.Fprintf(&b, " (source: %s)", e.Source)
+			}
+			b.WriteByte('\n')
+		}
+	}
+	if len(run.Report.Unverified) > 0 {
+		b.WriteString("\n### Unverified\n")
+		for _, s := range run.Report.Unverified {
+			fmt.Fprintf(&b, "- %s\n", s)
+		}
+	}
+	if len(run.Report.Artifacts) > 0 {
+		b.WriteString("\n### Artifacts\n")
+		for _, a := range run.Report.Artifacts {
+			fmt.Fprintf(&b, "- %s: %s (home %s; sha256 %s)\n", a.Title, a.RelativePath, a.HomeID, a.SHA256)
+		}
+	}
+	if len(run.Report.NeedsApproval) > 0 {
+		b.WriteString("\n### Needs approval\n")
+		for _, id := range run.Report.NeedsApproval {
+			fmt.Fprintf(&b, "- %s\n", id)
+		}
+	}
+	if failure := run.Report.Failure; failure != nil && strings.TrimSpace(failure.TechnicalDetails) != "" {
+		b.WriteString("\n### Technical details\n\n")
+		// Indentation keeps native markdown fences inert.
+		for _, line := range strings.Split(strings.ReplaceAll(failure.TechnicalDetails, "\r", ""), "\n") {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	}
+	if run.Report.NextRunAt != nil {
+		fmt.Fprintf(&b, "\nNext run: %s\n", run.Report.NextRunAt.UTC().Format(time.RFC3339))
+	}
+	fmt.Fprintf(&b, "\nRun: %s\n", run.ID)
+	return b.String()
+}

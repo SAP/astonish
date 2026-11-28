@@ -21,6 +21,8 @@ type SessionEvent struct {
 	ID int64 `json:"id,omitempty"`
 	// SessionID holds the value of the "session_id" field.
 	SessionID string `json:"session_id,omitempty"`
+	// EventID holds the value of the "event_id" field.
+	EventID *string `json:"event_id,omitempty"`
 	// EventData holds the value of the "event_data" field.
 	EventData map[string]interface{} `json:"event_data,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
@@ -60,7 +62,7 @@ func (*SessionEvent) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case sessionevent.FieldID:
 			values[i] = new(sql.NullInt64)
-		case sessionevent.FieldSessionID:
+		case sessionevent.FieldSessionID, sessionevent.FieldEventID:
 			values[i] = new(sql.NullString)
 		case sessionevent.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -90,6 +92,13 @@ func (_m *SessionEvent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field session_id", values[i])
 			} else if value.Valid {
 				_m.SessionID = value.String
+			}
+		case sessionevent.FieldEventID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field event_id", values[i])
+			} else if value.Valid {
+				_m.EventID = new(string)
+				*_m.EventID = value.String
 			}
 		case sessionevent.FieldEventData:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -148,6 +157,11 @@ func (_m *SessionEvent) String() string {
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
 	builder.WriteString("session_id=")
 	builder.WriteString(_m.SessionID)
+	builder.WriteString(", ")
+	if v := _m.EventID; v != nil {
+		builder.WriteString("event_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	builder.WriteString("event_data=")
 	builder.WriteString(fmt.Sprintf("%v", _m.EventData))

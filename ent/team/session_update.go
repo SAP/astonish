@@ -52,6 +52,74 @@ func (_u *SessionUpdate) ClearUserID() *SessionUpdate {
 	return _u
 }
 
+// SetBotID sets the "bot_id" field.
+func (_u *SessionUpdate) SetBotID(v uuid.UUID) *SessionUpdate {
+	_u.mutation.SetBotID(v)
+	return _u
+}
+
+// SetNillableBotID sets the "bot_id" field if the given value is not nil.
+func (_u *SessionUpdate) SetNillableBotID(v *uuid.UUID) *SessionUpdate {
+	if v != nil {
+		_u.SetBotID(*v)
+	}
+	return _u
+}
+
+// ClearBotID clears the value of the "bot_id" field.
+func (_u *SessionUpdate) ClearBotID() *SessionUpdate {
+	_u.mutation.ClearBotID()
+	return _u
+}
+
+// SetBotRunID sets the "bot_run_id" field.
+func (_u *SessionUpdate) SetBotRunID(v uuid.UUID) *SessionUpdate {
+	_u.mutation.SetBotRunID(v)
+	return _u
+}
+
+// SetNillableBotRunID sets the "bot_run_id" field if the given value is not nil.
+func (_u *SessionUpdate) SetNillableBotRunID(v *uuid.UUID) *SessionUpdate {
+	if v != nil {
+		_u.SetBotRunID(*v)
+	}
+	return _u
+}
+
+// ClearBotRunID clears the value of the "bot_run_id" field.
+func (_u *SessionUpdate) ClearBotRunID() *SessionUpdate {
+	_u.mutation.ClearBotRunID()
+	return _u
+}
+
+// SetPurpose sets the "purpose" field.
+func (_u *SessionUpdate) SetPurpose(v session.Purpose) *SessionUpdate {
+	_u.mutation.SetPurpose(v)
+	return _u
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_u *SessionUpdate) SetNillablePurpose(v *session.Purpose) *SessionUpdate {
+	if v != nil {
+		_u.SetPurpose(*v)
+	}
+	return _u
+}
+
+// SetRetention sets the "retention" field.
+func (_u *SessionUpdate) SetRetention(v session.Retention) *SessionUpdate {
+	_u.mutation.SetRetention(v)
+	return _u
+}
+
+// SetNillableRetention sets the "retention" field if the given value is not nil.
+func (_u *SessionUpdate) SetNillableRetention(v *session.Retention) *SessionUpdate {
+	if v != nil {
+		_u.SetRetention(*v)
+	}
+	return _u
+}
+
 // SetTitle sets the "title" field.
 func (_u *SessionUpdate) SetTitle(v string) *SessionUpdate {
 	_u.mutation.SetTitle(v)
@@ -418,7 +486,25 @@ func (_u *SessionUpdate) defaults() {
 	}
 }
 
+// check runs all checks and user-defined validators on the builder.
+func (_u *SessionUpdate) check() error {
+	if v, ok := _u.mutation.Purpose(); ok {
+		if err := session.PurposeValidator(v); err != nil {
+			return &ValidationError{Name: "purpose", err: fmt.Errorf(`team: validator failed for field "Session.purpose": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Retention(); ok {
+		if err := session.RetentionValidator(v); err != nil {
+			return &ValidationError{Name: "retention", err: fmt.Errorf(`team: validator failed for field "Session.retention": %w`, err)}
+		}
+	}
+	return nil
+}
+
 func (_u *SessionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
+	if err := _u.check(); err != nil {
+		return _node, err
+	}
 	_spec := sqlgraph.NewUpdateSpec(session.Table, session.Columns, sqlgraph.NewFieldSpec(session.FieldID, field.TypeString))
 	if ps := _u.mutation.predicates; len(ps) > 0 {
 		_spec.Predicate = func(selector *sql.Selector) {
@@ -432,6 +518,24 @@ func (_u *SessionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.UserIDCleared() {
 		_spec.ClearField(session.FieldUserID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BotID(); ok {
+		_spec.SetField(session.FieldBotID, field.TypeUUID, value)
+	}
+	if _u.mutation.BotIDCleared() {
+		_spec.ClearField(session.FieldBotID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BotRunID(); ok {
+		_spec.SetField(session.FieldBotRunID, field.TypeUUID, value)
+	}
+	if _u.mutation.BotRunIDCleared() {
+		_spec.ClearField(session.FieldBotRunID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.Purpose(); ok {
+		_spec.SetField(session.FieldPurpose, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.Retention(); ok {
+		_spec.SetField(session.FieldRetention, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.Title(); ok {
 		_spec.SetField(session.FieldTitle, field.TypeString, value)
@@ -668,6 +772,74 @@ func (_u *SessionUpdateOne) SetNillableUserID(v *uuid.UUID) *SessionUpdateOne {
 // ClearUserID clears the value of the "user_id" field.
 func (_u *SessionUpdateOne) ClearUserID() *SessionUpdateOne {
 	_u.mutation.ClearUserID()
+	return _u
+}
+
+// SetBotID sets the "bot_id" field.
+func (_u *SessionUpdateOne) SetBotID(v uuid.UUID) *SessionUpdateOne {
+	_u.mutation.SetBotID(v)
+	return _u
+}
+
+// SetNillableBotID sets the "bot_id" field if the given value is not nil.
+func (_u *SessionUpdateOne) SetNillableBotID(v *uuid.UUID) *SessionUpdateOne {
+	if v != nil {
+		_u.SetBotID(*v)
+	}
+	return _u
+}
+
+// ClearBotID clears the value of the "bot_id" field.
+func (_u *SessionUpdateOne) ClearBotID() *SessionUpdateOne {
+	_u.mutation.ClearBotID()
+	return _u
+}
+
+// SetBotRunID sets the "bot_run_id" field.
+func (_u *SessionUpdateOne) SetBotRunID(v uuid.UUID) *SessionUpdateOne {
+	_u.mutation.SetBotRunID(v)
+	return _u
+}
+
+// SetNillableBotRunID sets the "bot_run_id" field if the given value is not nil.
+func (_u *SessionUpdateOne) SetNillableBotRunID(v *uuid.UUID) *SessionUpdateOne {
+	if v != nil {
+		_u.SetBotRunID(*v)
+	}
+	return _u
+}
+
+// ClearBotRunID clears the value of the "bot_run_id" field.
+func (_u *SessionUpdateOne) ClearBotRunID() *SessionUpdateOne {
+	_u.mutation.ClearBotRunID()
+	return _u
+}
+
+// SetPurpose sets the "purpose" field.
+func (_u *SessionUpdateOne) SetPurpose(v session.Purpose) *SessionUpdateOne {
+	_u.mutation.SetPurpose(v)
+	return _u
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_u *SessionUpdateOne) SetNillablePurpose(v *session.Purpose) *SessionUpdateOne {
+	if v != nil {
+		_u.SetPurpose(*v)
+	}
+	return _u
+}
+
+// SetRetention sets the "retention" field.
+func (_u *SessionUpdateOne) SetRetention(v session.Retention) *SessionUpdateOne {
+	_u.mutation.SetRetention(v)
+	return _u
+}
+
+// SetNillableRetention sets the "retention" field if the given value is not nil.
+func (_u *SessionUpdateOne) SetNillableRetention(v *session.Retention) *SessionUpdateOne {
+	if v != nil {
+		_u.SetRetention(*v)
+	}
 	return _u
 }
 
@@ -1050,7 +1222,25 @@ func (_u *SessionUpdateOne) defaults() {
 	}
 }
 
+// check runs all checks and user-defined validators on the builder.
+func (_u *SessionUpdateOne) check() error {
+	if v, ok := _u.mutation.Purpose(); ok {
+		if err := session.PurposeValidator(v); err != nil {
+			return &ValidationError{Name: "purpose", err: fmt.Errorf(`team: validator failed for field "Session.purpose": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Retention(); ok {
+		if err := session.RetentionValidator(v); err != nil {
+			return &ValidationError{Name: "retention", err: fmt.Errorf(`team: validator failed for field "Session.retention": %w`, err)}
+		}
+	}
+	return nil
+}
+
 func (_u *SessionUpdateOne) sqlSave(ctx context.Context) (_node *Session, err error) {
+	if err := _u.check(); err != nil {
+		return _node, err
+	}
 	_spec := sqlgraph.NewUpdateSpec(session.Table, session.Columns, sqlgraph.NewFieldSpec(session.FieldID, field.TypeString))
 	id, ok := _u.mutation.ID()
 	if !ok {
@@ -1081,6 +1271,24 @@ func (_u *SessionUpdateOne) sqlSave(ctx context.Context) (_node *Session, err er
 	}
 	if _u.mutation.UserIDCleared() {
 		_spec.ClearField(session.FieldUserID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BotID(); ok {
+		_spec.SetField(session.FieldBotID, field.TypeUUID, value)
+	}
+	if _u.mutation.BotIDCleared() {
+		_spec.ClearField(session.FieldBotID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BotRunID(); ok {
+		_spec.SetField(session.FieldBotRunID, field.TypeUUID, value)
+	}
+	if _u.mutation.BotRunIDCleared() {
+		_spec.ClearField(session.FieldBotRunID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.Purpose(); ok {
+		_spec.SetField(session.FieldPurpose, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.Retention(); ok {
+		_spec.SetField(session.FieldRetention, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.Title(); ok {
 		_spec.SetField(session.FieldTitle, field.TypeString, value)

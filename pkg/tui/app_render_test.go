@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 
 	"github.com/SAP/astonish/pkg/client"
 	"strings"
@@ -15,9 +16,11 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
+	"github.com/SAP/astonish/pkg/tui/render"
 )
 
 func TestDelegationDetailPairsInterleavedCallIDs(t *testing.T) {
@@ -1354,5 +1357,228 @@ func TestDelegationProgramAcceptance(t *testing.T) {
 	task := got.tr.Items[0].DelegationTasks[0]
 	if len(task.Activity) != 1 || task.Activity[0].Text != "persisted child output" {
 		t.Fatalf("real input did not load HTTP detail: %+v", task)
+	}
+}
+
+func TestCodeBlueGrayCanvasContract(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	th := DefaultTheme()
+	r, g, b, _ := th.Background.GetBackground().RGBA()
+	if r>>8 != 16 || g>>8 != 25 || b>>8 != 34 {
+		t.Fatalf("Code canvas = %d,%d,%d, want 16,25,34", r>>8, g>>8, b>>8)
+	}
+}
+
+func TestCodeThemeLiveRestoredStates(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		noColor := ""
+		if plain {
+			noColor = "1"
+		}
+		t.Setenv("NO_COLOR", noColor)
+		for _, source := range []string{"live", "restored"} {
+			for _, state := range []string{"empty", "loading", "error", "populated"} {
+				t.Run(fmt.Sprintf("%s/%s/plain=%v", source, state, plain), func(t *testing.T) {
+					m := newModel(context.Background(), Config{Backend: staticBackend{info: backend.Info{Mode: "code"}}, Width: 120, Height: 40})
+					defer m.cancel()
+					m.ready = true
+					var sequence []events.Event
+					switch state {
+					case "loading":
+						sequence = []events.Event{events.NewUser("Load reference")}
+					case "error":
+						sequence = []events.Event{events.NewUser("Load reference"), events.NewError("REFERENCE-ERROR")}
+					case "populated":
+						sequence = []events.Event{events.NewUser("Load reference"), events.NewText("FIRST-RESPONSE\n\n| ID | Evidence |\n| --- | --- |\n| café | TABLE-END |"), events.NewToolCall("read_file", "reference", map[string]any{"path": "reference.go"}), events.NewToolResult("read_file", "reference", "reference body"), events.NewText("LAST-RESPONSE"), events.NewDone()}
+					}
+					if source == "restored" {
+						var history []events.HistoryMsg
+						for i := range sequence {
+							ev := sequence[i]
+							kind := string(ev.Kind)
+							if ev.Kind == events.KindText {
+								kind = "agent"
+							}
+							if ev.Kind == events.KindError {
+								history = append(history, events.HistoryMsg{Delegation: &sequence[i]})
+							} else if ev.Kind != events.KindDone {
+								history = append(history, events.HistoryMsg{Kind: kind, Text: ev.Text, ToolName: ev.ToolName, ToolID: ev.ToolID, Args: ev.Args, Result: ev.Result})
+							}
+						}
+						m.tr.LoadHistory(history)
+					} else {
+						for _, ev := range sequence {
+							m.tr.Apply(ev)
+						}
+					}
+					// Loading is transient, not persisted: start a new operation
+					// on both a live and a restored transcript.
+					if state == "loading" {
+						m.tr.Streaming = true
+						m.tr.Status = "Loading reference…"
+						if !strings.Contains(stripANSI(m.renderLiveStatus()), "Loading reference") {
+							t.Fatal("loading status missing")
+						}
+					}
+					m.layout()
+					m.refreshViewport()
+					out := m.View().Content
+					text := stripANSI(out)
+					if plain && (strings.Contains(out, "\x1b[38;") || strings.Contains(out, "\x1b[48;")) {
+						t.Fatal("NO_COLOR emitted foreground/background colors")
+					}
+					if m.theme.CodeThemeID != CodeThemeBlueGray {
+						t.Fatal("state lost named palette")
+					}
+					switch state {
+					case "empty":
+						if !strings.Contains(text, "Ready when you are.") {
+							t.Fatalf("empty welcome missing: %s", text)
+						}
+					case "error":
+						if !strings.Contains(text, "REFERENCE-ERROR") {
+							t.Fatalf("error missing: %s", text)
+						}
+					case "populated":
+						first, last := strings.Index(text, "FIRST-RESPONSE"), strings.Index(text, "LAST-RESPONSE")
+						if first < 0 || last <= first || !strings.Contains(text, "TABLE-END") || !strings.Contains(text, "┬") {
+							t.Fatalf("chronology or framed table missing: %s", text)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodeThemePaletteOnlyInvariants(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Run(fmt.Sprintf("plain=%v", plain), func(t *testing.T) {
+			t.Setenv("NO_COLOR", "")
+			if plain {
+				t.Setenv("NO_COLOR", "1")
+			}
+			a, _ := ResolveCodeTheme(CodeThemeBlueGray)
+			b, err := ResolveCodeTheme(CodeThemeDarkOrange)
+			if err != nil || b.CodeThemeID != CodeThemeDarkOrange || b.NoColor != plain {
+				t.Fatalf("dark palette: %+v %v", b, err)
+			}
+			av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
+			for i := 0; i < av.NumField(); i++ {
+				x, ok := av.Field(i).Interface().(lipgloss.Style)
+				if !ok {
+					continue
+				}
+				y := bv.Field(i).Interface().(lipgloss.Style)
+				name := av.Type().Field(i).Name
+				if x.GetBold() != y.GetBold() || x.GetItalic() != y.GetItalic() || x.GetUnderline() != y.GetUnderline() || x.GetStrikethrough() != y.GetStrikethrough() || x.GetReverse() != y.GetReverse() || x.GetBlink() != y.GetBlink() || x.GetFaint() != y.GetFaint() || x.GetAlignHorizontal() != y.GetAlignHorizontal() || x.GetAlignVertical() != y.GetAlignVertical() || x.GetWidth() != y.GetWidth() || x.GetHeight() != y.GetHeight() || x.GetMaxWidth() != y.GetMaxWidth() || x.GetMaxHeight() != y.GetMaxHeight() || x.GetPaddingTop() != y.GetPaddingTop() || x.GetPaddingRight() != y.GetPaddingRight() || x.GetPaddingBottom() != y.GetPaddingBottom() || x.GetPaddingLeft() != y.GetPaddingLeft() || x.GetMarginTop() != y.GetMarginTop() || x.GetMarginRight() != y.GetMarginRight() || x.GetMarginBottom() != y.GetMarginBottom() || x.GetMarginLeft() != y.GetMarginLeft() || x.GetBorderStyle() != y.GetBorderStyle() || x.GetBorderTop() != y.GetBorderTop() || x.GetBorderRight() != y.GetBorderRight() || x.GetBorderBottom() != y.GetBorderBottom() || x.GetBorderLeft() != y.GetBorderLeft() {
+					t.Errorf("noncolor style attributes changed: %s", name)
+				}
+				if stripANSI(x.Render("sample 界\nsecond row")) != stripANSI(y.Render("sample 界\nsecond row")) {
+					t.Errorf("style geometry changed: %s", name)
+				}
+			}
+			if a.TableLayout != b.TableLayout {
+				t.Fatal("table layout differs")
+			}
+			if !plain {
+				for _, token := range append(a.SyntaxStyle.Types(), b.SyntaxStyle.Types()...) {
+					x, y := a.SyntaxStyle.Get(token), b.SyntaxStyle.Get(token)
+					if x.Bold != y.Bold || x.Italic != y.Italic || x.Underline != y.Underline {
+						t.Fatalf("syntax weights differ: %v", token)
+					}
+				}
+				if b.Background.GetBackground() != lipgloss.Color("#111416") || b.Card.GetBackground() != lipgloss.Color("#1a1e21") || b.Border.GetForeground() != lipgloss.Color("#444444") || b.Text.GetForeground() != lipgloss.Color("#d0d0d0") || b.Muted.GetForeground() != lipgloss.Color("#8a8a8a") || b.AccentColor != lipgloss.Color("#ff8700") || b.Success.GetForeground() != lipgloss.Color("#87d787") || b.Approval.GetForeground() != lipgloss.Color("#af8700") || b.Danger.GetForeground() != lipgloss.Color("#ff5f5f") {
+					t.Fatal("dark orange roles changed")
+				}
+			}
+			for _, width := range []int{24, 80, 140} {
+				for _, src := range []string{"# Heading\n\n**strong** and *italic* prose 界.", "| ID | Notes |\n| --- | --- |\n| one | **body** long wrapping content |", "```go\n// comment\nfunc main() { println(\"ok\", 12) }\n```", "```diff\n-old\n+new\n```"} {
+					x, y := render.Markdown(src, width, a.RenderStyles()), render.Markdown(src, width, b.RenderStyles())
+					if stripANSI(x) != stripANSI(y) || lipgloss.Width(x) != lipgloss.Width(y) || lipgloss.Height(x) != lipgloss.Height(y) {
+						t.Fatalf("renderer geometry changed at %d:\n%q\n%q", width, x, y)
+					}
+					if plain && (strings.Contains(x, "\x1b[38;") || strings.Contains(x, "\x1b[48;") || strings.Contains(y, "\x1b[38;") || strings.Contains(y, "\x1b[48;")) {
+						t.Fatal("NO_COLOR emitted palette colors")
+					}
+				}
+				ma, mb := model{theme: a, width: width}, model{theme: b, width: width}
+				if stripANSI(ma.renderUserBubble("draft 界", false, width)) != stripANSI(mb.renderUserBubble("draft 界", false, width)) {
+					t.Fatal("user bubble geometry differs")
+				}
+			}
+		})
+	}
+	catalog := BuiltinCodeThemes()
+	if len(catalog) != 10 || catalog[0].ID != CodeThemeBlueGray || !catalog[0].Default || catalog[0].Label != "Blue-gray" || catalog[1].ID != CodeThemeDarkOrange || catalog[1].Default || catalog[1].Label != "Dark orange" {
+		t.Fatalf("catalog: %+v", catalog)
+	}
+	catalog[0].Label = "mutated"
+	if BuiltinCodeThemes()[0].Label != "Blue-gray" {
+		t.Fatal("catalog mutable globally")
+	}
+	if th, err := ResolveCodeTheme("default"); err != nil || th.CodeThemeID != CodeThemeBlueGray {
+		t.Fatal("default alias")
+	}
+	if _, err := ResolveCodeTheme("unknown"); err == nil || !strings.Contains(err.Error(), "blue-gray, dark-orange") {
+		t.Fatal("missing supported IDs")
+	}
+}
+
+func TestCodeThemeResolverRolesAndResetRepair(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	for _, id := range []CodeThemeID{"", CodeThemeBlueGray} {
+		th, err := ResolveCodeTheme(id)
+		if err != nil || th.CodeThemeID != CodeThemeBlueGray {
+			t.Fatalf("resolve %q: %v", id, err)
+		}
+		st := th.RenderStyles()
+		for _, heading := range []lipgloss.Style{th.Header, th.PlanHeader, th.PlanTitle, st.Heading, st.Heading1, st.Heading2, st.Heading3} {
+			if heading.GetForeground() != lipgloss.Color("#ff8700") {
+				t.Errorf("prominent Code heading foreground = %v, want orange", heading.GetForeground())
+			}
+		}
+		for _, accent := range []lipgloss.Style{th.Brand, th.Number, th.Activity, th.Spinner, th.PlanSection, st.TableHeader, st.CodeHeader} {
+			if accent.GetForeground() != lipgloss.Color("#ff8700") {
+				t.Errorf("Code accent foreground = %v, want orange", accent.GetForeground())
+			}
+		}
+		if th.Text.GetForeground() != lipgloss.Color("#e2edf5") || th.Muted.GetForeground() != lipgloss.Color("#9cafbf") {
+			t.Error("body/metadata colors changed")
+		}
+		if st.TableLayout != render.TableLayoutFramed || st.SyntaxStyle == nil {
+			t.Fatal("renderer lost theme roles")
+		}
+		for _, token := range []chroma.TokenType{chroma.Keyword, chroma.NameFunction, chroma.Operator} {
+			if got := st.SyntaxStyle.Get(token).Colour.String(); got != "#ff8700" {
+				t.Errorf("Code syntax %v = %s, want orange", token, got)
+			}
+		}
+		if st.SyntaxStyle.Get(chroma.LiteralString).Colour.String() != "#38df92" || st.SyntaxStyle.Get(chroma.Error).Colour.String() != "#ff7f87" {
+			t.Error("semantic syntax string/error colors changed")
+		}
+		copy := th
+		copy.Text = copy.Text.Bold(true)
+		if th.Text.GetBold() {
+			t.Fatal("theme copy mutated original")
+		}
+		band := "\x1b[48;2;26;51;32m"
+		card := "\x1b[48;2;24;35;46m"
+		got := th.restoreCanvas("a" + ansiReset + "b" + ansiResetShort + "c" + card + "card" + band + "diff")
+		if !strings.Contains(got, ansiReset+th.backgroundSGR()) || !strings.Contains(got, ansiResetShort+th.backgroundSGR()) || !strings.Contains(got, card+"card"+band+"diff") {
+			t.Fatalf("reset/band repair: %q", got)
+		}
+	}
+	if _, err := ResolveCodeTheme("orange"); err == nil {
+		t.Fatal("unknown palette accepted")
+	}
+	if PlatformTheme().RenderStyles().TableLayout != render.TableLayoutLegacy {
+		t.Fatal("Platform table layout changed")
+	}
+	t.Setenv("NO_COLOR", "1")
+	th := DefaultTheme()
+	out := render.Markdown("| ID | Notes |\n| --- | --- |\n| one | **body** |", 60, th.RenderStyles())
+	if !strings.Contains(out, "┌") || strings.Contains(out, "\x1b") || th.backgroundSGR() != "" {
+		t.Fatalf("NO_COLOR frame: %q", out)
 	}
 }
